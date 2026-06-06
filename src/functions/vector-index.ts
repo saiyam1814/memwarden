@@ -1,0 +1,179 @@
+//
+// Flat brute-force cosine vector index. Ported verbatim from the original
+// src/state/vector-index.ts. Pure and engine-independent.
+//
+// The Phase-0 successor wires NO embedding provider, so this index stays
+// empty (size === 0) and the hybrid fusion renormalizes the BM25 stream to
+// full weight (see hybrid-search.ts). It is kept whole — including the
+// explicit byteOffset/byteLength base64 round-trip and the
+// validateDimensions guard — so the vector stream can be lit up in Phase 0b
+// without reintroducing the "2048 phantom dimensions" corruption
+// (the original implementation #455 / #469 / #584 / #587).
+
+// Pass byteOffset + byteLength explicitly so the round-trip survives
+// Node's Buffer pool. Buffer.from(b64, "base64") returns a slice of a
+// shared 8KB pool (poolSize), and `new Float32Array(buf.buffer)` ignores
+// the slice metadata — it would mint a 2048-element view over the whole
+// pool. Same risk on the encode side if the input Float32Array is itself
+// a sliced view.
+function float32ToBase64(arr: Float32Array): string {
+  return Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength).toString(
+    "base64",
+  );
+}
+
+function base64ToFloat32(b64: string): Float32Array {
+  const buf = Buffer.from(b64, "base64");
+  return new Float32Array(
+    buf.buffer,
+    buf.byteOffset,
+    buf.byteLength / Float32Array.BYTES_PER_ELEMENT,
+  );
+}
+
+function cosineSimilarity(a: Float32Array, b: Float32Array): number {
+  if (a.length !== b.length) return 0;
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    const ai = a[i] as number;
+    const bi = b[i] as number;
+    dot += ai * bi;
+    normA += ai * ai;
+    normB += bi * bi;
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom === 0 ? 0 : dot / denom;
+}
+
+export class VectorIndex {
+  private vectors: Map<string, { embedding: Float32Array; sessionId: string }> =
+    new Map();
+
+  add(obsId: string, sessionId: string, embedding: Float32Array): void {
+    this.vectors.set(obsId, { embedding, sessionId });
+  }
+
+  remove(obsId: string): void {
+    this.vectors.delete(obsId);
+  }
+
+  search(
+    query: Float32Array,
+    limit = 20,
+  ): Array<{ obsId: string; sessionId: string; score: number }> {
+    const results: Array<{
+      obsId: string;
+      sessionId: string;
+      score: number;
+    }> = [];
+    let minScore = -Infinity;
+
+    for (const [obsId, entry] of this.vectors) {
+      const score = cosineSimilarity(query, entry.embedding);
+      if (results.length < limit) {
+        results.push({ obsId, sessionId: entry.sessionId, score });
+        if (results.length === limit) {
+          results.sort((a, b) => a.score - b.score);
+          minScore = results[0]!.score;
+        }
+      } else if (score > minScore) {
+        results[0] = { obsId, sessionId: entry.sessionId, score };
+        results.sort((a, b) => a.score - b.score);
+        minScore = results[0]!.score;
+      }
+    }
+
+    results.sort((a, b) => b.score - a.score);
+    return results;
+  }
+
+  get size(): number {
+    return this.vectors.size;
+  }
+
+  // Walks every stored vector and returns the obsIds whose dimension
+  // doesn't match `expected`, plus the set of distinct dimensions seen.
+  // Used by the persistence-restore guard to refuse loading any index
+  // containing wrong-dimension vectors. Empty `mismatches` plus a
+  // single-entry `seenDimensions` matching `expected` is the only clean
+  // state.
+  validateDimensions(expected: number): {
+    mismatches: Array<{ obsId: string; dim: number }>;
+    seenDimensions: Set<number>;
+  } {
+    const mismatches: Array<{ obsId: string; dim: number }> = [];
+    const seenDimensions = new Set<number>();
+    for (const [obsId, entry] of this.vectors) {
+      const dim = entry.embedding.length;
+      seenDimensions.add(dim);
+      if (dim !== expected) {
+        mismatches.push({ obsId, dim });
+      }
+    }
+    return { mismatches, seenDimensions };
+  }
+
+  clear(): void {
+    this.vectors.clear();
+  }
+
+  restoreFrom(other: VectorIndex): void {
+    const src = other.vectors;
+    this.vectors = new Map();
+    for (const [obsId, entry] of src) {
+      this.vectors.set(obsId, {
+        embedding: new Float32Array(entry.embedding),
+        sessionId: entry.sessionId,
+      });
+    }
+  }
+
+  serialize(): string {
+    const data: Array<[string, { embedding: string; sessionId: string }]> = [];
+    for (const [obsId, entry] of this.vectors) {
+      data.push([
+        obsId,
+        {
+          embedding: float32ToBase64(entry.embedding),
+          sessionId: entry.sessionId,
+        },
+      ]);
+    }
+    return JSON.stringify(data);
+  }
+
+  static deserialize(json: string): VectorIndex {
+    const idx = new VectorIndex();
+    let data: unknown;
+    try {
+      data = JSON.parse(json);
+    } catch {
+      return idx;
+    }
+    if (!Array.isArray(data)) return idx;
+    for (const row of data) {
+      try {
+        if (!Array.isArray(row) || row.length < 2) continue;
+        const [obsId, entry] = row as [
+          unknown,
+          { embedding?: unknown; sessionId?: unknown },
+        ];
+        if (
+          typeof obsId !== "string" ||
+          typeof entry?.embedding !== "string" ||
+          typeof entry?.sessionId !== "string"
+        )
+          continue;
+        idx.vectors.set(obsId, {
+          embedding: base64ToFloat32(entry.embedding),
+          sessionId: entry.sessionId,
+        });
+      } catch {
+        continue;
+      }
+    }
+    return idx;
+  }
+}

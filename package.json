@@ -1,0 +1,27 @@
+{
+  "name": "memwarden",
+  "version": "0.0.1",
+  "private": true,
+  "description": "One brain. Every agent. Yours. Verified, self-custodied memory for AI coding agents.",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@libsql/client": "^0.15.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "tsx": "^4.19.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.6"
+  }
+}
