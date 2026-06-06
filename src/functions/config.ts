@@ -60,3 +60,34 @@ export function isSlotsEnabled(): boolean {
 export function getSecret(): string | undefined {
   return env("MEMWARDEN_SECRET");
 }
+
+/**
+ * TurboQuant vector quantization (arXiv:2504.19874): when enabled the
+ * vector index stores 2/4-bit codes instead of full Float32 embeddings.
+ * Off by default; the full-precision VectorIndex remains the baseline.
+ */
+export function isQuantizedVectorEnabled(): boolean {
+  return flag("MEMWARDEN_QUANT_VECTOR");
+}
+
+/** Bits per dimension for the quantized index. 4 (default) or 2. */
+export function getQuantBits(): 2 | 4 {
+  return env("MEMWARDEN_QUANT_BITS") === "2" ? 2 : 4;
+}
+
+/**
+ * Rescore depth: how many asymmetric-pass candidates get re-ranked with
+ * exact cosine. 0 (default) disables rescore and drops full vectors from
+ * memory entirely — the max-compression configuration.
+ */
+export function getQuantRescoreDepth(): number {
+  const raw = env("MEMWARDEN_QUANT_RESCORE");
+  if (!raw) return 0;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/** Rotation seed; same seed reproduces the identical rotation everywhere. */
+export function getQuantSeed(): string {
+  return env("MEMWARDEN_QUANT_SEED") ?? "memwarden-tq-v1";
+}

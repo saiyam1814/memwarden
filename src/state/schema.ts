@@ -46,7 +46,12 @@ export const KV = {
   insights: "mem:insights",
   graphEdgeHistory: "mem:graph:edge-history",
   enrichedChunks: (sessionId: string) => `mem:enriched:${sessionId}`,
+  // Per-observation quantized (TurboQuant) codes. Reserved as the per-row
+  // scaling path; Phase 0b persists the whole quantized index as one blob
+  // under `quantParams` instead (see vector-persistence.ts).
   latentEmbeddings: (obsId: string) => `mem:latent:${obsId}`,
+  // Quantized-index params + serialized blob (seed, bits, dims, codes).
+  quantParams: "mem:quant:params",
   retentionScores: "mem:retention",
   accessLog: "mem:access",
   imageRefs: "mem:image-refs",

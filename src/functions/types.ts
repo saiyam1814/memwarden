@@ -208,6 +208,31 @@ export interface EmbeddingProvider {
   embedImage?(src: string): Promise<Float32Array>;
 }
 
+/** A single vector-stream hit, shared by every vector index implementation. */
+export interface VectorSearchHit {
+  obsId: string;
+  sessionId: string;
+  score: number;
+}
+
+/**
+ * The vector-index surface consumed by search.ts and hybrid-search.ts.
+ * Satisfied structurally by both VectorIndex (full-precision, the default)
+ * and QuantizedVectorIndex (TurboQuant codes, behind MEMWARDEN_QUANT_VECTOR).
+ */
+export interface VectorIndexLike {
+  add(obsId: string, sessionId: string, embedding: Float32Array): void;
+  remove(obsId: string): void;
+  search(query: Float32Array, limit?: number): VectorSearchHit[];
+  readonly size: number;
+  clear(): void;
+  validateDimensions(expected: number): {
+    mismatches: Array<{ obsId: string; dim: number }>;
+    seenDimensions: Set<number>;
+  };
+  serialize(): string;
+}
+
 export interface HybridSearchResult {
   observation: CompressedObservation;
   bm25Score: number;

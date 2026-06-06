@@ -23,7 +23,11 @@ export {
   setEmbeddingProvider,
   rebuildIndex,
   vectorIndexAddGuarded,
+  makeVectorIndex,
 } from "./search.js";
+export { QuantizedVectorIndex } from "./quantized-vector-index.js";
+export type { QuantParams } from "./quantized-vector-index.js";
+export { persistVectorIndex, loadVectorIndex } from "./vector-persistence.js";
 export { DedupMap } from "./dedup.js";
 
 export interface RegisterCoreOptions {

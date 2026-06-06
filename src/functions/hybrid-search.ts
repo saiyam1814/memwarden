@@ -20,12 +20,12 @@
 // no-op until the graph layer is ported.
 
 import { SearchIndex } from "./search-index.js";
-import { VectorIndex } from "./vector-index.js";
 import type {
   EmbeddingProvider,
   HybridSearchResult,
   CompressedObservation,
   Memory,
+  VectorIndexLike,
 } from "./types.js";
 import { memoryToObservation } from "./memory-utils.js";
 import type { StateKV } from "../state/kv.js";
@@ -36,7 +36,7 @@ const RRF_K = 60;
 export class HybridSearch {
   constructor(
     private bm25: SearchIndex,
-    private vector: VectorIndex | null,
+    private vector: VectorIndexLike | null,
     private embeddingProvider: EmbeddingProvider | null,
     private kv: StateKV,
     private bm25Weight = 0.4,

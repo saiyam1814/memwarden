@@ -20,17 +20,26 @@ import type {
   SearchResult,
   Session,
   EmbeddingProvider,
+  VectorIndexLike,
 } from "./types.js";
 import { KV } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
 import { SearchIndex } from "./search-index.js";
 import { VectorIndex } from "./vector-index.js";
+import { QuantizedVectorIndex } from "./quantized-vector-index.js";
+import {
+  isQuantizedVectorEnabled,
+  getQuantBits,
+  getQuantRescoreDepth,
+  getQuantSeed,
+} from "./config.js";
 import { memoryToObservation } from "./memory-utils.js";
 import { recordAccessBatch } from "./access-tracker.js";
+import { loadVectorIndex } from "./vector-persistence.js";
 import { logger } from "./logger.js";
 
 let index: SearchIndex | null = null;
-let vectorIndex: VectorIndex | null = null;
+let vectorIndex: VectorIndexLike | null = null;
 let currentEmbeddingProvider: EmbeddingProvider | null = null;
 
 export function getSearchIndex(): SearchIndex {
@@ -38,12 +47,29 @@ export function getSearchIndex(): SearchIndex {
   return index;
 }
 
-export function setVectorIndex(idx: VectorIndex | null): void {
+export function setVectorIndex(idx: VectorIndexLike | null): void {
   vectorIndex = idx;
 }
 
-export function getVectorIndex(): VectorIndex | null {
+export function getVectorIndex(): VectorIndexLike | null {
   return vectorIndex;
+}
+
+/**
+ * Constructs the configured vector index: TurboQuant-backed when
+ * MEMWARDEN_QUANT_VECTOR=true, the full-precision VectorIndex otherwise.
+ * `dims` comes from the embedding provider that will feed the index.
+ */
+export function makeVectorIndex(dims: number): VectorIndexLike {
+  if (isQuantizedVectorEnabled()) {
+    return new QuantizedVectorIndex({
+      dims,
+      bits: getQuantBits(),
+      seed: getQuantSeed(),
+      rescoreDepth: getQuantRescoreDepth(),
+    });
+  }
+  return new VectorIndex();
 }
 
 export function setEmbeddingProvider(provider: EmbeddingProvider | null): void {
@@ -110,11 +136,18 @@ export async function vectorIndexAddGuarded(
 // Rebuilds the BM25 index from KV. Walks the memories scope (so
 // mem::remember entries survive a restart) and every session's
 // observations. The vector index is cleared in lockstep so BM25 and vector
-// stay in sync; in Phase 0 it stays empty (no provider).
-export async function rebuildIndex(kv: StateKV): Promise<number> {
+// stay in sync; in Phase 0 it stays empty (no provider). When a persisted
+// quantized index was just restored (vector-persistence.ts), pass
+// `preserveVectorIndex` so the restored codes are kept and re-embedding is
+// skipped.
+export async function rebuildIndex(
+  kv: StateKV,
+  opts?: { preserveVectorIndex?: boolean },
+): Promise<number> {
+  const preserveVectors = opts?.preserveVectorIndex === true;
   const idx = getSearchIndex();
   idx.clear();
-  vectorIndex?.clear();
+  if (!preserveVectors) vectorIndex?.clear();
 
   let count = 0;
 
@@ -126,12 +159,14 @@ export async function rebuildIndex(kv: StateKV): Promise<number> {
       if (memory.isLatest === false) continue;
       if (!memory.title || !memory.content) continue;
       idx.add(memoryToObservation(memory));
-      await vectorIndexAddGuarded(
-        memory.id,
-        memory.sessionIds?.[0] ?? "memory",
-        memory.title + " " + memory.content,
-        { kind: "memory", logId: memory.id },
-      );
+      if (!preserveVectors) {
+        await vectorIndexAddGuarded(
+          memory.id,
+          memory.sessionIds?.[0] ?? "memory",
+          memory.title + " " + memory.content,
+          { kind: "memory", logId: memory.id },
+        );
+      }
       count++;
     }
   } catch (err) {
@@ -168,10 +203,12 @@ export async function rebuildIndex(kv: StateKV): Promise<number> {
     for (const obs of observations) {
       if (obs.title && obs.narrative) {
         idx.add(obs);
-        await vectorIndexAddGuarded(obs.id, obs.sessionId, obs.title + " " + obs.narrative, {
-          kind: "observation",
-          logId: obs.id,
-        });
+        if (!preserveVectors) {
+          await vectorIndexAddGuarded(obs.id, obs.sessionId, obs.title + " " + obs.narrative, {
+            kind: "observation",
+            logId: obs.id,
+          });
+        }
         count++;
       }
     }
@@ -231,8 +268,17 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       }
 
       if (idx.size === 0) {
-        const count = await rebuildIndex(kv);
-        logger.info("Search index rebuilt", { entries: count });
+        // Restore persisted quantized codes first (no-op unless
+        // MEMWARDEN_QUANT_VECTOR is on and a valid blob exists), then
+        // rebuild BM25 — skipping vector re-embedding when restore worked.
+        const restoredVectors = await loadVectorIndex(kv);
+        const count = await rebuildIndex(kv, {
+          preserveVectorIndex: restoredVectors,
+        });
+        logger.info("Search index rebuilt", {
+          entries: count,
+          restoredVectors,
+        });
       }
 
       // When filtering by project/cwd, over-fetch from the index so the
