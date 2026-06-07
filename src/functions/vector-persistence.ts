@@ -13,7 +13,7 @@ import { KV } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
 import { QuantizedVectorIndex } from "./quantized-vector-index.js";
 import { getVectorIndex, setVectorIndex, getEmbeddingProvider } from "./search.js";
-import { isQuantizedVectorEnabled } from "./config.js";
+import { isQuantizedVectorEnabled, getQuantRescoreDepth } from "./config.js";
 import { logger } from "./logger.js";
 
 const BLOB_KEY = "index-blob";
@@ -65,6 +65,9 @@ export async function loadVectorIndex(kv: StateKV): Promise<boolean> {
       });
       return false;
     }
+    // The blob carries the rescore setting it was built with; the current
+    // environment wins. Lowering to 0 also frees the retained full vectors.
+    idx.reconcileRescoreDepth(getQuantRescoreDepth());
     setVectorIndex(idx);
     return true;
   } catch (err) {

@@ -35,7 +35,7 @@ import {
 } from "./config.js";
 import { memoryToObservation } from "./memory-utils.js";
 import { recordAccessBatch } from "./access-tracker.js";
-import { loadVectorIndex } from "./vector-persistence.js";
+import { loadVectorIndex, persistVectorIndex } from "./vector-persistence.js";
 import { logger } from "./logger.js";
 
 let index: SearchIndex | null = null;
@@ -138,8 +138,10 @@ export async function vectorIndexAddGuarded(
 // observations. The vector index is cleared in lockstep so BM25 and vector
 // stay in sync; in Phase 0 it stays empty (no provider). When a persisted
 // quantized index was just restored (vector-persistence.ts), pass
-// `preserveVectorIndex` so the restored codes are kept and re-embedding is
-// skipped.
+// `preserveVectorIndex` to switch the vector side to INCREMENTAL SYNC:
+// restored codes are kept, only docs missing from the index are embedded,
+// and ghosts (ids in the blob that no longer exist in KV) are evicted at
+// the end of the walk.
 export async function rebuildIndex(
   kv: StateKV,
   opts?: { preserveVectorIndex?: boolean },
@@ -148,6 +150,9 @@ export async function rebuildIndex(
   const idx = getSearchIndex();
   idx.clear();
   if (!preserveVectors) vectorIndex?.clear();
+  // Ids seen in KV during this walk; used to evict ghosts from a restored
+  // vector index. Only tracked in preserve mode.
+  const liveIds = preserveVectors ? new Set<string>() : null;
 
   let count = 0;
 
@@ -159,7 +164,8 @@ export async function rebuildIndex(
       if (memory.isLatest === false) continue;
       if (!memory.title || !memory.content) continue;
       idx.add(memoryToObservation(memory));
-      if (!preserveVectors) {
+      liveIds?.add(memory.id);
+      if (!preserveVectors || !vectorIndex?.has(memory.id)) {
         await vectorIndexAddGuarded(
           memory.id,
           memory.sessionIds?.[0] ?? "memory",
@@ -176,7 +182,10 @@ export async function rebuildIndex(
   }
 
   const sessions = await kv.list<Session>(KV.sessions);
-  if (!sessions.length) return count;
+  if (!sessions.length) {
+    evictGhostVectors(liveIds);
+    return count;
+  }
 
   const obsPerSession: CompressedObservation[][] = [];
   const failedSessions: string[] = [];
@@ -203,7 +212,8 @@ export async function rebuildIndex(
     for (const obs of observations) {
       if (obs.title && obs.narrative) {
         idx.add(obs);
-        if (!preserveVectors) {
+        liveIds?.add(obs.id);
+        if (!preserveVectors || !vectorIndex?.has(obs.id)) {
           await vectorIndexAddGuarded(obs.id, obs.sessionId, obs.title + " " + obs.narrative, {
             kind: "observation",
             logId: obs.id,
@@ -214,7 +224,27 @@ export async function rebuildIndex(
     }
   }
 
+  evictGhostVectors(liveIds);
   return count;
+}
+
+// In preserve (incremental-sync) mode, removes vector entries whose ids no
+// longer exist in KV — docs deleted after the index blob was persisted.
+// No-op when liveIds is null (full-rebuild mode already cleared the index).
+function evictGhostVectors(liveIds: Set<string> | null): void {
+  if (!liveIds || !vectorIndex) return;
+  let evicted = 0;
+  for (const id of vectorIndex.ids()) {
+    if (!liveIds.has(id)) {
+      vectorIndex.remove(id);
+      evicted++;
+    }
+  }
+  if (evicted > 0) {
+    logger.info("vector index: evicted ghost entries after restore", {
+      evicted,
+    });
+  }
 }
 
 export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
@@ -270,14 +300,19 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       if (idx.size === 0) {
         // Restore persisted quantized codes first (no-op unless
         // MEMWARDEN_QUANT_VECTOR is on and a valid blob exists), then
-        // rebuild BM25 — skipping vector re-embedding when restore worked.
+        // rebuild BM25. With a successful restore the vector side runs in
+        // incremental-sync mode (embed only missing ids, evict ghosts);
+        // afterwards the reconciled index is persisted again so the blob
+        // converges with KV. One blob write per cold rebuild.
         const restoredVectors = await loadVectorIndex(kv);
         const count = await rebuildIndex(kv, {
           preserveVectorIndex: restoredVectors,
         });
+        const persisted = await persistVectorIndex(kv);
         logger.info("Search index rebuilt", {
           entries: count,
           restoredVectors,
+          persisted,
         });
       }
 

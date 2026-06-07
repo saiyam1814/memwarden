@@ -223,6 +223,9 @@ export interface VectorSearchHit {
 export interface VectorIndexLike {
   add(obsId: string, sessionId: string, embedding: Float32Array): void;
   remove(obsId: string): void;
+  has(obsId: string): boolean;
+  /** Snapshot of the stored obsIds; used for restore reconciliation. */
+  ids(): string[];
   search(query: Float32Array, limit?: number): VectorSearchHit[];
   readonly size: number;
   clear(): void;

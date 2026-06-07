@@ -59,6 +59,14 @@ export class VectorIndex {
     this.vectors.delete(obsId);
   }
 
+  has(obsId: string): boolean {
+    return this.vectors.has(obsId);
+  }
+
+  ids(): string[] {
+    return Array.from(this.vectors.keys());
+  }
+
   search(
     query: Float32Array,
     limit = 20,

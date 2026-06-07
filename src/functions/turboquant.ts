@@ -306,8 +306,9 @@ export function asymmetricDot(
   codes: Uint8Array,
   D: number,
   bits: QuantBits,
+  table?: LevelTable,
 ): number {
-  const { levels } = lloydMaxLevels(bits);
+  const { levels } = table ?? lloydMaxLevels(bits);
   let sum = 0;
   if (bits === 4) {
     for (let i = 0; i < D; i++) {

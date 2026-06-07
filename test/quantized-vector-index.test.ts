@@ -118,6 +118,21 @@ describe("API parity", () => {
     expect(idx.validateDimensions(DIMS + 1).mismatches.length).toBe(1);
   });
 
+  it("has() and ids() reflect membership on both implementations", () => {
+    const quant: VectorIndexLike = newQuantIndex(0);
+    const full: VectorIndexLike = new VectorIndex();
+    for (const idx of [quant, full]) {
+      idx.add("a", "s", new Float32Array(DIMS).fill(1));
+      idx.add("b", "s", new Float32Array(DIMS).fill(2));
+      expect(idx.has("a")).toBe(true);
+      expect(idx.has("missing")).toBe(false);
+      expect(idx.ids().sort()).toEqual(["a", "b"]);
+      idx.remove("a");
+      expect(idx.has("a")).toBe(false);
+      expect(idx.ids()).toEqual(["b"]);
+    }
+  });
+
   it("remove and clear behave like VectorIndex", () => {
     const idx = newQuantIndex(0);
     idx.add("a", "s", new Float32Array(DIMS).fill(1));
@@ -174,6 +189,27 @@ describe("serialize / deserialize", () => {
     expect(QuantizedVectorIndex.deserialize(idx.serialize())).not.toBeNull();
   });
 
+  it("reconcileRescoreDepth(0) drops retained full vectors", () => {
+    const idx = newQuantIndex(16);
+    const gauss = gaussianSampler("reconcile");
+    idx.add("a", "s", Float32Array.from({ length: DIMS }, () => gauss()));
+    expect(idx.serialize()).toContain('"f":'); // full vector persisted
+
+    const restored = QuantizedVectorIndex.deserialize(idx.serialize());
+    expect(restored).not.toBeNull();
+    expect(restored!.params.rescoreDepth).toBe(16); // blob value wins pre-reconcile
+
+    restored!.reconcileRescoreDepth(0);
+    expect(restored!.params.rescoreDepth).toBe(0);
+    expect(restored!.serialize()).not.toContain('"f":'); // memory reclaimed
+
+    // Raising it back is allowed; entries without full vectors simply skip
+    // the exact-cosine pass.
+    restored!.reconcileRescoreDepth(50);
+    expect(restored!.params.rescoreDepth).toBe(50);
+    expect(restored!.search(new Float32Array(DIMS).fill(1), 1).length).toBe(1);
+  });
+
   it("retains full vectors through serialization when rescoring", () => {
     const idx = newQuantIndex(10);
     const gauss = gaussianSampler("serde-full");
@@ -226,6 +262,19 @@ describe("recall vs full-precision brute force", () => {
     for (const { id, v } of vectors) idx.add(id, "s", v);
     const r = recallAt10(idx, queries);
     expect(r).toBeGreaterThanOrEqual(0.9);
+  });
+
+  it("2-bit with rescore depth 100 stays usable (recall@10 >= 0.80, reported)", () => {
+    const idx = new QuantizedVectorIndex({
+      dims: DIMS,
+      bits: 2,
+      seed: "test-seed",
+      rescoreDepth: 100,
+    });
+    for (const { id, v } of vectors) idx.add(id, "s", v);
+    const r = recallAt10(idx, queries);
+    console.log(`2-bit recall@10 with rescore 100: ${r.toFixed(3)}`);
+    expect(r).toBeGreaterThanOrEqual(0.8);
   });
 
   it("rescore improves top-1 agreement over no-rescore", () => {

@@ -93,6 +93,7 @@ export class QuantizedVectorIndex {
   private vectors: Map<string, StoredVector> = new Map();
   private signFlips: Int8Array[];
   private scratch: Float32Array;
+  private queryScratch: Float32Array;
 
   constructor(opts: {
     dims: number;
@@ -117,6 +118,7 @@ export class QuantizedVectorIndex {
       ROTATION_ROUNDS,
     );
     this.scratch = new Float32Array(paddedDims);
+    this.queryScratch = new Float32Array(paddedDims);
     // Warm the level table so first add/search doesn't pay the Lloyd cost.
     lloydMaxLevels(opts.bits);
   }
@@ -145,6 +147,34 @@ export class QuantizedVectorIndex {
     this.vectors.delete(obsId);
   }
 
+  has(obsId: string): boolean {
+    return this.vectors.has(obsId);
+  }
+
+  ids(): string[] {
+    return Array.from(this.vectors.keys());
+  }
+
+  /**
+   * Aligns the rescore setting with the current configuration after a
+   * restore: the persisted blob carries the rescoreDepth it was built
+   * with, which may no longer match the environment. Lowering to 0 drops
+   * the retained full vectors (reclaiming memory); raising it keeps
+   * working with whatever full vectors the blob had (entries without one
+   * simply keep their asymmetric score — the rescore pass guards on
+   * presence).
+   */
+  reconcileRescoreDepth(depth: number): void {
+    const clamped = Math.max(0, Math.floor(depth));
+    if (clamped === this.params.rescoreDepth) return;
+    this.params.rescoreDepth = clamped;
+    if (clamped === 0) {
+      for (const entry of this.vectors.values()) {
+        delete entry.full;
+      }
+    }
+  }
+
   search(
     query: Float32Array,
     limit = 20,
@@ -153,7 +183,11 @@ export class QuantizedVectorIndex {
       return [];
     }
     const D = this.params.paddedDims;
-    const rotatedQuery = rotate(query, D, this.signFlips); // own buffer: scratch stays free for adds
+    // Dedicated query scratch: search is synchronous, so nothing else can
+    // touch it before the scan below completes; `this.scratch` stays
+    // reserved for add().
+    const rotatedQuery = rotate(query, D, this.signFlips, this.queryScratch);
+    const table = lloydMaxLevels(this.params.bits); // hoisted out of the scan
     let qNormSq = 0;
     for (let i = 0; i < D; i++) {
       const v = rotatedQuery[i] as number;
@@ -173,7 +207,7 @@ export class QuantizedVectorIndex {
       const score =
         entry.norm === 0
           ? 0
-          : asymmetricDot(rotatedQuery, entry.codes, D, this.params.bits) *
+          : asymmetricDot(rotatedQuery, entry.codes, D, this.params.bits, table) *
             invScale;
       if (results.length < poolSize) {
         results.push({ obsId, sessionId: entry.sessionId, score });

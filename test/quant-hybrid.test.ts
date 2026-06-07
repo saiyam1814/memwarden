@@ -149,6 +149,70 @@ describe("quantized vector stream in hybrid fusion", () => {
     expect(results.some((r) => r.vectorScore > 0)).toBe(true);
   });
 
+  it("restore + rebuild runs incremental sync: embeds missing docs, evicts ghosts", async () => {
+    const provider = makeStubProvider();
+    setEmbeddingProvider(provider);
+    const vIdx = makeVectorIndex(DIMS) as QuantizedVectorIndex;
+    setVectorIndex(vIdx);
+
+    // One real observation, embedded and persisted alongside a ghost entry
+    // that exists only in the blob (simulates a doc deleted after persist).
+    const r1 = await sdk.trigger<unknown, { observationId?: string }>({
+      function_id: "mem::observe",
+      payload: observePayload("kubernetes", "live"),
+    });
+    const liveId = r1!.observationId!;
+    vIdx.add(liveId, "sess-A", await provider.embed("kubernetes live doc"));
+    vIdx.add("ghost-1", "sess-A", await provider.embed("database ghost doc"));
+    expect(await persistVectorIndex(kv)).toBe(true);
+
+    // A second observation lands AFTER the persist — the blob doesn't have it.
+    const r2 = await sdk.trigger<unknown, { observationId?: string }>({
+      function_id: "mem::observe",
+      payload: observePayload("frontend", "late"),
+    });
+    const lateId = r2!.observationId!;
+
+    // Cold start: restore the blob, then rebuild in incremental-sync mode.
+    setVectorIndex(null);
+    getSearchIndex().clear();
+    expect(await loadVectorIndex(kv)).toBe(true);
+    const { rebuildIndex } = await import("../src/functions/search.js");
+    await rebuildIndex(kv, { preserveVectorIndex: true });
+
+    const synced = getVectorIndex()!;
+    expect(synced.has(liveId)).toBe(true); // restored, not re-embedded
+    expect(synced.has(lateId)).toBe(true); // missing doc embedded during sync
+    expect(synced.has("ghost-1")).toBe(false); // ghost evicted
+
+    // Persisting again converges the blob with KV.
+    expect(await persistVectorIndex(kv)).toBe(true);
+    setVectorIndex(null);
+    expect(await loadVectorIndex(kv)).toBe(true);
+    expect(getVectorIndex()!.has("ghost-1")).toBe(false);
+    expect(getVectorIndex()!.size).toBe(2);
+  });
+
+  it("loadVectorIndex reconciles rescore depth with the environment", async () => {
+    const provider = makeStubProvider();
+    setEmbeddingProvider(provider);
+    // Built and persisted with rescore 16 (env from beforeEach).
+    const vIdx = makeVectorIndex(DIMS) as QuantizedVectorIndex;
+    setVectorIndex(vIdx);
+    vIdx.add("obs-1", "sess-A", await provider.embed("kubernetes pods"));
+    expect(vIdx.params.rescoreDepth).toBe(16);
+    expect(await persistVectorIndex(kv)).toBe(true);
+
+    // Environment now says no rescore: the restored index must follow and
+    // drop the retained full vectors.
+    process.env.MEMWARDEN_QUANT_RESCORE = "0";
+    setVectorIndex(null);
+    expect(await loadVectorIndex(kv)).toBe(true);
+    const restored = getVectorIndex() as QuantizedVectorIndex;
+    expect(restored.params.rescoreDepth).toBe(0);
+    expect(restored.serialize()).not.toContain('"f":');
+  });
+
   it("persists and restores the quantized index through KV", async () => {
     const provider = makeStubProvider();
     setEmbeddingProvider(provider);
