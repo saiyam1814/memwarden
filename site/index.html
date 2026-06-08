@@ -3,87 +3,101 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>memwarden — the unified memory layer for AI agents</title>
-<meta name="description" content="One local brain every AI coding agent shares. Remembers across tools, verifies with a hash chain, and cuts tokens with TurboQuant compression. Local-first, no API key." />
-<meta property="og:title" content="memwarden — unified memory for AI agents" />
-<meta property="og:description" content="Remembers across agents, verifies, and cuts tokens. Local-first, MCP-native." />
+<title>memwarden — one memory for every AI coding tool</title>
+<meta name="description" content="Run one command and your work in Claude Code, Codex, Cursor, Kiro, Antigravity, OpenCode and OpenClaw flows into a single local brain. Cross-tool, self-healing, verifiable, no API key." />
+<meta property="og:title" content="memwarden — one memory for every AI coding tool" />
+<meta property="og:description" content="One command. Cross-tool memory that is local, self-healing, verifiable, and yours." />
 <style>
   :root{
-    --bg:#0a0d14; --bg2:#0e131d; --card:#121826; --line:#1f2839;
+    --bg:#0a0d14; --bg2:#0e131d; --card:#121826; --card2:#0f1521; --line:#1f2839;
     --fg:#e8edf5; --mut:#93a0b4; --dim:#6b7689;
-    --accent:#7c6cff; --accent2:#3ad1c9; --good:#46d18a;
-    --radius:14px; --max:1040px;
-    font-feature-settings:"ss01";
+    --accent:#7c6cff; --accent2:#3ad1c9; --good:#46d18a; --warn:#f0b75e;
+    --radius:16px; --max:1080px;
   }
   *{box-sizing:border-box}
   html{scroll-behavior:smooth}
   body{
-    margin:0; background:radial-gradient(1200px 600px at 50% -10%, #182138 0%, var(--bg) 55%);
-    color:var(--fg); font:16px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Inter,sans-serif;
+    margin:0; background:radial-gradient(1200px 640px at 50% -12%, #1a2440 0%, var(--bg) 56%);
+    color:var(--fg); font:16px/1.65 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Inter,sans-serif;
     -webkit-font-smoothing:antialiased;
   }
   a{color:var(--accent2); text-decoration:none}
   a:hover{text-decoration:underline}
   .wrap{max-width:var(--max); margin:0 auto; padding:0 24px}
-  code,pre{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+  code,pre,kbd{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+  kbd{background:#070a11; border:1px solid var(--line); border-radius:6px; padding:2px 7px; font-size:13px; color:var(--accent2)}
 
-  /* nav */
   nav{display:flex; align-items:center; justify-content:space-between; padding:22px 0}
   .brand{font-weight:800; font-size:18px; letter-spacing:.2px}
   .brand span{color:var(--accent)}
   .nav-links a{color:var(--mut); margin-left:22px; font-size:14px}
 
-  /* hero */
-  header{text-align:center; padding:64px 0 40px}
+  header{text-align:center; padding:60px 0 36px}
   .pill{display:inline-block; font-size:12.5px; color:var(--accent2); border:1px solid var(--line);
-    background:var(--bg2); padding:6px 14px; border-radius:999px; margin-bottom:26px}
-  h1{font-size:clamp(34px,5.5vw,60px); line-height:1.08; margin:0 0 18px; letter-spacing:-.02em; font-weight:820}
+    background:var(--bg2); padding:6px 14px; border-radius:999px; margin-bottom:24px}
+  h1{font-size:clamp(34px,5.6vw,62px); line-height:1.06; margin:0 0 18px; letter-spacing:-.02em; font-weight:830}
   h1 .grad{background:linear-gradient(90deg,var(--accent),var(--accent2)); -webkit-background-clip:text; background-clip:text; color:transparent}
-  .sub{font-size:clamp(16px,2.2vw,20px); color:var(--mut); max-width:680px; margin:0 auto 32px}
-  .cta{display:flex; gap:14px; justify-content:center; flex-wrap:wrap}
+  .sub{font-size:clamp(16px,2.2vw,20px); color:var(--mut); max-width:700px; margin:0 auto 30px}
+
+  .cmd{display:flex; align-items:center; justify-content:space-between; gap:14px; max-width:520px; margin:0 auto 18px;
+    background:#070a11; border:1px solid var(--line); border-radius:12px; padding:14px 16px; font-size:15px; text-align:left}
+  .cmd code{color:#cdd8ea}
+  .cmd code .p{color:var(--accent2)}
+  .copy{cursor:pointer; border:1px solid var(--line); background:var(--bg2); color:var(--mut); border-radius:8px; padding:6px 12px; font-size:12.5px}
+  .copy:hover{border-color:var(--accent); color:var(--fg)}
+  .cta{display:flex; gap:14px; justify-content:center; flex-wrap:wrap; margin-top:6px}
   .btn{display:inline-flex; align-items:center; gap:8px; padding:12px 22px; border-radius:12px; font-weight:650; font-size:15px}
   .btn.primary{background:linear-gradient(90deg,var(--accent),#6a8bff); color:#fff}
   .btn.primary:hover{filter:brightness(1.08); text-decoration:none}
   .btn.ghost{border:1px solid var(--line); color:var(--fg); background:var(--bg2)}
   .btn.ghost:hover{border-color:var(--accent); text-decoration:none}
 
-  /* stat strip */
-  .stats{display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin:46px 0}
+  .stats{display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin:44px 0 8px}
   .stat{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:20px; text-align:center}
-  .stat b{display:block; font-size:26px; font-weight:800; color:var(--fg)}
+  .stat b{display:block; font-size:26px; font-weight:800}
   .stat .accent{color:var(--accent2)}
   .stat small{color:var(--dim); font-size:12.5px}
 
-  section{padding:48px 0; border-top:1px solid var(--line)}
-  h2{font-size:clamp(22px,3vw,30px); margin:0 0 8px; letter-spacing:-.01em}
-  .lead{color:var(--mut); max-width:680px; margin:0 0 28px}
+  section{padding:50px 0; border-top:1px solid var(--line)}
+  h2{font-size:clamp(22px,3vw,32px); margin:0 0 10px; letter-spacing:-.01em}
+  .lead{color:var(--mut); max-width:720px; margin:0 0 28px}
 
-  /* feature grid */
   .grid{display:grid; grid-template-columns:repeat(3,1fr); gap:16px}
   .feat{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:22px}
   .feat h3{margin:0 0 8px; font-size:16px}
   .feat p{margin:0; color:var(--mut); font-size:14.5px}
   .feat .ic{font-size:20px; margin-bottom:10px}
 
-  /* code block */
+  .tools{display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-top:10px}
+  .tool{background:var(--card2); border:1px solid var(--line); border-radius:12px; padding:14px 16px}
+  .tool b{font-size:14.5px}
+  .tool small{display:block; color:var(--dim); font-size:12px; margin-top:3px}
+  .tool .auto{color:var(--good)} .tool .inst{color:var(--accent2)}
+
+  .doors{display:grid; grid-template-columns:repeat(3,1fr); gap:16px}
+  .door{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:22px}
+  .door .n{font-size:12px; color:var(--dim); letter-spacing:.08em; text-transform:uppercase}
+  .door h3{margin:6px 0 8px; font-size:17px}
+  .door p{margin:0; color:var(--mut); font-size:14px}
+  .door .tag{display:inline-block; margin-top:12px; font-size:12px; padding:3px 10px; border-radius:999px; border:1px solid var(--line)}
+  .tag.mech{color:var(--good)} .tag.soft{color:var(--accent2)}
+
   pre{background:#070a11; border:1px solid var(--line); border-radius:var(--radius); padding:20px 22px;
     overflow:auto; font-size:14px; line-height:1.7; color:#cdd8ea}
-  pre .c{color:var(--dim)}
-  pre .g{color:var(--good)}
+  pre .c{color:var(--dim)} pre .g{color:var(--good)} pre .y{color:var(--warn)} pre .a{color:var(--accent2)}
 
-  /* flow */
   .flow{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:22px; color:var(--mut); font-size:14.5px}
   .flow b{color:var(--fg)}
 
-  /* table */
   table{width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; font-size:14.5px}
   th,td{padding:12px 16px; text-align:left; border-bottom:1px solid var(--line)}
   th{color:var(--mut); font-weight:600}
   tr:last-child td{border-bottom:none}
   td .ok{color:var(--good)}
 
+  .note{color:var(--dim); font-size:13px; margin-top:14px; max-width:720px}
   footer{padding:48px 0 64px; color:var(--dim); text-align:center; font-size:14px; border-top:1px solid var(--line)}
-  @media(max-width:760px){ .stats{grid-template-columns:repeat(2,1fr)} .grid{grid-template-columns:1fr} .nav-links{display:none} }
+  @media(max-width:820px){ .stats,.tools{grid-template-columns:repeat(2,1fr)} .grid,.doors{grid-template-columns:1fr} .nav-links{display:none} }
 </style>
 </head>
 <body>
@@ -92,53 +106,127 @@
   <nav>
     <div class="brand">🧠 mem<span>warden</span></div>
     <div class="nav-links">
-      <a href="#how">How it works</a>
-      <a href="#why">Why</a>
-      <a href="#start">Quick start</a>
+      <a href="#trust">Trust</a>
+      <a href="#setup">Setup</a>
+      <a href="#cross">Cross-tool</a>
+      <a href="#proof">Proof</a>
       <a href="https://github.com/theshiphq/memwarden">GitHub</a>
     </div>
   </nav>
 
   <header>
-    <span class="pill">local-first · cross-agent · no API key</span>
-    <h1>The unified memory layer<br/>for <span class="grad">AI agents</span></h1>
-    <p class="sub">One local brain every coding agent shares. It remembers across tools,
-      verifies with a hash chain, and cuts tokens with on-device compression. Switch from
-      Claude to Codex mid-task — the next agent already knows.</p>
+    <span class="pill">verifiable · staleness audit · self-healing · cross-tool</span>
+    <h1>Memory your AI agents<br/>can <span class="grad">trust</span></h1>
+    <p class="sub">Every AI coding tool can share one local brain. memwarden goes further: it
+      proves the memory was not tampered with, audits whether each memory is still safe to
+      inject, and heals itself so you never touch it. Across Claude Code, Codex, Cursor, Kiro,
+      Antigravity, OpenCode and OpenClaw.</p>
+
+    <div class="cmd">
+      <code>$ <span class="p">memwarden up</span></code>
+      <button class="copy" onclick="navigator.clipboard&&navigator.clipboard.writeText('node dist/cli/bin.js up');this.textContent='copied'">copy</button>
+    </div>
     <div class="cta">
-      <a class="btn primary" href="#start">Get started</a>
+      <a class="btn primary" href="#setup">How it works</a>
       <a class="btn ghost" href="https://github.com/theshiphq/memwarden">View on GitHub</a>
     </div>
 
     <div class="stats">
-      <div class="stat"><b class="accent">0%</b><small>recall lost to compression<br/>(quantized == full-precision)</small></div>
+      <div class="stat"><b class="accent">7</b><small>tools wired<br/>by one command</small></div>
+      <div class="stat"><b>0%</b><small>recall lost to compression<br/>(quantized == full)</small></div>
       <div class="stat"><b>5.9×</b><small>smaller vectors<br/>TurboQuant 4-bit</small></div>
       <div class="stat"><b>~1ms</b><small>per search<br/>on-device</small></div>
-      <div class="stat"><b>+25pt</b><small>recall vs keyword search<br/>on meaning-based queries</small></div>
     </div>
   </header>
 
   <section id="why">
     <h2>Agents forget. Every session. Every tool.</h2>
-    <p class="lead">You re-explain the architecture, re-teach preferences, re-discover the same
-      bug — in every agent, every day. Built-in memory files cap out and go stale, and each
-      vendor's memory is their lock-in. memwarden is the memory that follows you across agents,
+    <p class="lead">You re-explain the architecture, re-teach preferences, and re-discover the
+      same bug, in every tool, every day. Built-in memory files cap out and go stale, and each
+      vendor's memory is their lock-in. memwarden is the memory that follows you across tools,
       costs fewer tokens to recall, and that you actually own.</p>
     <div class="grid">
-      <div class="feat"><div class="ic">🔁</div><h3>Cross-agent by default</h3><p>One local daemon, shared over MCP + hooks. Claude, Codex, Cursor, Cline — same brain. Open a tool and it auto-injects the project's memory before you ask.</p></div>
-      <div class="feat"><div class="ic">🗜️</div><h3>Compressed, not raw</h3><p>Google's TurboQuant algorithm, implemented in pure TypeScript, shrinks every vector 6–11× with zero recall loss. More memory fits, recall stays fast.</p></div>
-      <div class="feat"><div class="ic">🔐</div><h3>Verifiable & yours</h3><p>Every write lands in a SHA-256 hash-chained log you can cryptographically verify. Export your whole brain to a portable bundle. No vendor lock-in.</p></div>
+      <div class="feat"><div class="ic">🩺</div><h3>Trustworthy, not just stored</h3><p>The <code>doctor</code> audits whether each memory is still safe to inject: it flags memory that points at deleted files (stale) or has no evidence (unsourced). Auditing trust is the part nobody else leads with.</p></div>
+      <div class="feat"><div class="ic">🔐</div><h3>Verifiable and yours</h3><p>Every write lands in a SHA-256 hash-chained log you can cryptographically verify. On-device, two dependencies, a portable bundle. No vendor.</p></div>
+      <div class="feat"><div class="ic">♻️</div><h3>Self-healing</h3><p>Once it is up you never touch it. It revives itself if a tool finds it down, and an OS service restarts it on crash and starts it at login.</p></div>
     </div>
+  </section>
+
+  <section id="trust">
+    <h2>Memory you can trust</h2>
+    <p class="lead">Recall is only half the job. The other half is knowing the memory is still
+      safe to use. Every memory carries provenance, and <kbd>memwarden doctor</kbd> audits it
+      against your live repo. This is the part that makes memwarden its own thing, not another
+      shared-memory layer.</p>
+<pre>$ <span class="a">memwarden doctor .</span>
+
+  SAFE TO INJECT: 12 memories
+  <span class="y">STALE:           2 memories reference files that changed</span>
+  <span class="y">UNSOURCED:       1 memory has no evidence</span>
+
+  [stale]  Edit — references 1 file(s) that no longer exist: src/legacy.ts</pre>
+  </section>
+
+  <section id="setup">
+    <h2>Setup is one command</h2>
+    <p class="lead"><kbd>memwarden up</kbd> starts a self-healing daemon (one global brain at
+      <code>~/.memwarden</code>) and wires every installed tool into it, in that tool's own
+      config schema, without clobbering servers you already have.</p>
+    <div class="tools">
+      <div class="tool"><b>Claude Code</b><small class="auto">hooks · fully automatic</small></div>
+      <div class="tool"><b>Codex</b><small class="inst">instruction + /recall</small></div>
+      <div class="tool"><b>Cursor</b><small class="inst">instruction + /recall</small></div>
+      <div class="tool"><b>Kiro</b><small class="inst">instruction + /recall</small></div>
+      <div class="tool"><b>Antigravity</b><small class="inst">instruction + /recall</small></div>
+      <div class="tool"><b>OpenCode</b><small class="inst">instruction + /recall</small></div>
+      <div class="tool"><b>OpenClaw</b><small class="inst">instruction + /recall</small></div>
+      <div class="tool"><b>any model</b><small class="auto">proxy · fully automatic</small></div>
+    </div>
+  </section>
+
+  <section id="cross">
+    <h2>How memory crosses your tools</h2>
+    <p class="lead">The honest mechanics. There are exactly three ways memory reaches a tool,
+      and <kbd>up</kbd> wires whichever ones each tool supports. We do not pretend any of it is
+      magic.</p>
+    <div class="doors">
+      <div class="door">
+        <div class="n">Door 1 · mechanical</div>
+        <h3>Hooks</h3>
+        <p>Claude Code injects this project's memory before you type, and captures your work as
+          it happens. The agent cannot forget to do it.</p>
+        <span class="tag mech">guaranteed</span>
+      </div>
+      <div class="door">
+        <div class="n">Door 2 · standing instruction</div>
+        <h3>MCP + AGENTS.md</h3>
+        <p>For Codex, Cursor, Kiro, Antigravity, OpenCode and OpenClaw, <kbd>up</kbd> writes an
+          instruction telling the agent to recall first and save as it goes. It does so on every
+          task. This is how every cross-tool memory layer does these tools, plus <kbd>/recall</kbd>
+          when you want to force it.</p>
+        <span class="tag soft">agent follows it</span>
+      </div>
+      <div class="door">
+        <div class="n">Door 3 · mechanical</div>
+        <h3>The proxy</h3>
+        <p>Point any model-configurable tool at the memwarden proxy and every turn is recalled
+          and captured, local model or paid, with no agent cooperation at all.</p>
+        <span class="tag mech">guaranteed</span>
+      </div>
+    </div>
+    <p class="note">Only hooks and the proxy are mechanically guaranteed. For MCP-only tools,
+      "automatic" means a standing instruction the agent follows, the same mechanism every
+      memory layer uses, backed by <kbd>/recall</kbd> on demand.</p>
   </section>
 
   <section id="how">
     <h2>How it works</h2>
-    <p class="lead">Capture → compress → store with integrity → recall the right slice under a
-      token budget.</p>
+    <p class="lead">Capture, compress on-device, store with integrity, recall the right slice
+      under a token budget. Scoping is by canonical path, so recall never silently misses.</p>
     <div class="flow">
-      <b>your agent</b> &nbsp;──observe──▶&nbsp; compress &nbsp;──▶&nbsp; libSQL store + <b>hash-chained oplog</b><br/><br/>
+      <b>your tool</b> &nbsp;──observe──▶&nbsp; compress &nbsp;──▶&nbsp; libSQL store + <b>hash-chained oplog</b><br/><br/>
       &nbsp;&nbsp;MiniLM embed &nbsp;──▶&nbsp; <b>TurboQuant</b> 4-bit codes &nbsp;──▶&nbsp; vector index<br/><br/>
-      <b>your agent</b> &nbsp;◀──resume / search──&nbsp; BM25 + vector (RRF), packed under a token budget
+      <b>your tool</b> &nbsp;◀──resume / recall──&nbsp; BM25 + vector (RRF), packed under a token budget
     </div>
   </section>
 
@@ -152,27 +240,25 @@
       <tr><td><b>TurboQuant (4-bit, compressed)</b></td><td class="ok">100%</td><td class="ok">100%</td></tr>
       <tr><td>Keyword search (lexical baseline)</td><td>71%</td><td>79%</td></tr>
     </table>
+    <p class="note">100% is on a small, clean corpus. The point: compression is free (quantized
+      == full-precision) and semantic recall beats lexical. 209 tests, including a cross-tool
+      reliability harness that proves memory captured in one tool is recalled in another.</p>
   </section>
 
   <section id="start">
     <h2>Quick start</h2>
     <p class="lead">Two runtime dependencies. No API key. Embeddings run on your machine.</p>
-<pre><span class="c"># start the local brain</span>
+<pre><span class="c"># install, build, and wire everything</span>
 npm install &amp;&amp; npm run build
-npm run dev                              <span class="c"># daemon on :3111</span>
+node dist/cli/bin.js <span class="a">up</span>
 
-<span class="c"># wire it into your agent (from your project dir)</span>
-node dist/cli/bin.js connect claude-code --with-hooks
-
-<span class="c"># now switch agents and just ask:</span>
-<span class="g">"what were we working on here?"</span>      <span class="c"># it already knows</span></pre>
+<span class="c"># restart a tool, then in any of them:</span>
+<span class="g">/recall</span>                                <span class="c"># or just ask "what were we working on here?"</span></pre>
   </section>
 
   <footer>
-    <div class="wrap">
-      <p><b>🧠 memwarden</b> — the unified memory layer for AI agents. Apache-2.0.</p>
-      <p><a href="https://github.com/theshiphq/memwarden">github.com/theshiphq/memwarden</a></p>
-    </div>
+    <p><b>🧠 memwarden</b> — one memory for every AI coding tool. Local, self-healing, verifiable. Apache-2.0.</p>
+    <p><a href="https://github.com/theshiphq/memwarden">github.com/theshiphq/memwarden</a></p>
   </footer>
 
 </div>
