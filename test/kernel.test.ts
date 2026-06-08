@@ -376,7 +376,7 @@ describe("cron / scheduled maintenance sweeps", () => {
   // The kernel has no cron primitive; the boot path (src/index.ts) drives
   // periodic maintenance via timer-fired `sdk.trigger(...)`. These tests pin
   // that mechanism: a scheduled trigger fires the registered function on its
-  // interval, and a scheduled trigger to a not-yet-ported function rejects
+  // interval, and a scheduled trigger to a not-yet-registered function rejects
   // harmlessly so it is safe to schedule before the handler exists.
   afterEach(() => {
     vi.useRealTimers();
@@ -414,10 +414,10 @@ describe("cron / scheduled maintenance sweeps", () => {
     process.on("unhandledRejection", onRej);
     try {
       const timer = setInterval(() => {
-        // installSweeps schedules sweeps for functions that may not be ported
+        // installSweeps schedules sweeps for functions that may not be registered
         // yet; the .catch() keeps the rejection from escaping.
         void sdk
-          .trigger({ function_id: "mem::not-ported-yet", payload: {} })
+          .trigger({ function_id: "mem::not-registered-yet", payload: {} })
           .catch(() => undefined);
       }, 1000);
       await vi.advanceTimersByTimeAsync(2000);

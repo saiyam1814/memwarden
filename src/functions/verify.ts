@@ -78,6 +78,7 @@ export function classifyProvenance(
   const deleted: string[] = [];
   const changed: string[] = [];
   let hashMatched = 0; // existing files whose captured hash still matches
+  let unchecked = 0; // existing files we could not content-check
   for (const f of files) {
     const abs = resolveUnder(root, f);
     if (!existsSync(abs)) {
@@ -85,11 +86,14 @@ export function classifyProvenance(
       continue;
     }
     const recorded = hashes[f];
-    if (recorded) {
-      const current = hashFile(abs);
-      if (current && current !== recorded) changed.push(f);
-      else if (current && current === recorded) hashMatched++;
+    if (!recorded) {
+      unchecked++; // no hash captured (e.g. too large at capture)
+      continue;
     }
+    const current = hashFile(abs);
+    if (current && current !== recorded) changed.push(f);
+    else if (current && current === recorded) hashMatched++;
+    else unchecked++; // can't hash now (e.g. grew past the cap) -> unverified
   }
   if (deleted.length > 0 || changed.length > 0) {
     const parts: string[] = [];
@@ -97,14 +101,19 @@ export function classifyProvenance(
     if (changed.length > 0) parts.push(`changed: ${changed.slice(0, 2).join(", ")}`);
     return { status: "stale", reason: `references files that no longer match (${parts.join("; ")})` };
   }
-  // Content-verified only if we actually re-checked a captured hash.
-  if (hashMatched > 0) {
-    return { status: "verified", reason: "referenced files exist and match their captured hashes" };
+  // Verified only when EVERY existing referenced file was content-checked.
+  // A single unchecked file (unhashed, or too large) leaves the memory
+  // sourced-but-not-verified, so one matching hash can't vouch for the rest.
+  if (hashMatched > 0 && unchecked === 0) {
+    return { status: "verified", reason: "all referenced files exist and match their captured hashes" };
   }
   return {
     status: "sourced_unverified",
-    reason: files.length > 0
-      ? "referenced files exist but were not hashed at capture (existence only)"
-      : "sourced by command or user, no file evidence to verify against",
+    reason:
+      hashMatched > 0
+        ? "some referenced files verified, but others could not be content-checked"
+        : files.length > 0
+          ? "referenced files exist but were not hashed at capture (existence only)"
+          : "sourced by command or user, no file evidence to verify against",
   };
 }

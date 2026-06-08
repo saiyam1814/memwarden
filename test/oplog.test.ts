@@ -1,7 +1,7 @@
 //
 // Oplog suite: the append-only, hash-chained mutation log that makes
-// memwarden's state tamper-evident (the Phase 0a substrate the Phase 0b
-// Ed25519 signing layers onto). Covers:
+// memwarden's state tamper-evident (and the substrate any future signing
+// layer would build on). Covers:
 //
 // 1. append-only ordering   — one row per real mutation, ids strictly
 // increasing, genesis links to the empty-string prev_hash, each row's

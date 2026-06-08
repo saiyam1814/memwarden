@@ -1,5 +1,5 @@
 //
-// Exercises the three ported core functions (mem::observe / mem::search /
+// Exercises the three core functions (mem::observe / mem::search /
 // mem::context) against the kernel + StoreMemory, plus their HTTP routes
 // for wire-compatibility (201 on observe, 200 on search/context, 400 on
 // bad input, auth open when no secret). Also pins the load-bearing BM25 +
@@ -130,7 +130,7 @@ describe("mem::observe (write path)", () => {
     expect(second).toMatchObject({ deduplicated: true });
   });
 
-  it("redacts secrets so they never persist (matches the original implementation privacy stripping)", async () => {
+  it("redacts secrets so they never persist (privacy stripping)", async () => {
     await sdk.trigger({
       function_id: "mem::observe",
       payload: observePayload({

@@ -166,8 +166,9 @@ rejects `safe_only` without a `cwd` to verify against rather than silently passi
 ```bash
 node dist/cli/bin.js doctor .
 
-  SAFE TO INJECT: 12 memories
-  STALE:           2 memories reference files that changed
+  VERIFIED:        8 memories (code-backed, current)
+  SOURCED:         3 memories (sourced, not content-verified)
+  STALE:           2 memories reference files that changed/deleted
   UNSOURCED:       1 memory has no evidence
 
   [stale]  Edit — references files that no longer match (changed: src/legacy.ts)
@@ -229,7 +230,7 @@ Your memory is a portable JSON bundle. No vendor in the loop.
 src/kernel/      in-process runtime: function registry, trigger dispatch, pubsub, HTTP
 src/state/       StateKV, memory + libSQL stores, append-only hash-chained oplog
 src/functions/   observe / search (BM25 + TurboQuant vector + RRF) / doctor / context / forget
-src/functions/verify.ts  Verified Recall: content-hash provenance + verified/stale/unsourced
+src/functions/verify.ts  Verified Recall: content-hash provenance -> verified / sourced_unverified / stale / unsourced
 src/functions/paths.ts   canonical project/cwd scoping (recall never silently misses)
 src/embedding/   on-device embedding provider (transformers.js, optional)
 src/mcp/         dependency-free MCP server (stdio JSON-RPC) + the recall prompt
@@ -239,7 +240,7 @@ src/cli/         up / down / connect / doctor / hooks / export / import
 src/cli/tools.ts per-tool adapters: Claude Code, Codex, Cursor, Kiro, Antigravity, OpenCode, OpenClaw
 src/bundle/      portable Brain Bundle export & import
 benchmark/       reproducible recall benchmark
-test/            214 tests: kernel, store parity, oplog, quantizer, MCP, proxy, tool-wiring,
+test/            217 tests: kernel, store parity, oplog, quantizer, MCP, proxy, tool-wiring,
                  path scoping, self-heal, cross-tool reliability harness, e2e
 ```
 

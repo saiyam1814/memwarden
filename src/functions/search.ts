@@ -349,12 +349,17 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       }
 
       // When filtering by project/cwd, over-fetch from the index so the
-      // post-filter still has a chance of returning `effectiveLimit`
-      // results.
+      // post-filter still has a chance of returning `effectiveLimit` results.
+      // safe_only over-fetches much harder (and caps at SAFE_SCAN_CAP) so a run
+      // of stale high-ranking hits is unlikely to starve a verified result; if
+      // the scan window is exhausted we log it rather than hide it.
+      const SAFE_SCAN_CAP = 2000;
       const filtering = !!(projectFilter || cwdFilter);
-      const fetchLimit = filtering
-        ? Math.max(effectiveLimit * 10, 100)
-        : effectiveLimit;
+      const fetchLimit = safeOnly
+        ? Math.min(SAFE_SCAN_CAP, Math.max(effectiveLimit * 50, 500))
+        : filtering
+          ? Math.max(effectiveLimit * 10, 100)
+          : effectiveLimit;
       // Measure retrieval itself (not the one-time cold rebuild above) — the
       // "is finding context fast?" number.
       const searchStartedAt = performance.now();
@@ -467,6 +472,18 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       }
       if (safeOnly && staleDropped > 0) {
         logger.info("Verified Recall dropped stale results", { dropped: staleDropped });
+      }
+      // No silent cap: if we ran out of safe candidates AND exhausted the scan
+      // window, a verified result could exist beyond it — say so.
+      if (
+        safeOnly &&
+        candidates.length < effectiveLimit &&
+        results.length >= fetchLimit
+      ) {
+        logger.warn("Verified Recall scan window exhausted; verified results may exist beyond it", {
+          scanned: results.length,
+          fetchLimit,
+        });
       }
 
       // Second pass: assemble results, reusing any observation loaded above.

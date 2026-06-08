@@ -65,6 +65,18 @@ describe("classifyProvenance", () => {
     expect(classifyProvenance(p, root).status).toBe("sourced_unverified");
   });
 
+  it("sourced_unverified when only SOME referenced files were content-checked", () => {
+    const root = repo();
+    writeFileSync(join(root, "small.ts"), "x\n");
+    writeFileSync(join(root, "other.ts"), "y\n"); // exists but never hashed (e.g. too large)
+    const p: Provenance = {
+      files: ["small.ts", "other.ts"],
+      fileHashes: hashFiles(["small.ts"], root), // only small.ts hashed
+    };
+    // One matching hash must NOT vouch for the unchecked file.
+    expect(classifyProvenance(p, root).status).toBe("sourced_unverified");
+  });
+
   it("verified when the referenced file exists and its hash still matches", () => {
     const root = repo();
     writeFileSync(join(root, "a.ts"), "export const x = 1;\n");

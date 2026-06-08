@@ -8,14 +8,14 @@
 // deletes, and list prefix/exact-scope filtering) is executed step by step
 // against BOTH StateStore implementations:
 //
-// - StoreMemory       (the dependency-free the original implementation KV mirror)
-// - StoreLibsql(:memory:) (the durable libSQL successor)
+// - StoreMemory           (the dependency-free in-memory store)
+// - StoreLibsql(:memory:) (the durable libSQL store)
 //
 // After every step we capture the observable result of each store and assert
 // the two are BYTE-IDENTICAL via canonical JSON. If the two stores ever
-// diverge on any observable result, the libSQL successor is not a faithful
-// drop-in for the original KV and Phase 0 has not been met. The store under
-// test is opaque: only the five public methods are observed.
+// diverge on any observable result, the libSQL store is not a faithful drop-in
+// for the in-memory one. The store under test is opaque: only the five public
+// methods are observed.
 
 import { describe, it, expect } from "vitest";
 import { StoreMemory } from "../src/state/store-memory.js";

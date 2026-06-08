@@ -3,7 +3,7 @@
 // write-path route persists through the state::* built-ins and a
 // read-path route lists it back, that 201 status is preserved, and that
 // a type:"state" trigger fires off the store mutation event the kernel
-// subscribes to. This is the closest stand-in for the ported
+// subscribes to. This is the closest stand-in for the
 // observe -> kv.set -> session-count-changed flow.
 
 import { afterEach, describe, expect, it } from "vitest";
