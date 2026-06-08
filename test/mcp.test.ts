@@ -173,3 +173,54 @@ describe("MCP tool round-trips against the live daemon", () => {
     expect(text.toLowerCase()).toContain("auth");
   });
 });
+
+describe("MCP prompts — the /recall command", () => {
+  it("initialize advertises the prompts capability", async () => {
+    const r = (await call("initialize"))!.result as {
+      capabilities: { prompts?: unknown };
+    };
+    expect(r.capabilities.prompts).toBeDefined();
+  });
+
+  it("prompts/list exposes recall with a query argument", async () => {
+    const r = (await call("prompts/list"))!.result as {
+      prompts: Array<{ name: string; arguments: Array<{ name: string }> }>;
+    };
+    const recall = r.prompts.find((p) => p.name === "recall");
+    expect(recall).toBeDefined();
+    expect(recall!.arguments.some((a) => a.name === "query")).toBe(true);
+  });
+
+  it("prompts/get recall injects the project's recalled memory", async () => {
+    const cwd = "/work/gamma";
+    await call("tools/call", {
+      name: "memory_remember",
+      arguments: {
+        text: "gamma service uses mTLS client certs for auth",
+        sessionId: "g1",
+        project: cwd,
+      },
+    });
+    // A server launched in /work/gamma — recall is auto-scoped to it.
+    const addr = http.server.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+    const scoped = createMcpServer({ baseUrl: `http://127.0.0.1:${port}`, cwd });
+    const res = await scoped.dispatch({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "prompts/get",
+      params: { name: "recall", arguments: { query: "gamma auth" } },
+    });
+    const r = res!.result as {
+      messages: Array<{ role: string; content: { type: string; text: string } }>;
+    };
+    expect(r.messages[0]!.role).toBe("user");
+    expect(r.messages[0]!.content.type).toBe("text");
+    expect(r.messages[0]!.content.text.toLowerCase()).toContain("mtls");
+  });
+
+  it("prompts/get rejects an unknown prompt", async () => {
+    const res = await call("prompts/get", { name: "nope" });
+    expect(res!.error).toBeDefined();
+  });
+});

@@ -9,6 +9,12 @@
 // Beyond the usual save/search/context tools, it exposes the two memwarden
 // has and others don't: memory_verify (cryptographic oplog integrity) and
 // memory_stats (live TurboQuant compression ratio).
+//
+// It also exposes an MCP *prompt*, `recall`, which clients surface as a
+// slash command (in Claude Code: `/mcp__memwarden__recall <query>`). The
+// user types it mid-chat, the server searches the project's memory and
+// returns the matching context as a message the client injects into the
+// conversation — on-demand recall from within any MCP-aware tool.
 
 const PROTOCOL_VERSION = "2024-11-05";
 const SERVER_NAME = "memwarden";
@@ -198,6 +204,39 @@ export function createMcpServer(opts: McpServerOptions) {
 
   const toolByName = new Map(tools.map((t) => [t.name, t]));
 
+  // MCP prompts. Clients surface these as slash commands; `recall` is the
+  // on-demand "pull my memory into this chat" command the whole layer is for.
+  const prompts = [
+    {
+      name: "recall",
+      description:
+        "Pull relevant memory from past sessions into THIS chat. Give it what you're working on (e.g. 'the auth refactor'); it searches your memwarden brain — scoped to the current project — and injects the matching context.",
+      arguments: [
+        {
+          name: "query",
+          description:
+            "What to recall (e.g. 'auth refactor', 'the proxy work'). Optional — omit to resume the project broadly.",
+          required: false,
+        },
+      ],
+    },
+  ];
+
+  async function recallText(query: string): Promise<string> {
+    try {
+      const result = (await api("POST", "/memwarden/search", {
+        query,
+        cwd: serverCwd,
+        format: "narrative",
+        limit: 20,
+        token_budget: 2000,
+      })) as { text?: string };
+      return typeof result.text === "string" ? result.text : "";
+    } catch {
+      return "";
+    }
+  }
+
   function ok(id: JsonRpcResponse["id"], result: unknown): JsonRpcResponse {
     return { jsonrpc: "2.0", id, result };
   }
@@ -218,7 +257,7 @@ export function createMcpServer(opts: McpServerOptions) {
       case "initialize":
         return ok(id, {
           protocolVersion: PROTOCOL_VERSION,
-          capabilities: { tools: {} },
+          capabilities: { tools: {}, prompts: {} },
           serverInfo: { name: SERVER_NAME, version: SERVER_VERSION },
         });
       case "notifications/initialized":
@@ -234,6 +273,29 @@ export function createMcpServer(opts: McpServerOptions) {
             inputSchema: t.inputSchema,
           })),
         });
+      case "prompts/list":
+        return ok(id, { prompts });
+      case "prompts/get": {
+        const params = (req.params ?? {}) as {
+          name?: string;
+          arguments?: Record<string, unknown>;
+        };
+        if (params.name !== "recall") {
+          return fail(id, -32602, `unknown prompt: ${params.name}`);
+        }
+        const query = str(
+          params.arguments?.["query"],
+          "what was I working on in this project",
+        );
+        const text = await recallText(query);
+        const body = text
+          ? `Relevant memory recalled by memwarden (scoped to this project) for "${query}":\n\n${text}`
+          : `No relevant memory found for "${query}".`;
+        return ok(id, {
+          description: `memwarden recall: ${query}`,
+          messages: [{ role: "user", content: { type: "text", text: body } }],
+        });
+      }
       case "tools/call": {
         const params = (req.params ?? {}) as {
           name?: string;
@@ -266,7 +328,11 @@ export function createMcpServer(opts: McpServerOptions) {
     }
   }
 
-  return { dispatch, toolNames: () => tools.map((t) => t.name) };
+  return {
+    dispatch,
+    toolNames: () => tools.map((t) => t.name),
+    promptNames: () => prompts.map((p) => p.name),
+  };
 }
 
 export type McpServer = ReturnType<typeof createMcpServer>;
