@@ -206,7 +206,7 @@ export function createMcpServer(opts: McpServerOptions) {
     {
       name: "memory_verify",
       description:
-        "Cryptographically verify the memory store has not been tampered with (oplog hash-chain integrity).",
+        "Check the oplog hash chain is intact: tamper-EVIDENT integrity. Detects edits, reorders, or drops in the memory log (it is not tamper-proof — there is no signing yet).",
       inputSchema: { type: "object", properties: {} },
       call: () => api("GET", "/memwarden/verify"),
     },

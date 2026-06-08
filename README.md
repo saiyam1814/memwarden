@@ -180,7 +180,7 @@ means it is sourced and still valid.
 | `memory_resume` | Recall what was worked on in this project, across all past sessions and tools |
 | `memory_search` | Hybrid semantic + keyword search |
 | `memory_remember` | Save a memory explicitly |
-| `memory_verify` | Cryptographically verify the store was not tampered with |
+| `memory_verify` | Check the oplog hash chain is intact (tamper-evident; not yet signed) |
 | `memory_stats` | Live counts, compression ratio, token reduction, latency |
 
 Plus an MCP **prompt**, `recall`, surfaced as a slash command (`/mcp__memwarden__recall <query>`
@@ -226,7 +226,7 @@ src/cli/         up / down / connect / doctor / hooks / export / import
 src/cli/tools.ts per-tool adapters: Claude Code, Codex, Cursor, Kiro, Antigravity, OpenCode, OpenClaw
 src/bundle/      portable Brain Bundle export & import
 benchmark/       reproducible recall benchmark
-test/            209 tests: kernel, store parity, oplog, quantizer, MCP, proxy, tool-wiring,
+test/            208 tests: kernel, store parity, oplog, quantizer, MCP, proxy, tool-wiring,
                  path scoping, self-heal, cross-tool reliability harness, e2e
 ```
 

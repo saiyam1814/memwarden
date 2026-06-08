@@ -1,5 +1,5 @@
 //
-// Phase-0 config shim. Reads process.env directly; only the handful of
+// Config shim. Reads process.env directly; only the handful of
 // flags the core functions consult are modelled here.
 
 function env(name: string): string | undefined {
@@ -41,7 +41,7 @@ export function getAgentId(): string | undefined {
 /**
  * Per-observation LLM compression is opt-in. When false (the default)
  * mem::observe takes the zero-LLM synthetic-compression path. No LLM
- * provider is wired in Phase 0, so this is effectively always false here,
+ * provider is wired in the core, so this is effectively always false here,
  * but the flag is reserved for when the model layer lands.
  */
 export function isAutoCompressEnabled(): boolean {

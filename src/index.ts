@@ -1,14 +1,14 @@
 //
-// memwarden boot entrypoint. Mirrors the original engine worker boot but
-// against the in-process kernel instead of an external engine:
-// - build the kernel via registerWorker (an external engine SDK stand-in),
+// memwarden boot entrypoint.
+// 
+// - build the kernel via registerWorker,
 // - register app functions (./functions/*) if present,
 // - start the node:http REST server on restPort,
 // - keep the periodic sweeps as plain setInterval(...).unref() timers
 // that fire `trigger mem::*` (no scheduler in the SDK surface),
 // - graceful shutdown on SIGINT/SIGTERM.
 //
-// Phase 0: the ./functions/* modules may not all exist yet. Function
+// the core: the ./functions/* modules may not all exist yet. Function
 // registration is therefore best-effort: a missing module is logged and
 // skipped so the kernel still boots and serves whatever is wired.
 
@@ -45,7 +45,7 @@ const STORE_URL =
 // or fire-and-forget trigger rejection should never terminate the
 // long-lived memory service. The kernel surfaces rejections to the
 // relevant call site via .catch(); everything else is logged and
-// continued. Throttle to avoid spamming on bursts (mirrors the original engine
+// continued. Throttle to avoid spamming on bursts (matches the daemon
 // index.ts which reads reason.code / function_id / message).
 let lastUnhandledLogAt = 0;
 process.on("unhandledRejection", (reason) => {
@@ -63,7 +63,7 @@ process.on("unhandledRejection", (reason) => {
 
 /**
  * Optionally load a function-registration module by path and call its
- * exported registrar. Missing modules are skipped (Phase 0 tolerance).
+ * exported registrar. Missing modules are skipped.
  */
 async function tryRegister(
   modulePath: string,
@@ -95,7 +95,7 @@ async function tryRegister(
 /**
  * Register the application functions against the kernel.
  *
- * The Phase-0 core (mem::observe / mem::context / mem::search and their
+ * The core (mem::observe / mem::context / mem::search and their
  * HTTP routes) is wired statically: the modules exist and share a single
  * StateKV constructed over the kernel. Functions still being wired
  * (smart-search, remember, enrich, events, health) remain best-effort

@@ -44,7 +44,7 @@ export const KV = {
   insights: "mem:insights",
   graphEdgeHistory: "mem:graph:edge-history",
   enrichedChunks: (sessionId: string) => `mem:enriched:${sessionId}`,
-  // Reserved per-observation quantized codes; Phase 0b persists the whole
+  // Reserved per-observation quantized codes; a later phase persists the whole
   // quantized index as one blob under `quantParams` instead.
   latentEmbeddings: (obsId: string) => `mem:latent:${obsId}`,
   quantParams: "mem:quant:params",

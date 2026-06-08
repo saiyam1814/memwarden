@@ -1,17 +1,10 @@
 //
-// HTTP route registrations for the Phase-0 core surface. Ported from the
-// relevant slice of the original src/triggers/api.ts. Each route is a
+// HTTP route registrations for the core surface. Each route is a
 // registerFunction(id, handler) + registerTrigger({type:"http", ...}) pair
 // that validates the request body and delegates to a mem::<x> business
-// handler via sdk.trigger. The canonical REST contract is preserved
-// verbatim (paths prefixed /memwarden, methods, status codes, and the
-// middleware::api-auth chain) so existing the original engine connectors talk to
-// memwarden unchanged.
-//
-// Scope: the canonical core — livez, observe, context, search — is wired
-// here. The rest of the original ~132 routes are mechanical follow-ups
-// (same registerFunction + http-trigger pattern) and land as their business
-// handlers are wired.
+// handler via sdk.trigger (paths prefixed /memwarden, with the
+// middleware::api-auth chain). Scope: livez, observe, context, search,
+// verify, stats, doctor, export, import.
 
 import type { ApiRequest, ISdk } from "../kernel/index.js";
 import type { HookPayload } from "../functions/types.js";

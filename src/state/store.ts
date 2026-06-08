@@ -20,7 +20,7 @@
 // NOT know about triggers; it just emits and the kernel routes.
 // 2. An append-only, hash-chained oplog of every mutation (SQLite-backed
 // impl persists it; the memory impl mirrors it in an array). Ed25519
-// signing lands in Phase 0b; for now each entry carries a SHA-256
+// signing lands in a later phase; for now each entry carries a SHA-256
 // hash over its canonical bytes plus the previous entry's hash.
 
 /** A single update operation. Only `type:"set"` is ever produced by callers. */
@@ -105,8 +105,8 @@ export interface StateStore {
 /**
  * Apply the StateKV `update` op-list to a record, in place semantics returning
  * the mutated record. Shared by both store implementations so their behavior
- * is identical. Only `type:"set"` is honored (verbatim the original engine semantics:
- * grep-confirmed zero push/inc/delete/append usage); `path` is a flat
+ * is identical. Only `type:"set"` is honored (no push/inc/delete/append is
+ * ever produced by callers); `path` is a flat
  * top-level field name, never dotted. Unknown op types are ignored.
  */
 export function applyUpdateOps(

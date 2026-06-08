@@ -1,9 +1,9 @@
 //
 // The subset of the shared data model that the wired core functions
 // (observe / context / search) and their supporting modules depend on.
-// Trimmed to only the shapes the Phase-0 surface touches; the wire shapes
+// Trimmed to only the shapes the core surface touches; the wire shapes
 // (HookPayload, RawObservation, CompressedObservation, Session, ...) are
-// kept byte-for-byte compatible with the original engine so existing connectors can
+// kept the stable wire contract so existing connectors can
 // talk to memwarden unchanged.
 
 export type HookType =
@@ -212,10 +212,10 @@ export interface Lesson {
 }
 
 /**
- * Embedding provider abstraction. The Phase-0 vector stream is stubbed to
+ * Embedding provider abstraction. The the core vector stream is stubbed to
  * empty (no provider wired), so this only needs to exist for the
  * VectorIndex / hybrid-fusion plumbing to typecheck; an actual provider
- * lands in Phase 0b.
+ * lands in a later phase.
  */
 export interface EmbeddingProvider {
   name: string;

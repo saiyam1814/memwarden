@@ -1,6 +1,6 @@
 //
 // Public barrel for the memwarden kernel. This is the module that
-// replaces an external engine SDK for wired app code: it exports the
+// is the in-process runtime app code builds against: it exports the
 // `registerWorker` factory, the `TriggerAction` value, and the
 // `ISdk` / `ApiRequest` types the call sites import.
 
@@ -33,7 +33,7 @@ export type {
 } from "./types.js";
 
 /**
- * Fire-and-forget trigger sentinel. Ported app code does
+ * Fire-and-forget trigger sentinel. App code does
  * `import { TriggerAction } from "<kernel>"` and calls
  * `TriggerAction.Void()` to mark a trigger whose result is not awaited.
  * `trigger` recognizes the `{ __void: true }` sentinel and swallows any

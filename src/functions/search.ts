@@ -1,16 +1,16 @@
 //
-// BM25 keyword search (mem::search). Ported from the original
+// BM25 keyword search (mem::search). Implemented for memwarden
 // src/functions/search.ts. The BM25-only retrieval path, the lazy
 // index-rebuild, the project/cwd over-fetch + post-filter, the
 // memory-scope fallback, and the three output formats (full / compact /
 // narrative) with token-budget packing are preserved with identical
 // validation and wire shapes.
 //
-// PHASE-0 SCOPE: no embedding provider is wired, so vectorIndexAddGuarded
+// SCOPE: no embedding provider is wired, so vectorIndexAddGuarded
 // is a no-op soft-fail (its signature is kept because observe.ts calls it),
 // and rebuildIndex only repopulates the BM25 index. The batched embed flush
 // and IndexPersistence sync hooks from the earlier engine are intentionally
-// dropped until the vector provider lands in Phase 0b.
+// dropped until the vector provider lands in a later phase.
 
 import type { ISdk } from "../kernel/index.js";
 import type {
@@ -98,7 +98,7 @@ export function clipEmbedInput(text: string): string {
 
 // Single guarded vector-index write. Returns true on success. Soft-fails
 // (logs + no-op) on dimension mismatch or embed error so a downed embedder
-// never breaks the upstream save. In Phase 0 no provider is wired, so this
+// never breaks the upstream save. In the core no provider is wired, so this
 // returns false immediately; observe.ts treats false as "vector skipped",
 // not an error.
 export async function vectorIndexAddGuarded(
@@ -138,7 +138,7 @@ export async function vectorIndexAddGuarded(
 // Rebuilds the BM25 index from KV. Walks the memories scope (so
 // mem::remember entries survive a restart) and every session's
 // observations. The vector index is cleared in lockstep so BM25 and vector
-// stay in sync; in Phase 0 it stays empty (no provider). When a persisted
+// stay in sync; in the core it stays empty (no provider). When a persisted
 // quantized index was just restored (vector-persistence.ts), pass
 // `preserveVectorIndex` to switch the vector side to INCREMENTAL SYNC:
 // restored codes are kept, only docs missing from the index are embedded,

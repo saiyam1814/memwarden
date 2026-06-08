@@ -1,17 +1,17 @@
 //
-// The write path (mem::observe). Ported from the original
+// The write path (mem::observe). Implemented for memwarden
 // src/functions/observe.ts. Accepts a HookPayload, validates it, optionally
 // dedups, privacy-strips the raw payload, builds a RawObservation, then —
 // inside a per-session keyed lock — enforces the per-session cap, persists
 // the raw observation, updates/creates the session row (observationCount++,
 // updatedAt, firstPrompt), and runs the default zero-LLM synthetic
 // compression path: write the synthetic over the same obsId, add it to the
-// BM25 index, and (Phase 0b) the vector index. The set/update on
+// BM25 index, and (a later phase) the vector index. The set/update on
 // KV.sessions flows through the StateStore, so the kernel's type:"state"
 // trigger fires from the store's mutation event. Returns
 // { observationId } so existing connectors see the same wire shape.
 //
-// PHASE-0 SCOPE: image *detection* + modality tagging is preserved (pure,
+// SCOPE: image *detection* + modality tagging is preserved (pure,
 // keeps the observation wire shape compatible), but the image-to-disk
 // persistence, ref-counting, vision-embed, and disk-size-delta side effects
 // from the earlier engine are not wired — they depend on the image-store /
@@ -267,7 +267,7 @@ export function registerObserveFunction(
       // Per-observation LLM compression is opt-in .
       // Default path: build a zero-LLM synthetic compression so recall and
       // BM25 search work without an LLM. The memwarden has no LLM provider
-      // wired in Phase 0, so the synthetic path is always taken.
+      // wired in the core, so the synthetic path is always taken.
       if (isAutoCompressEnabled()) {
         await sdk.trigger({
           function_id: "mem::compress",

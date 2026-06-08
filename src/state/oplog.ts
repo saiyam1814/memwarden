@@ -1,9 +1,8 @@
 //
-// Hash-chain helpers for the append-only oplog. Phase 0a uses a SHA-256 chain
-// (tamper-evident: any edit/reorder/drop breaks the chain at the first touched
-// entry). Phase 0b adds Ed25519 signatures over the same canonical bytes; the
-// canonicalization here is the contract both phases sign over, so it must stay
-// stable.
+// Hash-chain helpers for the append-only oplog: a SHA-256 chain that is
+// tamper-evident (any edit/reorder/drop breaks the chain at the first touched
+// entry). The canonicalization here is the contract that anything signing the
+// oplog later would sign over, so it must stay stable.
 
 import { createHash } from "node:crypto";
 import { canonicalize, type OplogEntry, type StateEventType } from "./store.js";

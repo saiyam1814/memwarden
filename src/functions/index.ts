@@ -1,5 +1,5 @@
 //
-// Barrel + single registration entrypoint for the Phase-0 core functions
+// Barrel + single registration entrypoint for the core functions
 // (mem::observe, mem::context, mem::search). The boot path (src/index.ts)
 // constructs the StateKV over the kernel and calls registerCoreFunctions to
 // wire all three against the kernel's function registry in one step.
@@ -45,7 +45,7 @@ export interface RegisterCoreOptions {
 }
 
 /**
- * Register the three Phase-0 core functions against the kernel. The kernel
+ * Register the three core functions against the kernel. The kernel
  * routes the five state::* ids to its StateStore, so StateKV — constructed
  * over the kernel here — is the persistence chokepoint all three share.
  */

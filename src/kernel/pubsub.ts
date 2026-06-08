@@ -1,6 +1,6 @@
 //
-// In-process pub/sub. The external engine offered durable streams; in a
-// single-process kernel a plain EventEmitter satisfies both the
+// In-process pub/sub. In a single-process kernel a plain EventEmitter
+// satisfies both the
 // `durable:subscriber` topic triggers (events.ts) and the
 // `stream::set` / `stream::send` surface that observe.ts fires for the
 // live viewer. Durability is effectively unused: the four durable
