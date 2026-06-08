@@ -1,7 +1,7 @@
 //
-// End-to-end Phase 0 exit test ("observe / context / search end to end" from
-// research/next-gen-plan-v3.md). Boots the FULL stack the way src/index.ts
-// does — kernel + StoreLibsql(:memory:) + the registerCoreFunctions /
+// End-to-end test: observe / context / search over the wire. Boots the FULL
+// stack the way src/index.ts does — kernel + StoreLibsql(:memory:) + the
+// registerCoreFunctions /
 // registerApiTriggers wiring + a real node:http server on an EPHEMERAL port
 // (port 0) — and exercises the canonical /memwarden/* REST contract over the
 // wire with fetch():

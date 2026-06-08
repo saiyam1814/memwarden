@@ -20,7 +20,7 @@ that belongs to the user.
 
 ```bash
 npm install
-npm test          # 96 tests: kernel, store parity, oplog integrity, e2e
+npm test          # kernel, store parity, oplog integrity, MCP, e2e
 npm run dev       # boots the kernel + REST API on :3111
 ```
 
@@ -35,18 +35,24 @@ curl 'localhost:3111/memwarden/context?project=demo'
 
 ## How it works
 
-Read **[docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)** for the full walkthrough: the kernel,
-the state layer, the oplog hash chain, the write/read paths, and what each build phase adds.
+An agent posts what it sees to `observe`; memwarden compresses it, stores it in a
+libSQL key-value store, and appends a SHA-256 **hash-chained oplog** entry so the
+store is tamper-evident. `search` ranks memories with a hybrid of BM25 keywords and
+a **TurboQuant-compressed** vector index; `context` packs the most relevant memory
+into a block under a token budget. Everything runs through one in-process kernel and
+a small REST API, so any MCP client can share the same local brain.
 
 ## Layout
 
 ```
-src/kernel/      in-process runtime: function registry, trigger dispatch, cron, pubsub, HTTP
+src/kernel/      in-process runtime: function registry, trigger dispatch, pubsub, HTTP
 src/state/       StateKV (5-method contract), memory + libSQL stores, append-only oplog
-src/functions/   observe / search (BM25 + RRF) / context, and their supporting utilities
+src/functions/   observe / search (BM25 + TurboQuant vector + RRF) / context
+src/embedding/   on-device embedding provider (transformers.js, optional)
+src/mcp/         dependency-free MCP server (stdio JSON-RPC)
+src/cli/         `memwarden connect` — wire any MCP client to the local brain
 src/triggers/    REST API routes + auth middleware
-test/            96 tests: unit, store parity, oplog tamper detection, end-to-end
-docs/            architecture and how-it-works
+test/            unit, store parity, oplog tamper detection, MCP, end-to-end
 ```
 
 ## License

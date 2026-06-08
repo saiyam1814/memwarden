@@ -1,6 +1,7 @@
 //
-// THE PARITY SUITE — the Phase 0 exit criterion from
-// research/next-gen-plan-v3.md ("Parity vs the original implementation mirror green").
+// THE PARITY SUITE — asserts the in-memory and libSQL stores behave
+// identically, so tests can run against the fast memory store while
+// production uses libSQL.
 //
 // A single operation script (set / get / update / delete / list, exercising
 // scopes, last-write-wins overwrites, missing keys, update-from-{}, idempotent
