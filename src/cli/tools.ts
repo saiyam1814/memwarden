@@ -217,12 +217,14 @@ const AGENTS_END = "<!-- memwarden:end -->";
 export function memwardenAgentsBlock(): string {
   return [
     AGENTS_START,
-    "## Memory (memwarden)",
+    "## Memory — always use it (memwarden)",
     "",
-    "This project shares one memory across all your AI tools (memwarden).",
+    "This project has shared, cross-tool memory (memwarden). Treat it as part of every task, automatically, without being asked:",
     "",
-    "- At the **start of a task**, recall prior context: call the `memory_resume` tool, or type `/recall <topic>`.",
-    "- When you learn a **durable fact, decision, or fix**, call `memory_remember` so the next session — in any tool — has it.",
+    "1. **Before starting any task**, call the `memory_resume` tool (or `/recall`) to load what past sessions — in Claude Code, Codex, Cursor, or any other tool — already learned here.",
+    "2. **Whenever you learn something durable** (a decision, a fix, how something works, a preference), call `memory_remember` to save it.",
+    "",
+    "What you save is available in every tool, so always recall first and save as you go.",
     AGENTS_END,
     "",
   ].join("\n");
