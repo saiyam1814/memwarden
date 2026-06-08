@@ -34,6 +34,7 @@ import {
   getQuantSeed,
 } from "./config.js";
 import { memoryToObservation } from "./memory-utils.js";
+import { canonicalizePath } from "./paths.js";
 import { recordAccessBatch } from "./access-tracker.js";
 import { loadVectorIndex, persistVectorIndex } from "./vector-persistence.js";
 import { logger } from "./logger.js";
@@ -301,13 +302,17 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         }
         effectiveLimit = Math.min(data.limit, MAX_LIMIT);
       }
+      // Canonicalize the scope filters (resolve symlinks, trailing slashes,
+      // `..`) so /tmp and /private/tmp — or any two spellings of the same
+      // directory — match. Stored values are canonicalized the same way at
+      // comparison time below.
       const projectFilter =
         typeof data.project === "string" && data.project.trim().length > 0
-          ? data.project.trim()
+          ? canonicalizePath(data.project)
           : undefined;
       const cwdFilter =
         typeof data.cwd === "string" && data.cwd.trim().length > 0
-          ? data.cwd.trim()
+          ? canonicalizePath(data.cwd)
           : undefined;
       const format = typeof data.format === "string" ? data.format : "full";
       if (!["full", "compact", "narrative"].includes(format)) {
@@ -415,15 +420,19 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         if (filtering) {
           const s = await loadSession(r.sessionId);
           if (s) {
-            if (projectFilter && s.project !== projectFilter) continue;
-            if (cwdFilter && s.cwd !== cwdFilter) continue;
+            if (projectFilter && canonicalizePath(s.project) !== projectFilter)
+              continue;
+            if (cwdFilter && canonicalizePath(s.cwd) !== cwdFilter) continue;
           } else {
             // Session not found: synthetic sessionId (memory) or a deleted
             // session. A null memProject means "project unknown — treat as
             // unscoped and let it through" for backward-compatibility.
             if (projectFilter) {
               const memProject = await loadMemoryProject(r.obsId);
-              if (memProject !== null && memProject !== projectFilter)
+              if (
+                memProject !== null &&
+                canonicalizePath(memProject) !== projectFilter
+              )
                 continue;
             }
             // cwd filter does not apply to unbound entries.
