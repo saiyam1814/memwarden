@@ -32,6 +32,7 @@ import { isAutoCompressEnabled, getAgentId } from "./config.js";
 import { buildSyntheticCompression } from "./compress-synthetic.js";
 import { getSearchIndex, vectorIndexAddGuarded } from "./search.js";
 import { logger } from "./logger.js";
+import { metrics } from "../observability/metrics.js";
 
 export function extractImage(d: unknown): string | undefined {
   if (!d) return undefined;
@@ -278,6 +279,7 @@ export function registerObserveFunction(
         });
       } else {
         const synthetic = buildSyntheticCompression(raw);
+        metrics.recordObserve(JSON.stringify(raw), JSON.stringify(synthetic));
         await kv.set(KV.observations(payload.sessionId), obsId, synthetic);
         getSearchIndex().add(synthetic);
         await vectorIndexAddGuarded(

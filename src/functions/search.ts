@@ -37,6 +37,7 @@ import { memoryToObservation } from "./memory-utils.js";
 import { recordAccessBatch } from "./access-tracker.js";
 import { loadVectorIndex, persistVectorIndex } from "./vector-persistence.js";
 import { logger } from "./logger.js";
+import { metrics } from "../observability/metrics.js";
 
 let index: SearchIndex | null = null;
 let vectorIndex: VectorIndexLike | null = null;
@@ -323,7 +324,11 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       const fetchLimit = filtering
         ? Math.max(effectiveLimit * 10, 100)
         : effectiveLimit;
+      // Measure retrieval itself (not the one-time cold rebuild above) — the
+      // "is finding context fast?" number.
+      const searchStartedAt = performance.now();
       const results = idx.search(query, fetchLimit);
+      metrics.recordSearch(performance.now() - searchStartedAt);
 
       // Resolve session -> project/cwd once per sessionId we touch.
       const sessionCache = new Map<string, Session | null>();

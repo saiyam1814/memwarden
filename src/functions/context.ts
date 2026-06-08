@@ -33,10 +33,7 @@ import type { StateKV } from "../state/kv.js";
 import { recordAccessBatch } from "./access-tracker.js";
 import { isSlotsEnabled } from "./config.js";
 import { logger } from "./logger.js";
-
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 3);
-}
+import { metrics, estimateTokens } from "../observability/metrics.js";
 
 function escapeXmlAttr(s: string): string {
   return s
@@ -67,6 +64,7 @@ export function registerContextFunction(
   sdk.registerFunction(
     "mem::context",
     async (data: { sessionId: string; project: string; budget?: number }) => {
+      const startedAt = performance.now();
       const budget = data.budget || tokenBudget;
       const blocks: ContextBlock[] = [];
 
@@ -220,6 +218,10 @@ export function registerContextFunction(
 
       blocks.sort((a, b) => b.recency - a.recency);
 
+      // Candidate tokens = everything that matched; served = what fits the
+      // budget. The gap is the token reduction the budget governor delivers.
+      const candidateTokens = blocks.reduce((sum, b) => sum + b.tokens, 0);
+
       let usedTokens = 0;
       const selected: string[] = [];
       const accessedIds: string[] = [];
@@ -241,10 +243,16 @@ export function registerContextFunction(
       }
 
       if (selected.length === 0) {
+        metrics.recordContext(candidateTokens, 0, performance.now() - startedAt);
         logger.info("No context available", { project: data.project });
         return { context: "", blocks: 0, tokens: 0 };
       }
 
+      metrics.recordContext(
+        candidateTokens,
+        usedTokens,
+        performance.now() - startedAt,
+      );
       const result = `${header}\n${selected.join("\n\n")}\n${footer}`;
       logger.info("Context generated", {
         blocks: selected.length,

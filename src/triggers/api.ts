@@ -20,6 +20,7 @@ import { getVectorIndex, getEmbeddingProvider } from "../functions/index.js";
 import { QuantizedVectorIndex } from "../functions/quantized-vector-index.js";
 import { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
+import { metrics } from "../observability/metrics.js";
 import { timingSafeCompare } from "./auth.js";
 
 type Response = {
@@ -360,6 +361,7 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
       } else {
         body["compression"] = null;
       }
+      body["performance"] = metrics.snapshot();
       return { status_code: 200, body };
     },
   );

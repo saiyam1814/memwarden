@@ -1,12 +1,12 @@
 # memwarden
 
-**One brain. Every agent. Yours.**
+**The unified memory layer for AI agents — remembers, verifies, and cuts tokens.**
 
-A local-first, self-custodied memory layer for AI coding agents. Agents propose memories;
-memwarden verifies them (evidence rules + multi-vendor model debate), signs them, invalidates
-them when the code changes, and packs them into context under a hard token budget. Your memory
-lives in a portable, signed, optionally encrypted **Brain Bundle** you can move between Claude
-Code, Codex, Cursor, devices, and vendors.
+A local-first, self-custodied memory layer for AI coding agents. One local daemon holds
+your memory; every agent (Claude Code, Codex, Cursor, …) shares it over MCP, so switching
+tools never loses context. Memories are compressed with TurboQuant, stored in a
+tamper-evident hash-chained log you can verify, and packed back into context under a hard
+token budget — so recall is fast and costs fewer tokens, not more.
 
 > **Status: private build phase.** Not announced, not for distribution.
 
