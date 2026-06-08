@@ -35,6 +35,7 @@ import {
 } from "./config.js";
 import { memoryToObservation } from "./memory-utils.js";
 import { canonicalizePath } from "./paths.js";
+import { classifyProvenance } from "./verify.js";
 import { recordAccessBatch } from "./access-tracker.js";
 import { loadVectorIndex, persistVectorIndex } from "./vector-persistence.js";
 import { logger } from "./logger.js";
@@ -314,6 +315,11 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         typeof data.cwd === "string" && data.cwd.trim().length > 0
           ? canonicalizePath(data.cwd)
           : undefined;
+      // Verified Recall firewall: when on (recall surfaces default it on),
+      // drop results that reference files now deleted or content-changed, so
+      // stale memory is never injected. Needs a cwd to check against.
+      const safeOnly =
+        (data as { safe_only?: unknown }).safe_only === true && cwdFilter !== undefined;
       const format = typeof data.format === "string" ? data.format : "full";
       if (!["full", "compact", "narrative"].includes(format)) {
         throw new Error(
@@ -457,7 +463,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           return mem ? memoryToObservation(mem) : null;
         }),
       );
-      const enriched: SearchResult[] = [];
+      let enriched: SearchResult[] = [];
       for (let i = 0; i < candidates.length; i++) {
         const obs = obsResults[i];
         const cand = candidates[i]!;
@@ -466,6 +472,21 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
             observation: obs,
             score: cand.score,
             sessionId: cand.sessionId,
+          });
+        }
+      }
+
+      // Verified Recall: when safe_only is requested, drop stale results
+      // (referenced files deleted or content-changed under the scoped repo).
+      // Unsourced memories are kept — they are unverified, not dangerous.
+      if (safeOnly && cwdFilter) {
+        const before = enriched.length;
+        enriched = enriched.filter(
+          (r) => classifyProvenance(r.observation.provenance, cwdFilter).status !== "stale",
+        );
+        if (enriched.length < before) {
+          logger.info("Verified Recall dropped stale results", {
+            dropped: before - enriched.length,
           });
         }
       }

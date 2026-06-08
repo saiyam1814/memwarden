@@ -347,6 +347,7 @@ async function fetchMemory(ctx: Ctx, query: string): Promise<string> {
       format: "narrative",
       project: ctx.project,
       cwd: ctx.cwd,
+      safe_only: true, // Verified Recall: never inject stale memory into a model call
       ...(ctx.tokenBudget ? { token_budget: ctx.tokenBudget } : {}),
     }),
   });

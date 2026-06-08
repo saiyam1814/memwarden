@@ -88,6 +88,7 @@ export type ObservationType =
 export interface Provenance {
   cwd?: string;
   files?: string[]; // files the memory references / was derived from
+  fileHashes?: Record<string, string>; // file -> sha256 at capture, for drift checks
   command?: string; // tool + command that produced it
   agent?: string; // which agent captured it (claude, codex, …)
   capturedAt?: string;

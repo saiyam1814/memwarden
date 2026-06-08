@@ -1,0 +1,126 @@
+//
+// Verified Recall: the classifier (verified / stale / unsourced, including
+// content drift) and the recall firewall end to end — capture a memory that
+// references a real file, recall it, then change the file and confirm
+// safe_only recall drops it while plain search still returns it.
+
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  mkdirSync,
+} from "node:fs";
+import { realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  registerWorker,
+  __resetKernelSingleton,
+  type Kernel,
+} from "../src/kernel/index.js";
+import { StoreLibsql } from "../src/state/store-libsql.js";
+import { StateKV } from "../src/state/kv.js";
+import { registerCoreFunctions, getSearchIndex } from "../src/functions/index.js";
+import { classifyProvenance, hashFiles } from "../src/functions/verify.js";
+import type { Provenance } from "../src/functions/types.js";
+
+let sdk: Kernel;
+const dirs: string[] = [];
+
+beforeEach(() => {
+  __resetKernelSingleton();
+  getSearchIndex().clear();
+  sdk = registerWorker("in-process", { workerName: "memwarden-verify" }, {
+    store: new StoreLibsql({ url: ":memory:" }),
+  });
+  registerCoreFunctions(sdk, new StateKV(sdk));
+});
+afterEach(() => {
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  __resetKernelSingleton();
+});
+
+function repo(): string {
+  const d = realpathSync(mkdtempSync(join(tmpdir(), "memwarden-verify-")));
+  dirs.push(d);
+  return d;
+}
+
+describe("classifyProvenance", () => {
+  it("unsourced when there is no evidence", () => {
+    expect(classifyProvenance(undefined, "/r").status).toBe("unsourced");
+    expect(classifyProvenance({ userConfirmed: false }, "/r").status).toBe("unsourced");
+  });
+
+  it("verified when a command-sourced memory references no files", () => {
+    const p: Provenance = { command: "Bash: npm test" };
+    expect(classifyProvenance(p, "/r").status).toBe("verified");
+  });
+
+  it("verified when the referenced file exists and its hash still matches", () => {
+    const root = repo();
+    writeFileSync(join(root, "a.ts"), "export const x = 1;\n");
+    const p: Provenance = { files: ["a.ts"], fileHashes: hashFiles(["a.ts"], root) };
+    expect(classifyProvenance(p, root).status).toBe("verified");
+  });
+
+  it("stale when the referenced file is gone", () => {
+    const root = repo();
+    const p: Provenance = { files: ["ghost.ts"], command: "Edit" };
+    const v = classifyProvenance(p, root);
+    expect(v.status).toBe("stale");
+    expect(v.reason).toMatch(/deleted/);
+  });
+
+  it("stale when the referenced file's content changed", () => {
+    const root = repo();
+    writeFileSync(join(root, "b.ts"), "v1\n");
+    const p: Provenance = { files: ["b.ts"], fileHashes: hashFiles(["b.ts"], root) };
+    writeFileSync(join(root, "b.ts"), "v2 — changed\n"); // content drift
+    const v = classifyProvenance(p, root);
+    expect(v.status).toBe("stale");
+    expect(v.reason).toMatch(/changed/);
+  });
+});
+
+describe("Verified Recall firewall (safe_only)", () => {
+  async function observe(root: string, file: string, output: string) {
+    return sdk.trigger({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "post_tool_use",
+        sessionId: "s1",
+        project: root,
+        cwd: root,
+        timestamp: new Date().toISOString(),
+        data: { tool_name: "Edit", tool_input: { file_path: file }, tool_output: output },
+      },
+    });
+  }
+  async function search(root: string, safeOnly: boolean): Promise<number> {
+    const r = (await sdk.trigger({
+      function_id: "mem::search",
+      payload: { query: "bearer auth tokens", cwd: root, project: root, limit: 10, safe_only: safeOnly },
+    })) as { results: unknown[] };
+    return r.results.length;
+  }
+
+  it("recalls a verified memory, then drops it once its file drifts", async () => {
+    const root = repo();
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "src", "auth.ts"), "// bearer auth tokens, 1h TTL\n");
+    await observe(root, "src/auth.ts", "auth uses bearer tokens with a 1h TTL");
+
+    // Verified: file present + hash matches what was captured.
+    expect(await search(root, true)).toBeGreaterThan(0);
+
+    // The code changes out from under the memory.
+    writeFileSync(join(root, "src", "auth.ts"), "// totally rewritten auth\n");
+
+    // safe_only recall now firewalls the stale memory...
+    expect(await search(root, true)).toBe(0);
+    // ...but a plain (unverified) search still returns it.
+    expect(await search(root, false)).toBeGreaterThan(0);
+  });
+});

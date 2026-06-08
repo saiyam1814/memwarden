@@ -66,6 +66,7 @@ export async function handleSessionStart(
         format: "narrative",
         limit: 20,
         token_budget: 1500,
+        safe_only: true, // Verified Recall: SessionStart injects only verified memory
       }),
     });
     if (!res.ok) return "";

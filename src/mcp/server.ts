@@ -127,6 +127,7 @@ export function createMcpServer(opts: McpServerOptions) {
           cwd: str(a["cwd"], serverCwd),
           format: "narrative",
           limit: 20,
+          safe_only: true, // Verified Recall: never resume stale memory
           ...(typeof a["token_budget"] === "number"
             ? { token_budget: a["token_budget"] }
             : { token_budget: 2000 }),
@@ -198,6 +199,7 @@ export function createMcpServer(opts: McpServerOptions) {
           cwd: str(a["cwd"], serverCwd),
           format: "narrative",
           limit: 20,
+          safe_only: true, // Verified Recall: never inject stale memory
           ...(typeof a["token_budget"] === "number"
             ? { token_budget: a["token_budget"] }
             : { token_budget: 2000 }),
@@ -247,6 +249,7 @@ export function createMcpServer(opts: McpServerOptions) {
         format: "narrative",
         limit: 20,
         token_budget: 2000,
+        safe_only: true, // Verified Recall: /recall never injects stale memory
       })) as { text?: string };
       return typeof result.text === "string" ? result.text : "";
     } catch {

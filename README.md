@@ -28,8 +28,9 @@ agent injects it with confidence.
 Most memory layers stop at "remember more." memwarden is built around **memory you can rely
 on**:
 
-- **`doctor` — is this memory still safe to inject?** Every memory carries provenance. The
-  doctor flags `STALE` (references files that changed) and `UNSOURCED` (no evidence) memories.
+- **Verified Recall — is this memory still true?** Every memory records a content hash of the
+  files it came from. Recall is firewalled by default: a memory whose files were deleted or
+  changed since capture (`stale`) is never injected; `memwarden doctor` reports the same.
   Auditing whether memory is still *true*, not just whether it exists, is the part nobody else
   leads with.
 - **Verifiable.** Every write lands in a SHA-256 hash-chained oplog; `memory_verify` proves it
@@ -142,10 +143,21 @@ memories, 14 **paraphrased** queries (worded differently than the answers). Repr
 4. **Recall.** Hybrid BM25 + vector search, scoped to your project by canonical path (symlinks
    and path spellings resolved, so recall never silently misses), packed under a token budget.
 
-## `memwarden doctor` — memory you can trust
+## Verified Recall — memory you can trust
 
-Recall is only half the job. The other half is knowing the memory is still safe to use. The
-doctor audits your stored memories against the live repo:
+Recall is only half the job. The other half is knowing the memory is still *true*. Every memory
+records the files it came from **and a content hash of those files at capture time**, so memwarden
+can tell whether it is still valid:
+
+- **verified** — sourced, and every referenced file still exists and matches its captured hash
+- **stale** — a referenced file was deleted, or its content changed since capture
+- **unsourced** — no evidence at all (no files, no command, not user-confirmed)
+
+**Recall is firewalled by default.** `memory_resume`, `/recall`, the SessionStart hook, and the
+proxy all pass `safe_only`, so a memory that points at code you have since changed or deleted is
+never injected into a model. (Plain `memory_search` stays unfiltered for explicit lookups.)
+
+`memwarden doctor` runs the same check as a report against the live repo:
 
 ```bash
 node dist/cli/bin.js doctor .
@@ -154,12 +166,8 @@ node dist/cli/bin.js doctor .
   STALE:           2 memories reference files that changed
   UNSOURCED:       1 memory has no evidence
 
-  [stale]  Edit — references 1 file(s) that no longer exist: src/legacy.ts
+  [stale]  Edit — references files that no longer match (changed: src/legacy.ts)
 ```
-
-Every memory carries provenance (the files, command, and tool it came from). `STALE` means it
-points at files that no longer exist; `UNSOURCED` means it has no evidence behind it; `SAFE`
-means it is sourced and still valid.
 
 ## What makes it different
 
@@ -217,6 +225,7 @@ Your memory is a portable JSON bundle. No vendor in the loop.
 src/kernel/      in-process runtime: function registry, trigger dispatch, pubsub, HTTP
 src/state/       StateKV, memory + libSQL stores, append-only hash-chained oplog
 src/functions/   observe / search (BM25 + TurboQuant vector + RRF) / doctor / context / forget
+src/functions/verify.ts  Verified Recall: content-hash provenance + verified/stale/unsourced
 src/functions/paths.ts   canonical project/cwd scoping (recall never silently misses)
 src/embedding/   on-device embedding provider (transformers.js, optional)
 src/mcp/         dependency-free MCP server (stdio JSON-RPC) + the recall prompt
@@ -226,7 +235,7 @@ src/cli/         up / down / connect / doctor / hooks / export / import
 src/cli/tools.ts per-tool adapters: Claude Code, Codex, Cursor, Kiro, Antigravity, OpenCode, OpenClaw
 src/bundle/      portable Brain Bundle export & import
 benchmark/       reproducible recall benchmark
-test/            208 tests: kernel, store parity, oplog, quantizer, MCP, proxy, tool-wiring,
+test/            214 tests: kernel, store parity, oplog, quantizer, MCP, proxy, tool-wiring,
                  path scoping, self-heal, cross-tool reliability harness, e2e
 ```
 
@@ -246,8 +255,10 @@ test/            208 tests: kernel, store parity, oplog, quantizer, MCP, proxy, 
 
 ## Not built yet (so this README does not pretend otherwise)
 
-Tamper-*evidence* ships today via the hash chain. Oplog *signing* (Ed25519), *encrypted* Brain
-Bundles, and an ANN index for >1M-memory scale are not built. They are candidates, not claims.
+Verified Recall checks deletion and content drift today. **Conflict detection** (flagging a
+newer memory that contradicts an older one) is not built yet. Tamper-*evidence* ships via the
+hash chain, but oplog *signing* (Ed25519), *encrypted* Brain Bundles, and an ANN index for
+>1M-memory scale are not. These are candidates, not claims.
 
 ## License
 

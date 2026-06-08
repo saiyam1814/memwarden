@@ -31,6 +31,7 @@ import { withKeyedLock } from "./keyed-mutex.js";
 import { isAutoCompressEnabled, getAgentId } from "./config.js";
 import { buildSyntheticCompression } from "./compress-synthetic.js";
 import { extractProvenance } from "./provenance.js";
+import { hashFiles } from "./verify.js";
 import { getSearchIndex, vectorIndexAddGuarded } from "./search.js";
 import { logger } from "./logger.js";
 import { metrics } from "../observability/metrics.js";
@@ -280,9 +281,15 @@ export function registerObserveFunction(
         });
       } else {
         const synthetic = buildSyntheticCompression(raw);
-        // Attach the evidence trail so the doctor can later judge whether
-        // this memory is sourced and still valid.
-        synthetic.provenance = extractProvenance(payload);
+        // Attach the evidence trail so the doctor and Verified Recall can later
+        // judge whether this memory is sourced and still valid. Hash the
+        // referenced files now (under cwd) so content drift is detectable.
+        const prov = extractProvenance(payload);
+        if (prov.files && prov.files.length > 0 && payload.cwd) {
+          const fileHashes = hashFiles(prov.files, payload.cwd);
+          if (Object.keys(fileHashes).length > 0) prov.fileHashes = fileHashes;
+        }
+        synthetic.provenance = prov;
         metrics.recordObserve(JSON.stringify(raw), JSON.stringify(synthetic));
         await kv.set(KV.observations(payload.sessionId), obsId, synthetic);
         getSearchIndex().add(synthetic);

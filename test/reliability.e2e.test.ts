@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -157,6 +157,9 @@ describe("cross-door: proxy capture -> MCP recall", () => {
 
 describe("cross-door: hook capture -> proxy recall", () => {
   it("a hook-captured memory is injected into a later model call by the proxy", async () => {
+    // The memory references a real file, so Verified Recall lets it through
+    // the proxy's safe_only firewall (a stale one would be dropped).
+    writeFileSync(join(project, "deploy.ts"), "// canary pipeline deploy\n");
     // Door C: the hook/observe path captures a memory in this project.
     await fetch(`${baseUrl}/memwarden/observe`, {
       method: "POST",

@@ -261,6 +261,7 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
         cwd?: string;
         format?: string;
         token_budget?: number;
+        safe_only?: boolean;
       } = { query: (body["query"] as string).trim() };
       if (body["limit"] !== undefined) payload.limit = body["limit"] as number;
       if (body["project"] !== undefined)
@@ -270,6 +271,7 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
         payload.format = body["format"].trim().toLowerCase();
       if (body["token_budget"] !== undefined)
         payload.token_budget = body["token_budget"] as number;
+      if (body["safe_only"] === true) payload.safe_only = true;
 
       const result = await sdk.trigger({
         function_id: "mem::search",

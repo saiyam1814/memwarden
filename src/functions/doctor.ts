@@ -10,13 +10,11 @@
 // detection (memories that disagree) is a documented next step — we don't
 // ship a fuzzy heuristic in a tool whose whole point is trust.
 
-import { existsSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
 import type { ISdk } from "../kernel/index.js";
 import type { StateKV } from "../state/kv.js";
 import type { CompressedObservation, Memory, Session } from "./types.js";
 import { KV } from "../state/schema.js";
-import { isUnsourced } from "./provenance.js";
+import { classifyProvenance } from "./verify.js";
 import { memoryToObservation } from "./memory-utils.js";
 import { logger } from "./logger.js";
 
@@ -32,38 +30,14 @@ export interface DoctorReport {
   unsourced: DoctorEntry[];
 }
 
-function missingFiles(files: string[] | undefined, root: string): string[] {
-  if (!files || files.length === 0) return [];
-  return files.filter((f) => {
-    const abs = isAbsolute(f) ? f : resolve(root, f);
-    return !existsSync(abs);
-  });
-}
-
-/** Audit one observation against the repo root. */
+/** Audit one observation against the repo root via the Verified Recall check. */
 function auditOne(
   obs: CompressedObservation,
   root: string,
 ): { kind: "safe" | "stale" | "unsourced"; entry: DoctorEntry } {
-  const prov = obs.provenance;
-  if (isUnsourced(prov)) {
-    return {
-      kind: "unsourced",
-      entry: { id: obs.id, title: obs.title, reason: "no file, command, or user-confirmation evidence" },
-    };
-  }
-  const gone = missingFiles(prov?.files, root);
-  if (gone.length > 0) {
-    return {
-      kind: "stale",
-      entry: {
-        id: obs.id,
-        title: obs.title,
-        reason: `references ${gone.length} file(s) that no longer exist: ${gone.slice(0, 3).join(", ")}`,
-      },
-    };
-  }
-  return { kind: "safe", entry: { id: obs.id, title: obs.title, reason: "" } };
+  const verdict = classifyProvenance(obs.provenance, root);
+  const kind = verdict.status === "verified" ? "safe" : verdict.status;
+  return { kind, entry: { id: obs.id, title: obs.title, reason: verdict.reason } };
 }
 
 export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {

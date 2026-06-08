@@ -101,7 +101,7 @@ describe("mem::doctor", () => {
     await observe(root, "src/deleted.ts", "logic that lived in a since-deleted file");
     const r = await doctor(root);
     expect(r.stale.length).toBe(1);
-    expect(r.stale[0]!.reason).toMatch(/no longer exist/);
+    expect(r.stale[0]!.reason).toMatch(/deleted/);
     expect(r.safe).toBe(0);
   });
 
