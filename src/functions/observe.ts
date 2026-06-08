@@ -30,6 +30,7 @@ import { DedupMap } from "./dedup.js";
 import { withKeyedLock } from "./keyed-mutex.js";
 import { isAutoCompressEnabled, getAgentId } from "./config.js";
 import { buildSyntheticCompression } from "./compress-synthetic.js";
+import { extractProvenance } from "./provenance.js";
 import { getSearchIndex, vectorIndexAddGuarded } from "./search.js";
 import { logger } from "./logger.js";
 import { metrics } from "../observability/metrics.js";
@@ -279,6 +280,9 @@ export function registerObserveFunction(
         });
       } else {
         const synthetic = buildSyntheticCompression(raw);
+        // Attach the evidence trail so the doctor can later judge whether
+        // this memory is sourced and still valid.
+        synthetic.provenance = extractProvenance(payload);
         metrics.recordObserve(JSON.stringify(raw), JSON.stringify(synthetic));
         await kv.set(KV.observations(payload.sessionId), obsId, synthetic);
         getSearchIndex().add(synthetic);

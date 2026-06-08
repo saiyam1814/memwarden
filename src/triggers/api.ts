@@ -372,6 +372,31 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
     config: { api_path: "/memwarden/stats", http_method: "GET" },
   });
 
+  // --- POST /memwarden/doctor -------------------------------------
+  // The memory doctor: audit stored memories for staleness and sourcing
+  // against the live repo. The differentiating "is this safe to inject?"
+  // surface.
+  sdk.registerFunction(
+    "api::doctor",
+    async (req: ApiRequest<{ root?: string; project?: string }>): Promise<Response> => {
+      const body = (req.body ?? {}) as { root?: string; project?: string };
+      const report = await sdk.trigger({
+        function_id: "mem::doctor",
+        payload: { root: body.root, project: body.project },
+      });
+      return { status_code: 200, body: report };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::doctor",
+    config: {
+      api_path: "/memwarden/doctor",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
   // --- GET /memwarden/export --------------------------------------
   // Portability: a self-contained Brain Bundle the user can move between
   // machines or agents. No vendor in the loop.

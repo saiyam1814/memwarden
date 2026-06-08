@@ -109,6 +109,30 @@ async function exportBrain(file: string | undefined): Promise<void> {
   );
 }
 
+async function doctor(rest: string[]): Promise<void> {
+  const path = rest.find((a) => !a.startsWith("--")) ?? ".";
+  const root = path === "." ? process.cwd() : path;
+  const res = await fetch(`${DAEMON_URL}/memwarden/doctor`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ root }),
+  });
+  if (!res.ok) throw new Error(`doctor failed: HTTP ${res.status}`);
+  const r = (await res.json()) as {
+    total: number;
+    safe: number;
+    stale: Array<{ title: string; reason: string }>;
+    unsourced: Array<{ title: string; reason: string }>;
+  };
+  console.log(`\nmemwarden doctor — ${root}\n`);
+  console.log(`  SAFE TO INJECT: ${r.safe} memories`);
+  console.log(`  STALE:          ${r.stale.length} memories reference files that changed`);
+  console.log(`  UNSOURCED:      ${r.unsourced.length} memories have no evidence\n`);
+  for (const s of r.stale.slice(0, 5)) console.log(`  [stale]     ${s.title} — ${s.reason}`);
+  for (const u of r.unsourced.slice(0, 5)) console.log(`  [unsourced] ${u.title} — ${u.reason}`);
+  console.log(`\n  ${r.total} memories audited.\n`);
+}
+
 async function importBrain(file: string | undefined): Promise<void> {
   if (!file) throw new Error("usage: memwarden import <file>");
   const bundle = JSON.parse(readFileSync(file, "utf8"));
@@ -129,6 +153,8 @@ async function main(): Promise<void> {
       return connect(rest);
     case "hook":
       return hook(rest);
+    case "doctor":
+      return doctor(rest);
     case "export":
       return exportBrain(rest[0]);
     case "import":
@@ -137,6 +163,7 @@ async function main(): Promise<void> {
       console.log(
         "usage:\n" +
           "  memwarden connect [claude-code|cursor|cline|windsurf] [--with-hooks] [--url URL] [--secret S]\n" +
+          "  memwarden doctor [path]\n" +
           "  memwarden export <file>\n" +
           "  memwarden import <file>",
       );

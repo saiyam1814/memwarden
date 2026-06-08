@@ -27,6 +27,8 @@ export interface HookPayload {
   cwd: string;
   timestamp: string;
   data: unknown;
+  /** Which agent captured this (claude, codex, cursor, …). Optional. */
+  agent?: string;
 }
 
 export interface Session {
@@ -78,6 +80,20 @@ export type ObservationType =
   | "image"
   | "other";
 
+/**
+ * Where a memory came from — the evidence the doctor audits. A memory with
+ * provenance can be checked for staleness (do its files still exist?) and
+ * sourcing (is there any evidence at all?); one without is "unsourced".
+ */
+export interface Provenance {
+  cwd?: string;
+  files?: string[]; // files the memory references / was derived from
+  command?: string; // tool + command that produced it
+  agent?: string; // which agent captured it (claude, codex, …)
+  capturedAt?: string;
+  userConfirmed?: boolean; // explicitly saved by the user vs passively observed
+}
+
 export interface CompressedObservation {
   id: string;
   sessionId: string;
@@ -96,6 +112,7 @@ export interface CompressedObservation {
   imageDescription?: string;
   modality?: "text" | "image" | "mixed";
   agentId?: string;
+  provenance?: Provenance;
 }
 
 export interface Memory {
