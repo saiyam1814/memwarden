@@ -1,14 +1,13 @@
 //
-// Privacy stripping for raw observation payloads. Ported from
-// the original src/functions/privacy.ts (the registerPrivacyFunction
-// SDK wrapper is omitted as it is not part of the Phase-0 core path).
-// Redacts <private>...</private> spans and a battery of common secret
-// token formats before anything is persisted.
+// Redacts secrets from raw observation text before anything is persisted:
+// any span the user wraps in <private>...</private>, plus a set of well-known
+// credential formats (provider API keys, bearer tokens, JWTs, cloud keys).
+// The credential shapes are public, factual patterns.
 
-const PRIVATE_TAG_RE = /<private>[\s\S]*?<\/private>/gi;
+const PRIVATE_SPAN = /<private>[\s\S]*?<\/private>/gi;
 
-const SECRET_PATTERN_SOURCES = [
-  /(?:api[_-]?key|secret|token|password|credential|auth)[\s]*[=:]\s*["']?[A-Za-z0-9_\-/.+]{20,}["']?/gi,
+const SECRET_PATTERNS: readonly RegExp[] = [
+  /(?:api[_-]?key|secret|token|password|credential|auth)\s*[=:]\s*["']?[A-Za-z0-9_\-/.+]{20,}["']?/gi,
   /Bearer\s+[A-Za-z0-9._\-+/=]{20,}/gi,
   /sk-proj-[A-Za-z0-9\-_]{20,}/g,
   /(?:sk|pk|rk|ak)-[A-Za-z0-9][A-Za-z0-9\-_]{19,}/g,
@@ -25,10 +24,10 @@ const SECRET_PATTERN_SOURCES = [
 ];
 
 export function stripPrivateData(input: string): string {
-  let result = input.replace(PRIVATE_TAG_RE, "[REDACTED]");
-  for (const source of SECRET_PATTERN_SOURCES) {
-    const pattern = new RegExp(source.source, source.flags);
-    result = result.replace(pattern, "[REDACTED_SECRET]");
+  let out = input.replace(PRIVATE_SPAN, "[REDACTED]");
+  for (const pattern of SECRET_PATTERNS) {
+    // Fresh RegExp per pass to avoid any shared lastIndex state.
+    out = out.replace(new RegExp(pattern.source, pattern.flags), "[REDACTED_SECRET]");
   }
-  return result;
+  return out;
 }

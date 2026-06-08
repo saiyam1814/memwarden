@@ -1,9 +1,8 @@
 //
-// Zero-LLM compression path. Ported verbatim from the original
-// src/functions/compress-synthetic.ts. Converts a RawObservation into a
-// CompressedObservation using only heuristics (no model call, no token
-// spend). This is the default observe path in the successor since no LLM
-// provider is wired in Phase 0.
+// Zero-LLM compression: turn a RawObservation into a CompressedObservation
+// with heuristics only (no model call, no token spend). This is the default
+// observe path until an LLM provider is wired in. It classifies the tool,
+// pulls out any file paths, and builds a short narrative.
 
 import type {
   RawObservation,
@@ -11,57 +10,61 @@ import type {
   ObservationType,
 } from "./types.js";
 
-function inferType(
-  toolName: string | undefined,
-  hookType: string,
-): ObservationType {
-  if (hookType === "post_tool_failure") return "error";
-  if (hookType === "prompt_submit") return "conversation";
-  if (hookType === "subagent_stop" || hookType === "task_completed")
-    return "subagent";
-  if (hookType === "notification") return "notification";
+// tool-name keyword -> observation type, in priority order
+const TOOL_KINDS: ReadonlyArray<readonly [ObservationType, readonly string[]]> = [
+  ["web_fetch", ["fetch", "http", "web"]],
+  ["search", ["grep", "search", "glob", "find"]],
+  ["command_run", ["bash", "shell", "exec", "run"]],
+  ["file_edit", ["edit", "update", "patch", "replace"]],
+  ["file_write", ["write", "create"]],
+  ["file_read", ["read", "view"]],
+  ["subagent", ["task", "agent"]],
+];
 
-  if (!toolName) return "other";
-  // Normalize camelCase and kebab-case into word chunks so we can match
-  // substrings like "WebFetch" -> "web" / "fetch".
-  const n = toolName
+const FILE_KEYS = ["file_path", "filepath", "path", "filePath", "file", "pattern"];
+
+// split camelCase / kebab / spaces into a normalized underscore form
+function normalizeToolName(name: string): string {
+  return name
     .replace(/([a-z])([A-Z])/g, "$1_$2")
     .replace(/[-\s]+/g, "_")
     .toLowerCase();
-  const hasWord = (word: string) =>
-    new RegExp(`(^|_)${word}(_|$)`).test(n) ||
-    n === word ||
-    n.endsWith(word) ||
-    n.startsWith(word);
-  if (["fetch", "http", "web"].some(hasWord)) return "web_fetch";
-  if (["grep", "search", "glob", "find"].some(hasWord)) return "search";
-  if (["bash", "shell", "exec", "run"].some(hasWord)) return "command_run";
-  if (["edit", "update", "patch", "replace"].some(hasWord)) return "file_edit";
-  if (["write", "create"].some(hasWord)) return "file_write";
-  if (["read", "view"].some(hasWord)) return "file_read";
-  if (["task", "agent"].some(hasWord)) return "subagent";
+}
+
+function mentions(normalized: string, word: string): boolean {
+  return (
+    new RegExp(`(^|_)${word}(_|$)`).test(normalized) ||
+    normalized === word ||
+    normalized.startsWith(word) ||
+    normalized.endsWith(word)
+  );
+}
+
+function classify(toolName: string | undefined, hookType: string): ObservationType {
+  if (hookType === "post_tool_failure") return "error";
+  if (hookType === "prompt_submit") return "conversation";
+  if (hookType === "subagent_stop" || hookType === "task_completed") return "subagent";
+  if (hookType === "notification") return "notification";
+  if (!toolName) return "other";
+  const n = normalizeToolName(toolName);
+  for (const [kind, words] of TOOL_KINDS) {
+    if (words.some((w) => mentions(n, w))) return kind;
+  }
   return "other";
 }
 
-function extractFiles(input: unknown): string[] {
+function filePaths(input: unknown): string[] {
   if (!input || typeof input !== "object") return [];
   const o = input as Record<string, unknown>;
-  const out = new Set<string>();
-  for (const key of [
-    "file_path",
-    "filepath",
-    "path",
-    "filePath",
-    "file",
-    "pattern",
-  ]) {
+  const found = new Set<string>();
+  for (const key of FILE_KEYS) {
     const v = o[key];
-    if (typeof v === "string" && v.length > 0 && v.length < 512) out.add(v);
+    if (typeof v === "string" && v.length > 0 && v.length < 512) found.add(v);
   }
-  return [...out];
+  return [...found];
 }
 
-function stringifyForNarrative(v: unknown): string {
+function asText(v: unknown): string {
   if (v == null) return "";
   if (typeof v === "string") return v;
   try {
@@ -71,36 +74,32 @@ function stringifyForNarrative(v: unknown): string {
   }
 }
 
-function truncate(s: string, n: number): string {
-  return s.length > n ? s.slice(0, n - 1) + "…" : s;
+function clip(s: string, max: number): string {
+  return s.length > max ? s.slice(0, max - 1) + "…" : s;
 }
 
-export function buildSyntheticCompression(
-  raw: RawObservation,
-): CompressedObservation {
+export function buildSyntheticCompression(raw: RawObservation): CompressedObservation {
   const toolName = raw.toolName ?? raw.hookType;
-  const inputStr = stringifyForNarrative(raw.toolInput);
-  const outputStr = stringifyForNarrative(raw.toolOutput);
-  const promptStr = raw.userPrompt ?? "";
-
-  const narrativeParts = [promptStr, inputStr, outputStr].filter(
-    (s) => s.length > 0,
-  );
+  const inputText = asText(raw.toolInput);
+  const outputText = asText(raw.toolOutput);
+  const narrative = [raw.userPrompt ?? "", inputText, outputText]
+    .filter((s) => s.length > 0)
+    .join(" | ");
 
   const result: CompressedObservation = {
     id: raw.id,
     sessionId: raw.sessionId,
     timestamp: raw.timestamp,
-    type: inferType(toolName, raw.hookType),
-    title: truncate(toolName || "observation", 80),
+    type: classify(toolName, raw.hookType),
+    title: clip(toolName || "observation", 80),
     facts: [],
-    narrative: truncate(narrativeParts.join(" | "), 400),
+    narrative: clip(narrative, 400),
     concepts: [],
-    files: extractFiles(raw.toolInput),
+    files: filePaths(raw.toolInput),
     importance: 5,
     confidence: 0.3,
   };
-  if (inputStr) result.subtitle = truncate(inputStr, 120);
+  if (inputText) result.subtitle = clip(inputText, 120);
   if (raw.modality) result.modality = raw.modality;
   if (raw.imageData) result.imageData = raw.imageData;
   if (raw.agentId) result.agentId = raw.agentId;

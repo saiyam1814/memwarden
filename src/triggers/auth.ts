@@ -1,16 +1,17 @@
 //
-// Constant-time bearer-token comparison. Ported from the original
-// src/auth.ts (only timingSafeCompare is needed for the Phase-0 auth
-// middleware; the viewer-CSP helpers are out of scope). Both operands are
-// HMAC'd under a process-ephemeral key before timingSafeEqual so the
-// comparison is length-independent and constant-time.
+// Constant-time bearer-token comparison. Both inputs are HMAC'd under a
+// random per-process key and then compared with timingSafeEqual, so the
+// result is independent of input length and leaks no timing about how many
+// leading characters happened to match.
 
-import { timingSafeEqual, createHmac, randomBytes } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
-const hmacKey = randomBytes(32);
+const COMPARE_KEY = randomBytes(32);
+
+function fingerprint(value: string): Buffer {
+  return createHmac("sha256", COMPARE_KEY).update(value).digest();
+}
 
 export function timingSafeCompare(a: string, b: string): boolean {
-  const hmacA = createHmac("sha256", hmacKey).update(a).digest();
-  const hmacB = createHmac("sha256", hmacKey).update(b).digest();
-  return timingSafeEqual(hmacA, hmacB);
+  return timingSafeEqual(fingerprint(a), fingerprint(b));
 }

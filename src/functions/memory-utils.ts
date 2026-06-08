@@ -1,9 +1,8 @@
 //
-// Coerces a Memory record into the CompressedObservation shape the search
-// index + enrichment paths consume. Ported verbatim from the original
-// src/state/memory-utils.ts. The synthetic sessionId ("memory" or
-// memory.sessionIds[0]) is what enrich-side fallbacks key off when looking
-// up the source record in KV.memories.
+// Adapts a stored Memory into the CompressedObservation shape the search and
+// enrichment paths expect. A Memory has no real session, so it borrows its
+// first sessionId (or the literal "memory") as a synthetic key that
+// KV.memories lookups fall back on.
 
 import type { CompressedObservation, Memory } from "./types.js";
 

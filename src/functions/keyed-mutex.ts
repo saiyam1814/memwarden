@@ -1,23 +1,25 @@
 //
-// In-process per-key promise-chain mutex. Ported verbatim from
-// the original src/state/keyed-mutex.ts. Serializes the observe write
-// path (key "obs:"+sessionId) so observationCount increments and image
-// rollback stay race-free. This is correct ONLY because the kernel is a
-// single in-process instance; a multi-process successor would need a real
-// distributed lock.
+// Per-key serialization. Calls that share a key run one at a time, chained on
+// a promise so each waits for the previous to settle (whether it resolved or
+// threw). Used to serialize the observe write path per session so counters and
+// rollbacks stay race-free. Correct only for a single in-process instance; a
+// multi-process successor would need a real distributed lock.
 
-const locks = new Map<string, Promise<void>>();
+const chains = new Map<string, Promise<unknown>>();
 
 export function withKeyedLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const prev = locks.get(key) ?? Promise.resolve();
-  const next = prev.then(fn, fn);
-  const cleanup = next.then(
-    () => {},
-    () => {},
+  const prior = chains.get(key) ?? Promise.resolve();
+  // Run after the prior call settles either way (pass fn for both branches).
+  const run = prior.then(fn, fn);
+  // A branch that never rejects, used both to keep the chain going past a
+  // failure and to release the key once nothing is queued behind it.
+  const settled = run.then(
+    () => undefined,
+    () => undefined,
   );
-  locks.set(key, cleanup);
-  void cleanup.then(() => {
-    if (locks.get(key) === cleanup) locks.delete(key);
+  chains.set(key, settled);
+  void settled.then(() => {
+    if (chains.get(key) === settled) chains.delete(key);
   });
-  return next;
+  return run;
 }

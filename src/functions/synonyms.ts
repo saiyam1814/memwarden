@@ -1,12 +1,14 @@
 //
-// Query-time synonym expansion for BM25. Ported verbatim from
-// the original src/state/synonyms.ts. Groups are stemmed at module load
-// so lookups key off the same stems the tokenizer produces; expanded
-// synonyms are weighted 0.7 in the BM25 scorer.
+// Query-time synonym expansion for BM25. Each group below is a set of common
+// developer terms that should match one another (abbreviation, full word,
+// inflections). Groups are stemmed once at load so lookups key off the same
+// stems the tokenizer emits; the BM25 scorer weights expanded hits below
+// exact ones.
 
 import { stem } from "./stemmer.js";
 
-const SYNONYM_GROUPS: string[][] = [
+// Factual term associations (dev abbreviations and their expansions).
+const GROUPS: ReadonlyArray<readonly string[]> = [
   ["auth", "authentication", "authn", "authenticating"],
   ["authz", "authorization", "authorizing"],
   ["db", "database", "datastore"],
@@ -51,19 +53,18 @@ const SYNONYM_GROUPS: string[][] = [
   ["hash", "hashing"],
 ];
 
-const synonymMap = new Map<string, Set<string>>();
-
-for (const group of SYNONYM_GROUPS) {
-  const stemmed = group.map((t) => stem(t.toLowerCase()));
-  for (const s of stemmed) {
-    if (!synonymMap.has(s)) synonymMap.set(s, new Set());
-    for (const other of stemmed) {
-      if (other !== s) synonymMap.get(s)!.add(other);
-    }
+// stem -> the other stems in its group
+const byStem = new Map<string, Set<string>>();
+for (const group of GROUPS) {
+  const stems = [...new Set(group.map((term) => stem(term.toLowerCase())))];
+  for (const s of stems) {
+    let bucket = byStem.get(s);
+    if (!bucket) byStem.set(s, (bucket = new Set()));
+    for (const other of stems) if (other !== s) bucket.add(other);
   }
 }
 
 export function getSynonyms(stemmedTerm: string): string[] {
-  const syns = synonymMap.get(stemmedTerm);
-  return syns ? [...syns] : [];
+  const bucket = byStem.get(stemmedTerm);
+  return bucket ? [...bucket] : [];
 }
