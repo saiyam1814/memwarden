@@ -9,12 +9,14 @@ import { StateKV } from "../state/kv.js";
 import { registerObserveFunction } from "./observe.js";
 import { registerContextFunction } from "./context.js";
 import { registerSearchFunction } from "./search.js";
+import { registerForgetFunction } from "./forget.js";
 import { DedupMap } from "./dedup.js";
 import { getTokenBudget, getMaxObservationsPerSession } from "./config.js";
 
 export { registerObserveFunction } from "./observe.js";
 export { registerContextFunction } from "./context.js";
 export { registerSearchFunction } from "./search.js";
+export { registerForgetFunction } from "./forget.js";
 export {
   getSearchIndex,
   getVectorIndex,
@@ -57,6 +59,7 @@ export function registerCoreFunctions(
   registerObserveFunction(sdk, kv, dedupMap, maxObs);
   registerContextFunction(sdk, kv, tokenBudget);
   registerSearchFunction(sdk, kv);
+  registerForgetFunction(sdk, kv);
 
   return kv;
 }

@@ -21,6 +21,7 @@ import { QuantizedVectorIndex } from "../functions/quantized-vector-index.js";
 import { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { metrics } from "../observability/metrics.js";
+import { exportBundle, importBundle, isBrainBundle } from "../bundle/bundle.js";
 import { timingSafeCompare } from "./auth.js";
 
 type Response = {
@@ -369,5 +370,60 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
     type: "http",
     function_id: "api::stats",
     config: { api_path: "/memwarden/stats", http_method: "GET" },
+  });
+
+  // --- GET /memwarden/export --------------------------------------
+  // Portability: a self-contained Brain Bundle the user can move between
+  // machines or agents. No vendor in the loop.
+  sdk.registerFunction(
+    "api::export",
+    async (): Promise<Response> => {
+      const bundle = await exportBundle(new StateKV(sdk));
+      return {
+        status_code: 200,
+        body: { ...bundle, exportedAt: new Date().toISOString() },
+      };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::export",
+    config: {
+      api_path: "/memwarden/export",
+      http_method: "GET",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  // --- POST /memwarden/import -------------------------------------
+  sdk.registerFunction(
+    "api::import",
+    async (req: ApiRequest<unknown>): Promise<Response> => {
+      const body = req.body;
+      if (!isBrainBundle(body)) {
+        return {
+          status_code: 400,
+          body: { error: "body is not a valid memwarden brain bundle" },
+        };
+      }
+      try {
+        const counts = await importBundle(new StateKV(sdk), body);
+        return { status_code: 200, body: { imported: counts } };
+      } catch (err) {
+        return {
+          status_code: 400,
+          body: { error: err instanceof Error ? err.message : String(err) },
+        };
+      }
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::import",
+    config: {
+      api_path: "/memwarden/import",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
   });
 }
