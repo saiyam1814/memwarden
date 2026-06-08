@@ -18,6 +18,10 @@ export interface McpServerOptions {
   baseUrl: string; // e.g. http://localhost:3111
   secret?: string;
   fetchFn?: typeof fetch; // injectable for tests
+  // Working directory this MCP server was launched in. MCP clients launch
+  // the server inside the workspace, so this is the project the agent is
+  // in — used to auto-scope recall so the agent never has to name it.
+  cwd?: string;
 }
 
 interface JsonRpcRequest {
@@ -48,6 +52,7 @@ function str(v: unknown, fallback = ""): string {
 export function createMcpServer(opts: McpServerOptions) {
   const base = opts.baseUrl.replace(/\/$/, "");
   const doFetch = opts.fetchFn ?? fetch;
+  const serverCwd = opts.cwd ?? process.cwd();
 
   async function api(
     method: "GET" | "POST",
@@ -70,6 +75,40 @@ export function createMcpServer(opts: McpServerOptions) {
   }
 
   const tools: ToolDef[] = [
+    {
+      name: "memory_resume",
+      description:
+        "Recall what was being worked on in THIS project, across every past session and every agent (Claude, Codex, Cursor, …). Call this whenever the user references earlier work — e.g. 'continue what we were doing', 'review the project Claude and I built', 'what was I working on here', 'pick up from the last session'. Returns a narrative digest of the relevant prior context, already scoped to the current working directory, ready to act on.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description:
+              "What to focus the recall on (e.g. 'the auth refactor', 'review the project'). Optional but improves relevance.",
+          },
+          cwd: {
+            type: "string",
+            description:
+              "Working directory to scope to. Defaults to where this server was launched (the current project).",
+          },
+          token_budget: {
+            type: "number",
+            description: "Max tokens of context to return (default 2000).",
+          },
+        },
+      },
+      call: (a) =>
+        api("POST", "/memwarden/search", {
+          query: str(a["query"], "what was I working on"),
+          cwd: str(a["cwd"], serverCwd),
+          format: "narrative",
+          limit: 20,
+          ...(typeof a["token_budget"] === "number"
+            ? { token_budget: a["token_budget"] }
+            : { token_budget: 2000 }),
+        }),
+    },
     {
       name: "memory_remember",
       description:

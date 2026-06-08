@@ -68,13 +68,14 @@ describe("MCP handshake and tool listing", () => {
     expect(await call("notifications/initialized", {}, null)).toBeNull();
   });
 
-  it("tools/list advertises the five tools incl. verify and stats", async () => {
+  it("tools/list advertises the tools incl. resume, verify and stats", async () => {
     const res = await call("tools/list");
     const names = (res!.result as { tools: Array<{ name: string }> }).tools.map(
       (t) => t.name,
     );
     expect(names).toEqual(
       expect.arrayContaining([
+        "memory_resume",
         "memory_remember",
         "memory_search",
         "memory_context",
@@ -82,6 +83,15 @@ describe("MCP handshake and tool listing", () => {
         "memory_stats",
       ]),
     );
+  });
+
+  it("memory_resume is described to fire on cross-agent / prior-work intent", async () => {
+    const res = await call("tools/list");
+    const resume = (
+      res!.result as { tools: Array<{ name: string; description: string }> }
+    ).tools.find((t) => t.name === "memory_resume");
+    expect(resume!.description.toLowerCase()).toContain("agent");
+    expect(resume!.description.toLowerCase()).toContain("project");
   });
 
   it("rejects unknown methods and unknown tools", async () => {
@@ -129,5 +139,37 @@ describe("MCP tool round-trips against the live daemon", () => {
     );
     expect(statsObj.memories + statsObj.sessions).toBeGreaterThanOrEqual(0);
     expect(statsObj).toHaveProperty("compression");
+  });
+
+  it("memory_resume recalls a prior session scoped to its working directory", async () => {
+    // Simulate "Claude" capturing work in project alpha via the observe path.
+    const cwdAlpha = "/work/alpha";
+    await call("tools/call", {
+      name: "memory_remember",
+      arguments: {
+        text: "refactored the alpha auth module to use IAM tokens",
+        sessionId: "claude-1",
+        project: cwdAlpha,
+      },
+    });
+    await call("tools/call", {
+      name: "memory_remember",
+      arguments: {
+        text: "beta project uses a totally different billing flow",
+        sessionId: "claude-2",
+        project: "/work/beta",
+      },
+    });
+
+    // "Codex", launched in /work/alpha, asks to review — scoped by cwd.
+    const resumed = await call("tools/call", {
+      name: "memory_resume",
+      arguments: { query: "review the auth work", cwd: cwdAlpha },
+    });
+    const text = (
+      resumed!.result as { content: Array<{ text: string }> }
+    ).content[0]!.text;
+    expect(text.toLowerCase()).toContain("alpha");
+    expect(text.toLowerCase()).toContain("auth");
   });
 });
