@@ -105,6 +105,35 @@ function mergeOpenclaw(existing: string | null, launch: LaunchInfo): string {
   return serialize(base);
 }
 
+/**
+ * Codex uses TOML (~/.codex/config.toml), not JSON. We can't safely re-parse
+ * arbitrary TOML without a parser, so we touch only our own table: strip a
+ * prior [mcp_servers.memwarden] table (header through the line before the
+ * next table or EOF), then append a fresh one. Every other table is left
+ * byte-for-byte intact. Idempotent.
+ */
+function codexBlock(launch: LaunchInfo): string {
+  const args = launch.args.map((a) => JSON.stringify(a)).join(", ");
+  const env = Object.entries(launch.env)
+    .map(([k, v]) => `${k} = ${JSON.stringify(v)}`)
+    .join(", ");
+  return (
+    "[mcp_servers.memwarden]\n" +
+    `command = ${JSON.stringify(launch.command)}\n` +
+    `args = [${args}]\n` +
+    (env ? `env = { ${env} }\n` : "")
+  );
+}
+
+function mergeCodexToml(existing: string | null, launch: LaunchInfo): string {
+  const block = codexBlock(launch);
+  if (!existing || !existing.trim()) return block;
+  const stripped = existing
+    .replace(/\[mcp_servers\.memwarden\][\s\S]*?(?=\n\[|$)/, "")
+    .replace(/\s*$/, "");
+  return stripped ? stripped + "\n\n" + block : block;
+}
+
 // --- the registry --------------------------------------------------
 
 export const TOOLS: ToolAdapter[] = [
@@ -116,6 +145,14 @@ export const TOOLS: ToolAdapter[] = [
       existsSync(join(home, ".claude.json")) || existsSync(join(home, ".claude")),
     merge: mergeMcpServers,
     auto: "hooks", // also gets SessionStart/PostToolUse hooks (true auto)
+  },
+  {
+    id: "codex",
+    label: "Codex",
+    configPath: (home) => join(home, ".codex", "config.toml"),
+    detect: (home) => existsSync(join(home, ".codex")),
+    merge: mergeCodexToml,
+    auto: "agents-md",
   },
   {
     id: "cursor",

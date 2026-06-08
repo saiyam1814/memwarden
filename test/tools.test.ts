@@ -44,10 +44,26 @@ function merged(id: string, existing: string | null = null): Record<string, any>
 }
 
 describe("tool registry", () => {
-  it("has all six target tools", () => {
+  it("has all target tools", () => {
     expect(TOOLS.map((t) => t.id).sort()).toEqual(
-      ["antigravity", "claude-code", "cursor", "kiro", "opencode", "openclaw"].sort(),
+      ["antigravity", "claude-code", "codex", "cursor", "kiro", "opencode", "openclaw"].sort(),
     );
+  });
+
+  it("writes Codex's TOML [mcp_servers.memwarden] table", () => {
+    const once = toolById("codex")!.merge(null, launch);
+    expect(once).toContain("[mcp_servers.memwarden]");
+    expect(once).toContain('command = "node"');
+    expect(once).toContain('args = ["/abs/dist/mcp/bin.js"]');
+    expect(once).toContain("MEMWARDEN_URL");
+    // preserves other TOML tables + idempotent
+    const existing = '[model]\nname = "gpt-5"\n\n[mcp_servers.github]\ncommand = "gh"\n';
+    const merged = toolById("codex")!.merge(existing, launch);
+    expect(merged).toContain('[model]');
+    expect(merged).toContain('[mcp_servers.github]');
+    expect(merged).toContain("[mcp_servers.memwarden]");
+    expect(toolById("codex")!.merge(merged, launch)).toBe(merged); // idempotent
+    expect(toolById("codex")!.merge(once, launch)).toBe(once); // idempotent from-empty form
   });
 
   it("writes the mcpServers schema for cursor/kiro/antigravity/claude-code", () => {
