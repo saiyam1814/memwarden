@@ -254,6 +254,17 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
           body: { error: "token_budget must be a positive integer" },
         };
       }
+      // Verified Recall fails closed: safe_only needs a repo root to verify
+      // against, so reject it rather than silently returning unverified memory.
+      if (
+        body["safe_only"] === true &&
+        (typeof body["cwd"] !== "string" || !(body["cwd"] as string).trim())
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "safe_only requires cwd (a repo root to verify against)" },
+        };
+      }
       const payload: {
         query: string;
         limit?: number;

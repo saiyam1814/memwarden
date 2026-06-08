@@ -11,8 +11,8 @@
 // - list -> VALUES only (no keys), exact scope match, insertion order,
 // [] on unknown scope
 //
-// On top of those semantics it adds two things memwarden needs that the
-// earlier engine's file-KV did not surface:
+// On top of those semantics it adds two things memwarden needs beyond a plain
+// key-value store:
 //
 // 1. Mutation events. set/update/delete report the affected key, the
 // event_type, and the old/new values so the kernel can drive the

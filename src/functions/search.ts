@@ -1,16 +1,10 @@
 //
-// BM25 keyword search (mem::search). Implemented for memwarden
-// src/functions/search.ts. The BM25-only retrieval path, the lazy
-// index-rebuild, the project/cwd over-fetch + post-filter, the
-// memory-scope fallback, and the three output formats (full / compact /
-// narrative) with token-budget packing are preserved with identical
-// validation and wire shapes.
-//
-// SCOPE: no embedding provider is wired, so vectorIndexAddGuarded
-// is a no-op soft-fail (its signature is kept because observe.ts calls it),
-// and rebuildIndex only repopulates the BM25 index. The batched embed flush
-// and IndexPersistence sync hooks from the earlier engine are intentionally
-// dropped until the vector provider lands in a later phase.
+// Search (mem::search): hybrid BM25 + vector (RRF) retrieval with a lazy index
+// rebuild, project/cwd over-fetch + canonical-path post-filter, a memory-scope
+// fallback, an optional Verified Recall firewall (safe_only), and three output
+// formats (full / compact / narrative) with token-budget packing. When an
+// embedding provider is active (the default: on-device MiniLM + TurboQuant)
+// the vector stream is fused in; with no provider it runs BM25-only.
 
 import type { ISdk } from "../kernel/index.js";
 import type {
@@ -99,9 +93,8 @@ export function clipEmbedInput(text: string): string {
 
 // Single guarded vector-index write. Returns true on success. Soft-fails
 // (logs + no-op) on dimension mismatch or embed error so a downed embedder
-// never breaks the upstream save. In the core no provider is wired, so this
-// returns false immediately; observe.ts treats false as "vector skipped",
-// not an error.
+// never breaks the upstream save. With no provider configured this returns
+// false immediately; observe.ts treats false as "vector skipped", not an error.
 export async function vectorIndexAddGuarded(
   id: string,
   sessionId: string,
@@ -139,7 +132,7 @@ export async function vectorIndexAddGuarded(
 // Rebuilds the BM25 index from KV. Walks the memories scope (so
 // mem::remember entries survive a restart) and every session's
 // observations. The vector index is cleared in lockstep so BM25 and vector
-// stay in sync; in the core it stays empty (no provider). When a persisted
+// stay in sync; with no provider it stays empty. When a persisted
 // quantized index was just restored (vector-persistence.ts), pass
 // `preserveVectorIndex` to switch the vector side to INCREMENTAL SYNC:
 // restored codes are kept, only docs missing from the index are embedded,
@@ -417,10 +410,31 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         return proj;
       };
 
-      // First pass: filter by session (sequential — benefits from session
-      // cache). Memory entries with a synthetic sessionId take a secondary
-      // KV.memories path so project filtering works for them too.
+      // A candidate's observation (or a memory rendered as one). Cached so the
+      // Verified Recall firewall and the final assembly never load it twice.
+      const obsCache = new Map<string, CompressedObservation | null>();
+      const loadObsOrMemory = async (r: {
+        obsId: string;
+        sessionId: string;
+      }): Promise<CompressedObservation | null> => {
+        if (obsCache.has(r.obsId)) return obsCache.get(r.obsId)!;
+        let obs = await kv
+          .get<CompressedObservation>(KV.observations(r.sessionId), r.obsId)
+          .catch(() => null);
+        if (!obs) {
+          const mem = await kv.get<Memory>(KV.memories, r.obsId).catch(() => null);
+          obs = mem ? memoryToObservation(mem) : null;
+        }
+        obsCache.set(r.obsId, obs);
+        return obs;
+      };
+
+      // First pass: scope-filter, and — when safe_only is on — apply the
+      // Verified Recall firewall WHILE filling, so stale top hits don't starve
+      // out lower-ranked verified ones. We keep scanning the fetched results
+      // (fetchLimit, ~10x the limit) until we have effectiveLimit safe ones.
       const candidates: typeof results = [];
+      let staleDropped = 0;
       for (const r of results) {
         if (candidates.length >= effectiveLimit) break;
         if (filtering) {
@@ -429,41 +443,35 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
             if (projectFilter && canonicalizePath(s.project) !== projectFilter)
               continue;
             if (cwdFilter && canonicalizePath(s.cwd) !== cwdFilter) continue;
-          } else {
-            // Session not found: synthetic sessionId (memory) or a deleted
-            // session. A null memProject means "project unknown — treat as
-            // unscoped and let it through" for backward-compatibility.
-            if (projectFilter) {
-              const memProject = await loadMemoryProject(r.obsId);
-              if (
-                memProject !== null &&
-                canonicalizePath(memProject) !== projectFilter
-              )
-                continue;
-            }
-            // cwd filter does not apply to unbound entries.
+          } else if (projectFilter) {
+            // Synthetic/memory entry: a null memProject means "unknown" and is
+            // let through for backward-compatibility; cwd filter doesn't apply.
+            const memProject = await loadMemoryProject(r.obsId);
+            if (
+              memProject !== null &&
+              canonicalizePath(memProject) !== projectFilter
+            )
+              continue;
+          }
+        }
+        if (safeOnly && cwdFilter) {
+          const obs = await loadObsOrMemory(r);
+          // Fail closed: skip anything we can't verify or that is stale, and
+          // keep scanning so a verified result lower down can take its slot.
+          if (!obs || classifyProvenance(obs.provenance, cwdFilter).status === "stale") {
+            staleDropped++;
+            continue;
           }
         }
         candidates.push(r);
       }
+      if (safeOnly && staleDropped > 0) {
+        logger.info("Verified Recall dropped stale results", { dropped: staleDropped });
+      }
 
-      // Second pass: load observations in parallel. Fall back to KV.memories
-      // when the observation lookup misses (entries indexed via
-      // mem::remember live in the memories scope under a synthetic
-      // sessionId, so the observation key never exists).
-      const obsResults = await Promise.all(
-        candidates.map(async (r) => {
-          const obs = await kv
-            .get<CompressedObservation>(KV.observations(r.sessionId), r.obsId)
-            .catch(() => null);
-          if (obs) return obs;
-          const mem = await kv
-            .get<Memory>(KV.memories, r.obsId)
-            .catch(() => null);
-          return mem ? memoryToObservation(mem) : null;
-        }),
-      );
-      let enriched: SearchResult[] = [];
+      // Second pass: assemble results, reusing any observation loaded above.
+      const obsResults = await Promise.all(candidates.map((c) => loadObsOrMemory(c)));
+      const enriched: SearchResult[] = [];
       for (let i = 0; i < candidates.length; i++) {
         const obs = obsResults[i];
         const cand = candidates[i]!;
@@ -472,21 +480,6 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
             observation: obs,
             score: cand.score,
             sessionId: cand.sessionId,
-          });
-        }
-      }
-
-      // Verified Recall: when safe_only is requested, drop stale results
-      // (referenced files deleted or content-changed under the scoped repo).
-      // Unsourced memories are kept — they are unverified, not dangerous.
-      if (safeOnly && cwdFilter) {
-        const before = enriched.length;
-        enriched = enriched.filter(
-          (r) => classifyProvenance(r.observation.provenance, cwdFilter).status !== "stale",
-        );
-        if (enriched.length < before) {
-          logger.info("Verified Recall dropped stale results", {
-            dropped: before - enriched.length,
           });
         }
       }

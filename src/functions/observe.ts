@@ -1,25 +1,17 @@
 //
-// The write path (mem::observe). Implemented for memwarden
-// src/functions/observe.ts. Accepts a HookPayload, validates it, optionally
-// dedups, privacy-strips the raw payload, builds a RawObservation, then —
-// inside a per-session keyed lock — enforces the per-session cap, persists
-// the raw observation, updates/creates the session row (observationCount++,
-// updatedAt, firstPrompt), and runs the default zero-LLM synthetic
-// compression path: write the synthetic over the same obsId, add it to the
-// BM25 index, and (a later phase) the vector index. The set/update on
-// KV.sessions flows through the StateStore, so the kernel's type:"state"
-// trigger fires from the store's mutation event. Returns
-// { observationId } so existing connectors see the same wire shape.
+// The write path (mem::observe). Accepts a HookPayload, validates it, optionally
+// dedups, privacy-strips the raw payload, builds a RawObservation, then — inside
+// a per-session keyed lock — enforces the per-session cap, persists the raw
+// observation, updates/creates the session row (observationCount++, updatedAt,
+// firstPrompt), and runs the default zero-LLM synthetic compression: write the
+// synthetic over the same obsId and add it to the BM25 and vector indexes.
+// Referenced files are hashed into provenance for Verified Recall. Returns
+// { observationId }.
 //
-// SCOPE: image *detection* + modality tagging is preserved (pure,
-// keeps the observation wire shape compatible), but the image-to-disk
-// persistence, ref-counting, vision-embed, and disk-size-delta side effects
-// from the earlier engine are not wired — they depend on the image-store /
-// vision subsystem, which is out of the core. The live-viewer stream::set /
-// stream::send fan-out is emitted (the kernel routes those built-ins to its
-// in-process pub/sub); it is durably unused in-process. LLM compression
-// (AUTO_COMPRESS) has no provider wired, so the synthetic path is always
-// taken.
+// Image detection + modality tagging are kept (pure, keeps the observation
+// shape stable); image-to-disk persistence and vision embedding are out of
+// scope. LLM-based compression (AUTO_COMPRESS) has no provider wired, so the
+// synthetic path is always taken.
 
 import { TriggerAction, type ISdk } from "../kernel/index.js";
 import type { RawObservation, HookPayload } from "./types.js";

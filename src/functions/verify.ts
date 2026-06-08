@@ -3,12 +3,17 @@
 // This is what makes "verified" literal — not just "does the file exist" but
 // "is the file still what it was when we learned this".
 //
-//   verified   sourced, and every referenced file still exists and (when a
-//              capture-time hash was recorded) still matches it
-//   stale      a referenced file was deleted, or its content changed
-//   unsourced  no evidence at all (no files, no command, not user-confirmed)
+//   verified           a referenced file exists and still matches its
+//                      capture-time content hash (code-backed and current)
+//   sourced_unverified sourced (command/confirmation, or files present but
+//                      none hashable), so allowed, but NOT content-verified
+//   stale              a referenced file was deleted, or its content changed
+//   unsourced          no evidence at all (no files, no command, not confirmed)
 //
-// All checks read the repo, so this runs in the daemon (same machine).
+// All checks read the repo, so this runs in the daemon (same machine). Hashing
+// is best-effort: files missing at capture, non-files, and files over the size
+// cap are not hashed, so such a memory verifies by existence only and reports
+// sourced_unverified rather than verified.
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -51,7 +56,11 @@ export function hashFiles(
   return out;
 }
 
-export type VerifyStatus = "verified" | "stale" | "unsourced";
+export type VerifyStatus =
+  | "verified"
+  | "sourced_unverified"
+  | "stale"
+  | "unsourced";
 export interface Verdict {
   status: VerifyStatus;
   reason: string;
@@ -68,6 +77,7 @@ export function classifyProvenance(
   const hashes = prov?.fileHashes ?? {};
   const deleted: string[] = [];
   const changed: string[] = [];
+  let hashMatched = 0; // existing files whose captured hash still matches
   for (const f of files) {
     const abs = resolveUnder(root, f);
     if (!existsSync(abs)) {
@@ -78,6 +88,7 @@ export function classifyProvenance(
     if (recorded) {
       const current = hashFile(abs);
       if (current && current !== recorded) changed.push(f);
+      else if (current && current === recorded) hashMatched++;
     }
   }
   if (deleted.length > 0 || changed.length > 0) {
@@ -86,5 +97,14 @@ export function classifyProvenance(
     if (changed.length > 0) parts.push(`changed: ${changed.slice(0, 2).join(", ")}`);
     return { status: "stale", reason: `references files that no longer match (${parts.join("; ")})` };
   }
-  return { status: "verified", reason: "sourced and current" };
+  // Content-verified only if we actually re-checked a captured hash.
+  if (hashMatched > 0) {
+    return { status: "verified", reason: "referenced files exist and match their captured hashes" };
+  }
+  return {
+    status: "sourced_unverified",
+    reason: files.length > 0
+      ? "referenced files exist but were not hashed at capture (existence only)"
+      : "sourced by command or user, no file evidence to verify against",
+  };
 }

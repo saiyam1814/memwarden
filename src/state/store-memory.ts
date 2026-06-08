@@ -1,9 +1,7 @@
 //
-// In-memory StateStore. A faithful mirror of the original InMemoryKV
-// (src/mcp/in-memory-kv.ts) two-level `Map<scope, Map<key, value>>`, extended
-// with the `update` method (which the MCP shim never implemented), mutation
-// events, and an in-array hash-chained oplog. Used for parity tests against
-// StoreLibsql and as a dependency-free fallback.
+// In-memory StateStore: a two-level `Map<scope, Map<key, value>>` with an
+// `update` method, mutation events, and an in-array hash-chained oplog. Used
+// for parity tests against StoreLibsql and as a dependency-free fallback.
 
 import {
   applyUpdateOps,

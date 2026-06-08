@@ -1,10 +1,8 @@
 //
-// Type surface for the memwarden kernel. These types replace the
-// an external engine SDK module that the original engine imported. Only the members that
-// the wired app code actually touches are modelled here; the kernel
-// is an in-process, single-instance runtime so the external-engine
-// concepts (otel transport, durable streams, worker fleet) collapse to
-// no-ops or in-memory equivalents.
+// Type surface for the memwarden kernel. Only the members the app code
+// actually touches are modelled here; the kernel is an in-process,
+// single-instance runtime, so heavier runtime concepts (otel transport,
+// durable streams, worker fleets) collapse to no-ops or in-memory equivalents.
 
 /**
  * HTTP methods the kernel's router understands. Mirrors the

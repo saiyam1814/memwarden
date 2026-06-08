@@ -1,7 +1,6 @@
 //
-// Quantized-vector-index persistence. Net-new wiring: the core dropped the
-// earlier engine's IndexPersistence sync hooks, so nothing else saves or loads
-// vector state. Best-effort soft-fail throughout, matching search.ts:
+// Quantized-vector-index persistence. Nothing else saves or loads vector
+// state, so this owns it. Best-effort soft-fail throughout, matching search.ts:
 // a persistence problem must never break observe/search.
 //
 // Layout: one blob under the `quantParams` scope. The blob embeds its own

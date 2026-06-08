@@ -5,7 +5,7 @@
 ### Memory your AI agents can trust. Verify it, audit what's stale, never touch it.
 
 Every AI coding tool can share one local brain. The crowded part is making that happen;
-memwarden does it, then goes further: it **proves the memory wasn't tampered with**, **audits
+memwarden does it, then goes further: it makes the memory **tamper-evident**, **audits
 whether each memory is still safe to inject**, and **heals itself so you never touch it.** Works
 across Claude Code, Codex, Cursor, Kiro, Antigravity, OpenCode, and OpenClaw.
 
@@ -33,8 +33,8 @@ on**:
   changed since capture (`stale`) is never injected; `memwarden doctor` reports the same.
   Auditing whether memory is still *true*, not just whether it exists, is the part nobody else
   leads with.
-- **Verifiable.** Every write lands in a SHA-256 hash-chained oplog; `memory_verify` proves it
-  was not tampered with.
+- **Tamper-evident.** Every write lands in a SHA-256 hash-chained oplog; `memory_verify` detects
+  any edit, reorder, or drop. (Tamper-*evident*, not tamper-proof — signing is not built yet.)
 - **Self-healing.** Once it is up you never touch it: it revives on use and restarts on crash
   and at login.
 - **Compressed and yours.** TurboQuant 2/4-bit vectors (6–11× smaller, zero recall loss),
@@ -146,16 +146,20 @@ memories, 14 **paraphrased** queries (worded differently than the answers). Repr
 ## Verified Recall — memory you can trust
 
 Recall is only half the job. The other half is knowing the memory is still *true*. Every memory
-records the files it came from **and a content hash of those files at capture time**, so memwarden
-can tell whether it is still valid:
+records the files it came from and, for each hashable file (under ~2 MB, present at capture), a
+content hash, so memwarden can classify it against the live repo:
 
-- **verified** — sourced, and every referenced file still exists and matches its captured hash
+- **verified** — a referenced file still exists and matches its captured hash
+- **sourced_unverified** — sourced (a command, or files present but none hashable), so allowed
+  but not content-verified
 - **stale** — a referenced file was deleted, or its content changed since capture
 - **unsourced** — no evidence at all (no files, no command, not user-confirmed)
 
 **Recall is firewalled by default.** `memory_resume`, `/recall`, the SessionStart hook, and the
 proxy all pass `safe_only`, so a memory that points at code you have since changed or deleted is
-never injected into a model. (Plain `memory_search` stays unfiltered for explicit lookups.)
+never injected into a model (and the firewall backfills lower-ranked verified results rather than
+returning fewer). Plain `memory_search` stays unfiltered for explicit lookups; the REST API
+rejects `safe_only` without a `cwd` to verify against rather than silently passing memory through.
 
 `memwarden doctor` runs the same check as a report against the live repo:
 

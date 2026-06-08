@@ -144,6 +144,7 @@ export interface Memory {
   imageData?: string;
   agentId?: string;
   project?: string;
+  provenance?: Provenance; // evidence trail for Verified Recall
 }
 
 export interface SessionSummary {

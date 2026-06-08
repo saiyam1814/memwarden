@@ -53,9 +53,16 @@ describe("classifyProvenance", () => {
     expect(classifyProvenance({ userConfirmed: false }, "/r").status).toBe("unsourced");
   });
 
-  it("verified when a command-sourced memory references no files", () => {
+  it("sourced_unverified (not verified) for command-only, file-less captures", () => {
     const p: Provenance = { command: "Bash: npm test" };
-    expect(classifyProvenance(p, "/r").status).toBe("verified");
+    expect(classifyProvenance(p, "/r").status).toBe("sourced_unverified");
+  });
+
+  it("sourced_unverified when files exist but were never hashed", () => {
+    const root = repo();
+    writeFileSync(join(root, "c.ts"), "x\n");
+    const p: Provenance = { files: ["c.ts"], command: "Edit" }; // no fileHashes
+    expect(classifyProvenance(p, root).status).toBe("sourced_unverified");
   });
 
   it("verified when the referenced file exists and its hash still matches", () => {
@@ -122,5 +129,28 @@ describe("Verified Recall firewall (safe_only)", () => {
     expect(await search(root, true)).toBe(0);
     // ...but a plain (unverified) search still returns it.
     expect(await search(root, false)).toBeGreaterThan(0);
+  });
+
+  it("does not let stale top hits starve a lower-ranked verified result", async () => {
+    const root = repo();
+    mkdirSync(join(root, "src"));
+    // A verified memory that ranks LAST (only one query term).
+    writeFileSync(join(root, "src", "keep.ts"), "// keep\n");
+    await observe(root, "src/keep.ts", "bearer");
+    // Two higher-scoring memories (more query terms) whose files then vanish.
+    for (const id of ["a", "b"]) {
+      writeFileSync(join(root, "src", `${id}.ts`), "tmp\n");
+      await observe(root, `src/${id}.ts`, "bearer auth tokens galore galore");
+    }
+    rmSync(join(root, "src", "a.ts"));
+    rmSync(join(root, "src", "b.ts"));
+
+    // With limit=2 the two stale memories fill the top slots; the firewall
+    // must backfill the verified one rather than return nothing.
+    const r = (await sdk.trigger({
+      function_id: "mem::search",
+      payload: { query: "bearer auth tokens galore", cwd: root, project: root, limit: 2, safe_only: true },
+    })) as { results: unknown[] };
+    expect(r.results.length).toBe(1);
   });
 });

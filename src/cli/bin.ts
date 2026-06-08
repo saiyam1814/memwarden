@@ -125,13 +125,16 @@ async function doctor(rest: string[]): Promise<void> {
   const r = (await res.json()) as {
     total: number;
     safe: number;
+    verified: number;
+    sourcedUnverified: number;
     stale: Array<{ title: string; reason: string }>;
     unsourced: Array<{ title: string; reason: string }>;
   };
   console.log(`\nmemwarden doctor — ${root}\n`);
-  console.log(`  SAFE TO INJECT: ${r.safe} memories`);
-  console.log(`  STALE:          ${r.stale.length} memories reference files that changed`);
-  console.log(`  UNSOURCED:      ${r.unsourced.length} memories have no evidence\n`);
+  console.log(`  VERIFIED:        ${r.verified} memories (code-backed, current)`);
+  console.log(`  SOURCED:         ${r.sourcedUnverified} memories (sourced, not content-verified)`);
+  console.log(`  STALE:           ${r.stale.length} memories reference files that changed/deleted`);
+  console.log(`  UNSOURCED:       ${r.unsourced.length} memories have no evidence\n`);
   for (const s of r.stale.slice(0, 5)) console.log(`  [stale]     ${s.title} — ${s.reason}`);
   for (const u of r.unsourced.slice(0, 5)) console.log(`  [unsourced] ${u.title} — ${u.reason}`);
   console.log(`\n  ${r.total} memories audited.\n`);

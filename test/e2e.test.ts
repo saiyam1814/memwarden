@@ -240,6 +240,14 @@ describe("E2E: boot -> observe -> search (BM25) -> context over the REST wire", 
     expect(badContext.status).toBe(400);
   });
 
+  it("rejects safe_only without a cwd (Verified Recall fails closed)", async () => {
+    const res = await postJson("/search", { query: "anything", safe_only: true });
+    expect(res.status).toBe(400);
+    expect((await res.json()) as { error: string }).toMatchObject({
+      error: expect.stringContaining("safe_only requires cwd"),
+    });
+  });
+
   it("404s an unknown route and answers CORS preflight with 204", async () => {
     const missing = await fetch(`${base}/does-not-exist`);
     expect(missing.status).toBe(404);

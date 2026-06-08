@@ -25,19 +25,11 @@ export interface DoctorEntry {
 }
 export interface DoctorReport {
   total: number;
-  safe: number;
+  safe: number; // verified + sourcedUnverified (everything injectable)
+  verified: number; // code-backed and current
+  sourcedUnverified: number; // sourced but not content-verified
   stale: DoctorEntry[];
   unsourced: DoctorEntry[];
-}
-
-/** Audit one observation against the repo root via the Verified Recall check. */
-function auditOne(
-  obs: CompressedObservation,
-  root: string,
-): { kind: "safe" | "stale" | "unsourced"; entry: DoctorEntry } {
-  const verdict = classifyProvenance(obs.provenance, root);
-  const kind = verdict.status === "verified" ? "safe" : verdict.status;
-  return { kind, entry: { id: obs.id, title: obs.title, reason: verdict.reason } };
 }
 
 export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
@@ -45,14 +37,34 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
     "mem::doctor",
     async (data: { root?: string; project?: string }): Promise<DoctorReport> => {
       const root = data?.root ?? process.cwd();
-      const report: DoctorReport = { total: 0, safe: 0, stale: [], unsourced: [] };
+      const report: DoctorReport = {
+        total: 0,
+        safe: 0,
+        verified: 0,
+        sourcedUnverified: 0,
+        stale: [],
+        unsourced: [],
+      };
 
       const audit = (obs: CompressedObservation) => {
         report.total++;
-        const { kind, entry } = auditOne(obs, root);
-        if (kind === "safe") report.safe++;
-        else if (kind === "stale") report.stale.push(entry);
-        else report.unsourced.push(entry);
+        const verdict = classifyProvenance(obs.provenance, root);
+        const entry: DoctorEntry = { id: obs.id, title: obs.title, reason: verdict.reason };
+        switch (verdict.status) {
+          case "verified":
+            report.verified++;
+            report.safe++;
+            break;
+          case "sourced_unverified":
+            report.sourcedUnverified++;
+            report.safe++;
+            break;
+          case "stale":
+            report.stale.push(entry);
+            break;
+          default:
+            report.unsourced.push(entry);
+        }
       };
 
       // Memories (mem::remember scope).
