@@ -285,7 +285,7 @@ describe("mem::context (recency packing)", () => {
       payload: { sessionId: "sess-current", project: "proj-X", budget: 4000 },
     });
     expect(res.blocks).toBeGreaterThan(0);
-    expect(res.context).toContain('<the original implementation-context project="proj-X">');
+    expect(res.context).toContain('<memwarden-context project="proj-X">');
     expect(res.context).toContain("Chose libSQL for persistence");
     expect(res.tokens).toBeGreaterThan(0);
   });

@@ -9,7 +9,7 @@
 // PHASE-0 SCOPE: no embedding provider is wired, so vectorIndexAddGuarded
 // is a no-op soft-fail (its signature is kept because observe.ts calls it),
 // and rebuildIndex only repopulates the BM25 index. The batched embed flush
-// and IndexPersistence sync hooks from the predecessor are intentionally
+// and IndexPersistence sync hooks from the earlier engine are intentionally
 // dropped until the vector provider lands in Phase 0b.
 
 import type { ISdk } from "../kernel/index.js";

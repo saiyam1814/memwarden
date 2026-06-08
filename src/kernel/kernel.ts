@@ -1,5 +1,5 @@
 //
-// The memwarden kernel: an in-process replacement for the the external engine SDK
+// The memwarden kernel: an in-process replacement for an external engine SDK
 // worker runtime. It owns
 // - the function registry (Map<id, handler>),
 // - the single `trigger` dispatch chokepoint (including the built-in
@@ -355,7 +355,7 @@ export class Kernel implements ISdk {
 const NOT_BUILTIN = Symbol("not-builtin");
 
 /**
- * Factory matching the old the external engine SDK entrypoint. The kernel is a
+ * Factory matching a legacy engine entrypoint. The kernel is a
  * process singleton: repeated calls return the same instance so every
  * module that imports `registerWorker` shares one registry + store.
  */

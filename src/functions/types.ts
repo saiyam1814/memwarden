@@ -1,9 +1,9 @@
 //
-// The subset of the original src/types.ts that the ported core functions
+// The subset of the shared data model that the wired core functions
 // (observe / context / search) and their supporting modules depend on.
 // Trimmed to only the shapes the Phase-0 surface touches; the wire shapes
 // (HookPayload, RawObservation, CompressedObservation, Session, ...) are
-// kept byte-for-byte compatible with the original implementation so existing connectors can
+// kept byte-for-byte compatible with the original engine so existing connectors can
 // talk to memwarden unchanged.
 
 export type HookType =

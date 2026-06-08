@@ -225,7 +225,7 @@ describe("E2E: boot -> observe -> search (BM25) -> context over the REST wire", 
     expect(body.blocks).toBeGreaterThan(0);
     expect(body.tokens).toBeGreaterThan(0);
     expect(body.tokens).toBeLessThanOrEqual(4000);
-    expect(body.context).toContain('<the original implementation-context project="proj-e2e">');
+    expect(body.context).toContain('<memwarden-context project="proj-e2e">');
     expect(body.context).toContain("Chose libSQL for persistence");
   });
 

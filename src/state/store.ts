@@ -11,8 +11,8 @@
 // - list -> VALUES only (no keys), exact scope match, insertion order,
 // [] on unknown scope
 //
-// On top of those semantics it adds two things the successor needs that the
-// predecessor's file-KV did not surface:
+// On top of those semantics it adds two things memwarden needs that the
+// earlier engine's file-KV did not surface:
 //
 // 1. Mutation events. set/update/delete report the affected key, the
 // event_type, and the old/new values so the kernel can drive the
@@ -105,7 +105,7 @@ export interface StateStore {
 /**
  * Apply the StateKV `update` op-list to a record, in place semantics returning
  * the mutated record. Shared by both store implementations so their behavior
- * is identical. Only `type:"set"` is honored (verbatim the original implementation semantics:
+ * is identical. Only `type:"set"` is honored (verbatim the original engine semantics:
  * grep-confirmed zero push/inc/delete/append usage); `path` is a flat
  * top-level field name, never dotted. Unknown op types are ignored.
  */

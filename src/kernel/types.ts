@@ -1,14 +1,14 @@
 //
 // Type surface for the memwarden kernel. These types replace the
-// the external engine SDK module that the original implementation imported. Only the members that
-// the ported app code actually touches are modelled here; the kernel
+// an external engine SDK module that the original engine imported. Only the members that
+// the wired app code actually touches are modelled here; the kernel
 // is an in-process, single-instance runtime so the external-engine
 // concepts (otel transport, durable streams, worker fleet) collapse to
 // no-ops or in-memory equivalents.
 
 /**
  * HTTP methods the kernel's router understands. Mirrors the
- * `http_method` values used across the ported route registrations.
+ * `http_method` values used across the wired route registrations.
  */
 export type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";
 
@@ -129,7 +129,7 @@ export interface RegisterWorkerOptions {
 
 /**
  * The single object the rest of the app talks to. Exactly the members
- * the ported call sites reference. `on` and `getMeter` are optional and
+ * the wired call sites reference. `on` and `getMeter` are optional and
  * feature-detected by callers.
  */
 export interface ISdk {

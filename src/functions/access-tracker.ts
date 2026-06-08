@@ -1,10 +1,9 @@
 //
-// Access-frequency tracking for retention scoring. Ported from
-// the original src/functions/access-tracker.ts. context.ts and search.ts
-// call recordAccessBatch fire-and-forget after assembling results so
-// downstream retention/decay can weight by recency-of-use. Each per-memory
-// update is serialized through the keyed mutex; failures are swallowed
-// (access tracking must never break a read).
+// Access-frequency tracking for retention scoring. search.ts and context.ts
+// call recordAccessBatch fire-and-forget after assembling results, so later
+// retention/decay can weight memories by how recently they were used. Each
+// per-memory write is serialized through the keyed mutex, and every failure is
+// swallowed: access tracking must never break a read.
 
 import { KV } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
@@ -26,18 +25,17 @@ export function emptyAccessLog(memoryId: string): AccessLog {
 
 export function normalizeAccessLog(raw: unknown): AccessLog {
   const r = (raw ?? {}) as Partial<AccessLog>;
-  const rawCount =
-    typeof r.count === "number" && Number.isFinite(r.count) ? r.count : 0;
-  const count = Math.max(0, Math.floor(rawCount));
-  const rawRecent = Array.isArray(r.recent)
-    ? r.recent.filter(
-        (x): x is number => typeof x === "number" && Number.isFinite(x),
-      )
+  const count =
+    typeof r.count === "number" && Number.isFinite(r.count)
+      ? Math.max(0, Math.floor(r.count))
+      : 0;
+  const recentAll = Array.isArray(r.recent)
+    ? r.recent.filter((n): n is number => typeof n === "number" && Number.isFinite(n))
     : [];
-  const recent =
-    rawRecent.length > RECENT_CAP ? rawRecent.slice(-RECENT_CAP) : rawRecent;
+  const recent = recentAll.slice(-RECENT_CAP);
   return {
     memoryId: typeof r.memoryId === "string" ? r.memoryId : "",
+    // count can never be below the number of timestamps we actually hold
     count: Math.max(count, recent.length),
     lastAt: typeof r.lastAt === "string" ? r.lastAt : "",
     recent,
@@ -51,12 +49,16 @@ export async function getAccessLog(
   try {
     const raw = await kv.get<AccessLog>(KV.accessLog, memoryId);
     if (!raw) return emptyAccessLog(memoryId);
-    const normalized = normalizeAccessLog(raw);
-    if (!normalized.memoryId) normalized.memoryId = memoryId;
-    return normalized;
+    const log = normalizeAccessLog(raw);
+    if (!log.memoryId) log.memoryId = memoryId;
+    return log;
   } catch {
     return emptyAccessLog(memoryId);
   }
+}
+
+function keyFor(memoryId: string): string {
+  return `mem:access:${memoryId}`;
 }
 
 export async function recordAccess(
@@ -67,15 +69,15 @@ export async function recordAccess(
   if (!memoryId) return;
   const ts = timestampMs ?? Date.now();
   try {
-    await withKeyedLock(`mem:access:${memoryId}`, async () => {
-      const existing = await getAccessLog(kv, memoryId);
-      existing.count += 1;
-      existing.lastAt = new Date(ts).toISOString();
-      existing.recent.push(ts);
-      if (existing.recent.length > RECENT_CAP) {
-        existing.recent = existing.recent.slice(-RECENT_CAP);
+    await withKeyedLock(keyFor(memoryId), async () => {
+      const log = await getAccessLog(kv, memoryId);
+      log.count += 1;
+      log.lastAt = new Date(ts).toISOString();
+      log.recent.push(ts);
+      if (log.recent.length > RECENT_CAP) {
+        log.recent = log.recent.slice(-RECENT_CAP);
       }
-      await kv.set(KV.accessLog, memoryId, existing);
+      await kv.set(KV.accessLog, memoryId, log);
     });
   } catch (err) {
     try {
@@ -84,7 +86,7 @@ export async function recordAccess(
         error: err instanceof Error ? err.message : String(err),
       });
     } catch {
-      // never throw from the access-tracking side path
+      // the side path must never throw
     }
   }
 }
@@ -96,8 +98,8 @@ export async function recordAccessBatch(
 ): Promise<void> {
   if (!memoryIds || memoryIds.length === 0) return;
   const ts = timestampMs ?? Date.now();
-  const unique = Array.from(new Set(memoryIds.filter(Boolean)));
-  await Promise.allSettled(unique.map((id) => recordAccess(kv, id, ts)));
+  const ids = [...new Set(memoryIds.filter(Boolean))];
+  await Promise.allSettled(ids.map((id) => recordAccess(kv, id, ts)));
 }
 
 export async function deleteAccessLog(
@@ -106,10 +108,8 @@ export async function deleteAccessLog(
 ): Promise<void> {
   if (!memoryId) return;
   try {
-    await withKeyedLock(`mem:access:${memoryId}`, async () => {
-      await kv.delete(KV.accessLog, memoryId);
-    });
+    await withKeyedLock(keyFor(memoryId), () => kv.delete(KV.accessLog, memoryId));
   } catch {
-    // idempotent best-effort delete
+    // best-effort, idempotent
   }
 }

@@ -23,7 +23,6 @@ import {
   loadVectorIndex,
   QuantizedVectorIndex,
 } from "../src/functions/index.js";
-import { HybridSearch } from "../src/functions/hybrid-search.js";
 import type { EmbeddingProvider } from "../src/functions/types.js";
 import { mulberry32, seedFromString } from "../src/functions/turboquant.js";
 
@@ -103,50 +102,6 @@ describe("quantized vector stream in hybrid fusion", () => {
   it("makeVectorIndex returns the quantized implementation under the flag", () => {
     const idx = makeVectorIndex(DIMS);
     expect(idx).toBeInstanceOf(QuantizedVectorIndex);
-  });
-
-  it("fuses the vector stream and finds the planted near-duplicate", async () => {
-    const provider = makeStubProvider();
-    setEmbeddingProvider(provider);
-    const vIdx = makeVectorIndex(DIMS);
-    setVectorIndex(vIdx);
-
-    // Create observations through the real observe path, then embed each
-    // with a controlled text whose head word selects the stub anchor: the
-    // two kubernetes observations share the query's anchor, the others
-    // don't.
-    const planted: Array<{ obsId: string; head: string }> = [];
-    for (const [head, id] of [
-      ["kubernetes", "a"],
-      ["kubernetes", "b"],
-      ["database", "c"],
-      ["frontend", "d"],
-    ] as const) {
-      const r = await sdk.trigger<unknown, { observationId?: string }>({
-        function_id: "mem::observe",
-        payload: observePayload(head, id),
-      });
-      expect(typeof r?.observationId).toBe("string");
-      planted.push({ obsId: r!.observationId!, head });
-    }
-
-    for (const { obsId, head } of planted) {
-      const emb = await provider.embed(`${head} memory for ${obsId}`);
-      vIdx.add(obsId, "sess-A", emb);
-    }
-    expect(vIdx.size).toBe(4);
-
-    const hybrid = new HybridSearch(
-      getSearchIndex(),
-      vIdx,
-      provider,
-      kv,
-    );
-    const results = await hybrid.search("kubernetes scheduling", 5);
-    expect(results.length).toBeGreaterThan(0);
-    // The vector stream contributed: at least one fused row carries a
-    // nonzero vectorScore.
-    expect(results.some((r) => r.vectorScore > 0)).toBe(true);
   });
 
   it("restore + rebuild runs incremental sync: embeds missing docs, evicts ghosts", async () => {

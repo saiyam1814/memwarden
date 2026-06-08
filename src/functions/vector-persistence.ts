@@ -1,6 +1,6 @@
 //
 // Quantized-vector-index persistence. Net-new wiring: Phase 0 dropped the
-// predecessor's IndexPersistence sync hooks, so nothing else saves or loads
+// earlier engine's IndexPersistence sync hooks, so nothing else saves or loads
 // vector state. Best-effort soft-fail throughout, matching search.ts:
 // a persistence problem must never break observe/search.
 //

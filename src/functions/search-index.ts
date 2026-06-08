@@ -1,10 +1,10 @@
 //
-// Okapi BM25 inverted index. Ported verbatim from the original
-// src/state/search-index.ts; pure and engine-independent. Load-bearing
-// constants are preserved exactly: k1 = 1.2, b = 0.75, and the
-// idf = log((N - df + 0.5)/(df + 0.5) + 1) formulation. Prefix matching
-// uses a sorted-terms binary lowerBound (prefix idf weighted *0.5);
-// synonym-expanded query terms enter the scorer at weight 0.7.
+// Okapi BM25 inverted index. Pure and engine-independent. BM25 is a published
+// ranking function; the standard constants (k1 = 1.2, b = 0.75) and the
+// idf = log((N - df + 0.5)/(df + 0.5) + 1) form are used as published. On top
+// of exact terms, query terms also match by prefix (binary-searched over the
+// sorted term list, contribution halved) and via synonym expansion (synonym
+// terms enter at weight 0.7).
 
 import type { CompressedObservation } from "./types.js";
 import { stem } from "./stemmer.js";
@@ -17,88 +17,91 @@ interface IndexEntry {
   termCount: number;
 }
 
-export class SearchIndex {
-  private entries: Map<string, IndexEntry> = new Map();
-  private invertedIndex: Map<string, Set<string>> = new Map();
-  private docTermCounts: Map<string, Map<string, number>> = new Map();
-  private totalDocLength = 0;
-  private sortedTerms: string[] | null = null;
+export interface Bm25Hit {
+  obsId: string;
+  sessionId: string;
+  score: number;
+}
 
-  private readonly k1 = 1.2;
-  private readonly b = 0.75;
+const K1 = 1.2;
+const B = 0.75;
+
+export class SearchIndex {
+  private docs = new Map<string, IndexEntry>(); // obsId -> entry
+  private postings = new Map<string, Set<string>>(); // term -> obsIds
+  private termFreqs = new Map<string, Map<string, number>>(); // obsId -> term -> tf
+  private totalLength = 0;
+  private sortedTermsCache: string[] | null = null;
 
   add(obs: CompressedObservation): void {
     const terms = this.extractTerms(obs);
-    const termFreq = new Map<string, number>();
-    let termCount = 0;
+    const tf = new Map<string, number>();
+    for (const term of terms) tf.set(term, (tf.get(term) ?? 0) + 1);
 
-    for (const term of terms) {
-      termFreq.set(term, (termFreq.get(term) || 0) + 1);
-      termCount++;
-    }
-
-    this.entries.set(obs.id, {
+    this.docs.set(obs.id, {
       obsId: obs.id,
       sessionId: obs.sessionId,
-      termCount,
+      termCount: terms.length,
     });
-    this.docTermCounts.set(obs.id, termFreq);
-    this.totalDocLength += termCount;
-
-    for (const term of termFreq.keys()) {
-      if (!this.invertedIndex.has(term)) {
-        this.invertedIndex.set(term, new Set());
-      }
-      this.invertedIndex.get(term)!.add(obs.id);
+    this.termFreqs.set(obs.id, tf);
+    this.totalLength += terms.length;
+    for (const term of tf.keys()) {
+      let posting = this.postings.get(term);
+      if (!posting) this.postings.set(term, (posting = new Set()));
+      posting.add(obs.id);
     }
-
-    this.sortedTerms = null;
+    this.sortedTermsCache = null;
   }
 
   has(id: string): boolean {
-    return this.entries.has(id);
+    return this.docs.has(id);
   }
 
   remove(id: string): void {
-    const entry = this.entries.get(id);
+    const entry = this.docs.get(id);
     if (!entry) return;
-
-    const termFreq = this.docTermCounts.get(id);
-    if (termFreq) {
-      for (const term of termFreq.keys()) {
-        const postingList = this.invertedIndex.get(term);
-        if (postingList) {
-          postingList.delete(id);
-          if (postingList.size === 0) {
-            this.invertedIndex.delete(term);
-          }
+    const tf = this.termFreqs.get(id);
+    if (tf) {
+      for (const term of tf.keys()) {
+        const posting = this.postings.get(term);
+        if (posting) {
+          posting.delete(id);
+          if (posting.size === 0) this.postings.delete(term);
         }
       }
-      this.docTermCounts.delete(id);
+      this.termFreqs.delete(id);
     }
-
-    this.totalDocLength = Math.max(0, this.totalDocLength - entry.termCount);
-    this.entries.delete(id);
-    this.sortedTerms = null;
+    this.totalLength = Math.max(0, this.totalLength - entry.termCount);
+    this.docs.delete(id);
+    this.sortedTermsCache = null;
   }
 
-  search(
-    query: string,
-    limit = 20,
-  ): Array<{ obsId: string; sessionId: string; score: number }> {
+  get size(): number {
+    return this.docs.size;
+  }
+
+  // BM25 contribution of a single term to a single document (no query weight).
+  private contribution(tf: number, df: number, n: number, docLen: number, avgLen: number): number {
+    const idf = Math.log((n - df + 0.5) / (df + 0.5) + 1);
+    const num = tf * (K1 + 1);
+    const den = tf + K1 * (1 - B + B * (docLen / avgLen));
+    return idf * (num / den);
+  }
+
+  search(query: string, limit = 20): Bm25Hit[] {
     const rawTerms = this.tokenize(query.toLowerCase());
     if (rawTerms.length === 0) return [];
+    const n = this.docs.size;
+    if (n === 0) return [];
+    const avgLen = this.totalLength / n;
 
-    const N = this.entries.size;
-    if (N === 0) return [];
-    const avgDocLen = this.totalDocLength / N;
-
+    // exact terms at full weight, synonyms at 0.7, de-duplicated
     const queryTerms: Array<{ term: string; weight: number }> = [];
     const seen = new Set<string>();
     for (const term of rawTerms) {
       if (!seen.has(term)) {
         seen.add(term);
-        queryTerms.push({ term, weight: 1.0 });
+        queryTerms.push({ term, weight: 1 });
       }
       for (const syn of getSynonyms(term)) {
         if (!seen.has(syn)) {
@@ -109,115 +112,73 @@ export class SearchIndex {
     }
 
     const scores = new Map<string, number>();
-    const sorted = this.getSortedTerms();
-
-    for (const { term, weight } of queryTerms) {
-      const matchingDocs = this.invertedIndex.get(term);
-      if (matchingDocs) {
-        const df = matchingDocs.size;
-        const idf = Math.log((N - df + 0.5) / (df + 0.5) + 1);
-
-        for (const obsId of matchingDocs) {
-          const entry = this.entries.get(obsId)!;
-          const docTerms = this.docTermCounts.get(obsId);
-          const tf = docTerms?.get(term) || 0;
-          const docLen = entry.termCount;
-
-          const numerator = tf * (this.k1 + 1);
-          const denominator =
-            tf + this.k1 * (1 - this.b + this.b * (docLen / avgDocLen));
-          const bm25Score = idf * (numerator / denominator) * weight;
-
-          scores.set(obsId, (scores.get(obsId) || 0) + bm25Score);
-        }
+    const accrue = (term: string, weight: number, factor: number): void => {
+      const posting = this.postings.get(term);
+      if (!posting) return;
+      const df = posting.size;
+      for (const obsId of posting) {
+        const doc = this.docs.get(obsId)!;
+        const tf = this.termFreqs.get(obsId)?.get(term) ?? 0;
+        const add = this.contribution(tf, df, n, doc.termCount, avgLen) * weight * factor;
+        scores.set(obsId, (scores.get(obsId) ?? 0) + add);
       }
+    };
 
-      const startIdx = this.lowerBound(sorted, term);
-      for (let si = startIdx; si < sorted.length; si++) {
-        const indexTerm = sorted[si];
-        if (indexTerm === undefined || !indexTerm.startsWith(term)) break;
-        if (indexTerm === term) continue;
-
-        const obsIds = this.invertedIndex.get(indexTerm)!;
-        const prefixDf = obsIds.size;
-        const prefixIdf =
-          Math.log((N - prefixDf + 0.5) / (prefixDf + 0.5) + 1) * 0.5;
-        for (const obsId of obsIds) {
-          const entry = this.entries.get(obsId)!;
-          const docTerms = this.docTermCounts.get(obsId);
-          const tf = docTerms?.get(indexTerm) || 0;
-          const docLen = entry.termCount;
-          const numerator = tf * (this.k1 + 1);
-          const denominator =
-            tf + this.k1 * (1 - this.b + this.b * (docLen / avgDocLen));
-          scores.set(
-            obsId,
-            (scores.get(obsId) || 0) +
-              prefixIdf * (numerator / denominator) * weight,
-          );
-        }
+    const sorted = this.sortedTerms();
+    for (const { term, weight } of queryTerms) {
+      accrue(term, weight, 1); // exact match
+      // prefix matches (term*) excluding the exact term, contribution halved
+      for (let i = this.lowerBound(sorted, term); i < sorted.length; i++) {
+        const candidate = sorted[i];
+        if (candidate === undefined || !candidate.startsWith(term)) break;
+        if (candidate === term) continue;
+        accrue(candidate, weight, 0.5);
       }
     }
 
-    return Array.from(scores.entries())
-      .map(([obsId, score]) => {
-        const entry = this.entries.get(obsId)!;
-        return { obsId, sessionId: entry.sessionId, score };
-      })
+    return [...scores.entries()]
+      .map(([obsId, score]) => ({
+        obsId,
+        sessionId: this.docs.get(obsId)!.sessionId,
+        score,
+      }))
       .sort((a, b) => b.score - a.score)
       .slice(0, limit);
   }
 
-  get size(): number {
-    return this.entries.size;
-  }
-
   clear(): void {
-    this.entries.clear();
-    this.invertedIndex.clear();
-    this.docTermCounts.clear();
-    this.totalDocLength = 0;
-    this.sortedTerms = null;
+    this.docs.clear();
+    this.postings.clear();
+    this.termFreqs.clear();
+    this.totalLength = 0;
+    this.sortedTermsCache = null;
   }
 
   restoreFrom(other: SearchIndex): void {
-    this.entries = new Map(
-      Array.from(other.entries.entries()).map(([k, v]) => [k, { ...v }]),
-    );
-    this.invertedIndex = new Map(
-      Array.from(other.invertedIndex.entries()).map(([k, v]) => [
-        k,
-        new Set(v),
-      ]),
-    );
-    this.docTermCounts = new Map(
-      Array.from(other.docTermCounts.entries()).map(([k, v]) => [k, new Map(v)]),
-    );
-    this.totalDocLength = other.totalDocLength;
-    this.sortedTerms = null;
+    this.docs = new Map([...other.docs].map(([k, v]) => [k, { ...v }]));
+    this.postings = new Map([...other.postings].map(([k, v]) => [k, new Set(v)]));
+    this.termFreqs = new Map([...other.termFreqs].map(([k, v]) => [k, new Map(v)]));
+    this.totalLength = other.totalLength;
+    this.sortedTermsCache = null;
   }
 
   serialize(): string {
-    const entries = Array.from(this.entries.entries());
-    const inverted = Array.from(this.invertedIndex.entries()).map(
-      ([term, ids]) => [term, Array.from(ids)] as [string, string[]],
-    );
-    const docTerms = Array.from(this.docTermCounts.entries()).map(
-      ([id, counts]) =>
-        [id, Array.from(counts.entries())] as [string, [string, number][]],
-    );
     return JSON.stringify({
       v: 2,
-      entries,
-      inverted,
-      docTerms,
-      totalDocLength: this.totalDocLength,
+      entries: [...this.docs.entries()],
+      inverted: [...this.postings.entries()].map(
+        ([term, ids]) => [term, [...ids]] as [string, string[]],
+      ),
+      docTerms: [...this.termFreqs.entries()].map(
+        ([id, counts]) => [id, [...counts.entries()]] as [string, [string, number][]],
+      ),
+      totalDocLength: this.totalLength,
     });
   }
 
   static deserialize(json: string): SearchIndex {
+    const idx = new SearchIndex();
     try {
-      const idx = new SearchIndex();
       const data = JSON.parse(json) as {
         entries?: Array<[string, IndexEntry]>;
         inverted?: Array<[string, string[]]>;
@@ -225,28 +186,21 @@ export class SearchIndex {
         totalDocLength?: unknown;
       };
       if (!data?.entries || !data?.inverted || !data?.docTerms) return idx;
-      for (const [key, val] of data.entries) {
-        idx.entries.set(key, val);
-      }
-      for (const [term, ids] of data.inverted) {
-        idx.invertedIndex.set(term, new Set(ids));
-      }
-      for (const [id, counts] of data.docTerms) {
-        idx.docTermCounts.set(id, new Map(counts));
-      }
-      const rawLen = Number(data.totalDocLength);
-      idx.totalDocLength =
-        Number.isFinite(rawLen) && rawLen >= 0 ? Math.floor(rawLen) : 0;
-      return idx;
+      for (const [id, entry] of data.entries) idx.docs.set(id, entry);
+      for (const [term, ids] of data.inverted) idx.postings.set(term, new Set(ids));
+      for (const [id, counts] of data.docTerms) idx.termFreqs.set(id, new Map(counts));
+      const len = Number(data.totalDocLength);
+      idx.totalLength = Number.isFinite(len) && len >= 0 ? Math.floor(len) : 0;
     } catch {
       return new SearchIndex();
     }
+    return idx;
   }
 
   private extractTerms(obs: CompressedObservation): string[] {
     const parts = [
       obs.title,
-      obs.subtitle || "",
+      obs.subtitle ?? "",
       obs.narrative,
       ...obs.facts,
       ...obs.concepts,
@@ -258,25 +212,20 @@ export class SearchIndex {
 
   private tokenize(text: string): string[] {
     const cleaned = text.replace(/[^\p{L}\p{N}\s/.\\-_]/gu, " ");
-    const out: string[] = [];
-    for (const raw of cleaned.split(/\s+/)) {
-      if (raw.length < 2) continue;
-      if (hasCjk(raw)) {
-        for (const seg of segmentCjk(raw)) {
-          if (seg.length >= 1) out.push(seg);
-        }
+    const tokens: string[] = [];
+    for (const word of cleaned.split(/\s+/)) {
+      if (word.length < 2) continue;
+      if (hasCjk(word)) {
+        for (const seg of segmentCjk(word)) if (seg.length >= 1) tokens.push(seg);
       } else {
-        out.push(stem(raw));
+        tokens.push(stem(word));
       }
     }
-    return out;
+    return tokens;
   }
 
-  private getSortedTerms(): string[] {
-    if (!this.sortedTerms) {
-      this.sortedTerms = Array.from(this.invertedIndex.keys()).sort();
-    }
-    return this.sortedTerms;
+  private sortedTerms(): string[] {
+    return (this.sortedTermsCache ??= [...this.postings.keys()].sort());
   }
 
   private lowerBound(arr: string[], target: string): number {

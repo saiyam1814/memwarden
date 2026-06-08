@@ -1,7 +1,7 @@
 //
-// A compact Porter stemmer. Porter's algorithm is public-domain; this is an
-// original implementation of its steps (plural/past-tense stripping, the
-// step 2-4 suffix maps, and final -e / double-l cleanup). The BM25 tokenizer
+// A compact Porter stemmer. Porter's algorithm is public-domain; this code
+// implements its steps from scratch (plural/past-tense stripping, the step
+// 2-4 suffix maps, and final -e / double-l cleanup). The BM25 tokenizer
 // and the synonym map both run terms through it, so indexing and querying
 // reduce words the same way.
 

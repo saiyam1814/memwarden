@@ -1,25 +1,16 @@
 //
-// Flat brute-force cosine vector index. Ported verbatim from the original
-// src/state/vector-index.ts. Pure and engine-independent.
+// Flat brute-force cosine vector index: the full-precision baseline behind the
+// VectorIndexLike contract (QuantizedVectorIndex is the compressed default).
+// Pure and engine-independent.
 //
-// The Phase-0 successor wires NO embedding provider, so this index stays
-// empty (size === 0) and the hybrid fusion renormalizes the BM25 stream to
-// full weight (see hybrid-search.ts). It is kept whole — including the
-// explicit byteOffset/byteLength base64 round-trip and the
-// validateDimensions guard — so the vector stream can be lit up in Phase 0b
-// without reintroducing the "2048 phantom dimensions" corruption
-// (the original implementation #455 / #469 / #584 / #587).
+// The base64 helpers pass byteOffset + byteLength explicitly on purpose:
+// Buffer.from(b64, "base64") hands back a slice of Node's shared pool, and a
+// naive `new Float32Array(buf.buffer)` would mint a view over the whole pool
+// (phantom dimensions). The same care applies on encode if the source array is
+// itself a view. Keep these exact.
 
-// Pass byteOffset + byteLength explicitly so the round-trip survives
-// Node's Buffer pool. Buffer.from(b64, "base64") returns a slice of a
-// shared 8KB pool (poolSize), and `new Float32Array(buf.buffer)` ignores
-// the slice metadata — it would mint a 2048-element view over the whole
-// pool. Same risk on the encode side if the input Float32Array is itself
-// a sliced view.
 function float32ToBase64(arr: Float32Array): string {
-  return Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength).toString(
-    "base64",
-  );
+  return Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength).toString("base64");
 }
 
 function base64ToFloat32(b64: string): Float32Array {
@@ -31,25 +22,35 @@ function base64ToFloat32(b64: string): Float32Array {
   );
 }
 
-function cosineSimilarity(a: Float32Array, b: Float32Array): number {
+function cosine(a: Float32Array, b: Float32Array): number {
   if (a.length !== b.length) return 0;
   let dot = 0;
-  let normA = 0;
-  let normB = 0;
+  let na = 0;
+  let nb = 0;
   for (let i = 0; i < a.length; i++) {
-    const ai = a[i] as number;
-    const bi = b[i] as number;
-    dot += ai * bi;
-    normA += ai * ai;
-    normB += bi * bi;
+    const x = a[i] as number;
+    const y = b[i] as number;
+    dot += x * y;
+    na += x * x;
+    nb += y * y;
   }
-  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  const denom = Math.sqrt(na) * Math.sqrt(nb);
   return denom === 0 ? 0 : dot / denom;
 }
 
+interface Entry {
+  embedding: Float32Array;
+  sessionId: string;
+}
+
+export interface VectorHit {
+  obsId: string;
+  sessionId: string;
+  score: number;
+}
+
 export class VectorIndex {
-  private vectors: Map<string, { embedding: Float32Array; sessionId: string }> =
-    new Map();
+  private vectors = new Map<string, Entry>();
 
   add(obsId: string, sessionId: string, embedding: Float32Array): void {
     this.vectors.set(obsId, { embedding, sessionId });
@@ -64,49 +65,26 @@ export class VectorIndex {
   }
 
   ids(): string[] {
-    return Array.from(this.vectors.keys());
-  }
-
-  search(
-    query: Float32Array,
-    limit = 20,
-  ): Array<{ obsId: string; sessionId: string; score: number }> {
-    const results: Array<{
-      obsId: string;
-      sessionId: string;
-      score: number;
-    }> = [];
-    let minScore = -Infinity;
-
-    for (const [obsId, entry] of this.vectors) {
-      const score = cosineSimilarity(query, entry.embedding);
-      if (results.length < limit) {
-        results.push({ obsId, sessionId: entry.sessionId, score });
-        if (results.length === limit) {
-          results.sort((a, b) => a.score - b.score);
-          minScore = results[0]!.score;
-        }
-      } else if (score > minScore) {
-        results[0] = { obsId, sessionId: entry.sessionId, score };
-        results.sort((a, b) => a.score - b.score);
-        minScore = results[0]!.score;
-      }
-    }
-
-    results.sort((a, b) => b.score - a.score);
-    return results;
+    return [...this.vectors.keys()];
   }
 
   get size(): number {
     return this.vectors.size;
   }
 
-  // Walks every stored vector and returns the obsIds whose dimension
-  // doesn't match `expected`, plus the set of distinct dimensions seen.
-  // Used by the persistence-restore guard to refuse loading any index
-  // containing wrong-dimension vectors. Empty `mismatches` plus a
-  // single-entry `seenDimensions` matching `expected` is the only clean
-  // state.
+  search(query: Float32Array, limit = 20): VectorHit[] {
+    const scored: VectorHit[] = [];
+    for (const [obsId, entry] of this.vectors) {
+      scored.push({ obsId, sessionId: entry.sessionId, score: cosine(query, entry.embedding) });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    return limit < scored.length ? scored.slice(0, limit) : scored;
+  }
+
+  // Reports any stored vectors whose dimension differs from `expected`, plus
+  // the distinct dimensions seen. The persistence guard refuses to load an
+  // index with mismatches; the only clean state is no mismatches and a single
+  // seen dimension equal to `expected`.
   validateDimensions(expected: number): {
     mismatches: Array<{ obsId: string; dim: number }>;
     seenDimensions: Set<number>;
@@ -116,9 +94,7 @@ export class VectorIndex {
     for (const [obsId, entry] of this.vectors) {
       const dim = entry.embedding.length;
       seenDimensions.add(dim);
-      if (dim !== expected) {
-        mismatches.push({ obsId, dim });
-      }
+      if (dim !== expected) mismatches.push({ obsId, dim });
     }
     return { mismatches, seenDimensions };
   }
@@ -128,9 +104,8 @@ export class VectorIndex {
   }
 
   restoreFrom(other: VectorIndex): void {
-    const src = other.vectors;
     this.vectors = new Map();
-    for (const [obsId, entry] of src) {
+    for (const [obsId, entry] of other.vectors) {
       this.vectors.set(obsId, {
         embedding: new Float32Array(entry.embedding),
         sessionId: entry.sessionId,
@@ -139,47 +114,42 @@ export class VectorIndex {
   }
 
   serialize(): string {
-    const data: Array<[string, { embedding: string; sessionId: string }]> = [];
+    const rows: Array<[string, { embedding: string; sessionId: string }]> = [];
     for (const [obsId, entry] of this.vectors) {
-      data.push([
-        obsId,
-        {
-          embedding: float32ToBase64(entry.embedding),
-          sessionId: entry.sessionId,
-        },
-      ]);
+      rows.push([obsId, { embedding: float32ToBase64(entry.embedding), sessionId: entry.sessionId }]);
     }
-    return JSON.stringify(data);
+    return JSON.stringify(rows);
   }
 
   static deserialize(json: string): VectorIndex {
     const idx = new VectorIndex();
-    let data: unknown;
+    let rows: unknown;
     try {
-      data = JSON.parse(json);
+      rows = JSON.parse(json);
     } catch {
       return idx;
     }
-    if (!Array.isArray(data)) return idx;
-    for (const row of data) {
+    if (!Array.isArray(rows)) return idx;
+    for (const row of rows) {
+      if (!Array.isArray(row) || row.length < 2) continue;
+      const [obsId, entry] = row as [
+        unknown,
+        { embedding?: unknown; sessionId?: unknown },
+      ];
+      if (
+        typeof obsId !== "string" ||
+        typeof entry?.embedding !== "string" ||
+        typeof entry?.sessionId !== "string"
+      ) {
+        continue;
+      }
       try {
-        if (!Array.isArray(row) || row.length < 2) continue;
-        const [obsId, entry] = row as [
-          unknown,
-          { embedding?: unknown; sessionId?: unknown },
-        ];
-        if (
-          typeof obsId !== "string" ||
-          typeof entry?.embedding !== "string" ||
-          typeof entry?.sessionId !== "string"
-        )
-          continue;
         idx.vectors.set(obsId, {
           embedding: base64ToFloat32(entry.embedding),
           sessionId: entry.sessionId,
         });
       } catch {
-        continue;
+        // skip a corrupt row rather than fail the whole restore
       }
     }
     return idx;

@@ -1,6 +1,6 @@
 //
 // Public barrel for the memwarden kernel. This is the module that
-// replaces the external engine SDK for ported app code: it exports the
+// replaces an external engine SDK for wired app code: it exports the
 // `registerWorker` factory, the `TriggerAction` value, and the
 // `ISdk` / `ApiRequest` types the call sites import.
 

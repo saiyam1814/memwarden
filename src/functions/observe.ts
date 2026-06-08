@@ -14,7 +14,7 @@
 // PHASE-0 SCOPE: image *detection* + modality tagging is preserved (pure,
 // keeps the observation wire shape compatible), but the image-to-disk
 // persistence, ref-counting, vision-embed, and disk-size-delta side effects
-// from the predecessor are not ported — they depend on the image-store /
+// from the earlier engine are not wired — they depend on the image-store /
 // vision subsystem, which is out of the core. The live-viewer stream::set /
 // stream::send fan-out is emitted (the kernel routes those built-ins to its
 // in-process pub/sub); it is durably unused in-process. LLM compression
@@ -266,7 +266,7 @@ export function registerObserveFunction(
 
       // Per-observation LLM compression is opt-in .
       // Default path: build a zero-LLM synthetic compression so recall and
-      // BM25 search work without an LLM. The successor has no LLM provider
+      // BM25 search work without an LLM. The memwarden has no LLM provider
       // wired in Phase 0, so the synthetic path is always taken.
       if (isAutoCompressEnabled()) {
         await sdk.trigger({

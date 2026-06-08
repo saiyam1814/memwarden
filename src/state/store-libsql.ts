@@ -19,8 +19,8 @@
 // are serialized through an in-process promise chain: the read-then-batch pair
 // must be atomic with respect to other writes because `prev_hash` depends on
 // the previous committed entry. This is correct only for a single-process
-// kernel; a multi-process successor needs a real lock (same caveat as
-// withKeyedLock in the original implementation).
+// kernel; a multi-process memwarden needs a real lock (same caveat as
+// withKeyedLock in the original engine).
 
 import { createClient, type Client, type InStatement } from "@libsql/client";
 import {

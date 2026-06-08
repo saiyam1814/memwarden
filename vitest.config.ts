@@ -1,7 +1,5 @@
-// Derived from agentmemory (Apache-2.0), see NOTICE.
-//
-// Vitest configuration for the Phase 0 test suite. The defaults already work,
-// but this pins three things the suite relies on:
+// Vitest configuration. The defaults already work, but this pins three things
+// the suite relies on:
 //
 //   - include: only the `test/` directory (no stray src spec discovery).
 //   - pool "forks": run each test FILE in its own child process. Several

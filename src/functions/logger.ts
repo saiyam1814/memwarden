@@ -1,7 +1,7 @@
 //
 // Minimal structured logger. the original logger.ts is a larger
 // leveled/redacting implementation; the Phase-0 port only needs the
-// info/warn/error/debug surface the ported functions call, writing JSON
+// info/warn/error/debug surface the wired functions call, writing JSON
 // lines to stderr so log output never corrupts a stdout protocol stream.
 // Level is gated by MEMWARDEN_LOG_LEVEL (default "info").
 

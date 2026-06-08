@@ -1,7 +1,7 @@
 //
-// memwarden boot entrypoint. Mirrors the the original implementation worker boot but
+// memwarden boot entrypoint. Mirrors the original engine worker boot but
 // against the in-process kernel instead of an external engine:
-// - build the kernel via registerWorker (the the external engine SDK stand-in),
+// - build the kernel via registerWorker (an external engine SDK stand-in),
 // - register app functions (./functions/*) if present,
 // - start the node:http REST server on restPort,
 // - keep the periodic sweeps as plain setInterval(...).unref() timers
@@ -45,7 +45,7 @@ const STORE_URL =
 // or fire-and-forget trigger rejection should never terminate the
 // long-lived memory service. The kernel surfaces rejections to the
 // relevant call site via .catch(); everything else is logged and
-// continued. Throttle to avoid spamming on bursts (mirrors the original implementation
+// continued. Throttle to avoid spamming on bursts (mirrors the original engine
 // index.ts which reads reason.code / function_id / message).
 let lastUnhandledLogAt = 0;
 process.on("unhandledRejection", (reason) => {
@@ -81,7 +81,7 @@ async function tryRegister(
   } catch (err) {
     const code = (err as { code?: string }).code;
     // ERR_MODULE_NOT_FOUND is expected while functions are still being
-    // ported; anything else is a real registration failure worth a log.
+    // wired; anything else is a real registration failure worth a log.
     if (code !== "ERR_MODULE_NOT_FOUND") {
       console.warn(
         `[memwarden] failed to register ${exportName} from ${modulePath}:`,
@@ -97,7 +97,7 @@ async function tryRegister(
  *
  * The Phase-0 core (mem::observe / mem::context / mem::search and their
  * HTTP routes) is wired statically: the modules exist and share a single
- * StateKV constructed over the kernel. Functions still being ported
+ * StateKV constructed over the kernel. Functions still being wired
  * (smart-search, remember, enrich, events, health) remain best-effort
  * dynamic imports so the kernel still boots while they land.
  */
@@ -109,7 +109,7 @@ async function registerFunctions(sdk: Kernel): Promise<number> {
 
   let registered = 3; // observe + context + search
 
-  // Functions still being ported; absent modules are no-ops.
+  // Functions still being wired; absent modules are no-ops.
   const tasks: Array<Promise<boolean>> = [
     tryRegister("./functions/smart-search.js", "registerSmartSearchFunction", sdk),
     tryRegister("./functions/remember.js", "registerRememberFunction", sdk),
@@ -127,7 +127,7 @@ async function registerFunctions(sdk: Kernel): Promise<number> {
  * primitive: these are plain unref'd interval timers that fire a
  * `trigger mem::*`. A trigger to an unregistered function rejects
  * harmlessly (caught here), so this is safe to install before the
- * corresponding functions are ported.
+ * corresponding functions are wired.
  */
 function installSweeps(sdk: Kernel): Array<NodeJS.Timeout> {
   const timers: Array<NodeJS.Timeout> = [];

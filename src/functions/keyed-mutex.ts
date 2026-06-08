@@ -3,7 +3,7 @@
 // a promise so each waits for the previous to settle (whether it resolved or
 // threw). Used to serialize the observe write path per session so counters and
 // rollbacks stay race-free. Correct only for a single in-process instance; a
-// multi-process successor would need a real distributed lock.
+// multi-process memwarden would need a real distributed lock.
 
 const chains = new Map<string, Promise<unknown>>();
 

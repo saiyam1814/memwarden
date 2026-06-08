@@ -5,13 +5,13 @@
 // that validates the request body and delegates to a mem::<x> business
 // handler via sdk.trigger. The canonical REST contract is preserved
 // verbatim (paths prefixed /memwarden, methods, status codes, and the
-// middleware::api-auth chain) so existing the original implementation connectors talk to
+// middleware::api-auth chain) so existing the original engine connectors talk to
 // memwarden unchanged.
 //
 // Scope: the canonical core — livez, observe, context, search — is wired
 // here. The rest of the original ~132 routes are mechanical follow-ups
 // (same registerFunction + http-trigger pattern) and land as their business
-// handlers are ported.
+// handlers are wired.
 
 import type { ApiRequest, ISdk } from "../kernel/index.js";
 import type { HookPayload } from "../functions/types.js";
