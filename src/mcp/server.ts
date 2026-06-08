@@ -157,21 +157,28 @@ export function createMcpServer(opts: McpServerOptions) {
     {
       name: "memory_context",
       description:
-        "Pack the most relevant prior memory into a context block under a token budget.",
+        "Pack the most relevant prior memory for this project into a context block under a token budget.",
       inputSchema: {
         type: "object",
         properties: {
           query: { type: "string", description: "Optional focus query" },
+          cwd: { type: "string", description: "Working directory to scope to (defaults to this project)" },
           token_budget: { type: "number", description: "Optional token budget" },
         },
       },
-      call: (a) => {
-        const body: Record<string, unknown> = {};
-        if (typeof a["query"] === "string") body["query"] = a["query"];
-        if (typeof a["token_budget"] === "number")
-          body["token_budget"] = a["token_budget"];
-        return api("POST", "/memwarden/context", body);
-      },
+      // Routes through the project-scoped narrative search rather than
+      // /context (which needs a sessionId+project the MCP layer doesn't
+      // have). Returns a packed, budgeted context block.
+      call: (a) =>
+        api("POST", "/memwarden/search", {
+          query: str(a["query"], "relevant context for this project"),
+          cwd: str(a["cwd"], serverCwd),
+          format: "narrative",
+          limit: 20,
+          ...(typeof a["token_budget"] === "number"
+            ? { token_budget: a["token_budget"] }
+            : { token_budget: 2000 }),
+        }),
     },
     {
       name: "memory_verify",

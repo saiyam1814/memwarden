@@ -128,4 +128,15 @@ describe("mem::search consults the semantic stream", () => {
     const hits = await search("user credentials handling");
     expect(hits.length).toBe(0);
   });
+
+  it("narrative search returns the packed block under `text` (SessionStart hook contract)", async () => {
+    await observe("migrated login to IAM bearer tokens", "auth.ts");
+    const r = await sdk.trigger<unknown, { text?: string }>({
+      function_id: "mem::search",
+      payload: { query: "IAM", format: "narrative" },
+    });
+    // The SessionStart hook reads response.text — guard it can't drift.
+    expect(typeof r.text).toBe("string");
+    expect(r.text!.toLowerCase()).toContain("iam");
+  });
 });

@@ -69,8 +69,9 @@ export async function handleSessionStart(
       }),
     });
     if (!res.ok) return "";
-    const data = (await res.json()) as { context?: string; narrative?: string };
-    const text = data.context ?? data.narrative ?? "";
+    // Narrative-format /search returns the packed block under `text`.
+    const data = (await res.json()) as { text?: string };
+    const text = data.text ?? "";
     if (!text.trim()) return "";
     return JSON.stringify({
       hookSpecificOutput: {

@@ -18,8 +18,10 @@ function jsonResponse(body: unknown, ok = true): Response {
 
 describe("handleSessionStart", () => {
   it("injects narrative context scoped to the event cwd", async () => {
+    // Mirror the REAL narrative /search response shape: text lives under
+    // `text` (regression for the SessionStart-returns-nothing bug).
     const fetchFn = vi.fn(async () =>
-      jsonResponse({ context: "<memory>built the auth module</memory>" }),
+      jsonResponse({ text: "<memory>built the auth module</memory>" }),
     ) as unknown as typeof fetch;
 
     const out = await handleSessionStart(
@@ -38,7 +40,7 @@ describe("handleSessionStart", () => {
   });
 
   it("returns empty (no-op) when there is no memory", async () => {
-    const fetchFn = vi.fn(async () => jsonResponse({ context: "" })) as unknown as typeof fetch;
+    const fetchFn = vi.fn(async () => jsonResponse({ text: "" })) as unknown as typeof fetch;
     expect(await handleSessionStart("{}", { baseUrl: "http://d", fetchFn })).toBe("");
   });
 
