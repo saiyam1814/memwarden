@@ -7,11 +7,24 @@
 //     "env": { "MEMWARDEN_URL": "http://localhost:3111" } }
 
 import { createMcpServer, runStdio } from "./server.js";
+import { ensureDaemon } from "../daemon/ensure.js";
 
 const baseUrl = process.env.MEMWARDEN_URL ?? "http://localhost:3111";
 const secret = process.env.MEMWARDEN_SECRET;
 
-const server = createMcpServer(
-  secret ? { baseUrl, secret } : { baseUrl },
-);
+// Self-heal: revive the daemon on demand if a request finds it down.
+const ensureUp = async (): Promise<void> => {
+  await ensureDaemon(baseUrl);
+};
+
+const server = createMcpServer({
+  baseUrl,
+  ensureUp,
+  ...(secret ? { secret } : {}),
+});
+
+// Warm the daemon at startup so the first recall is instant, but never block
+// the stdio handshake on it.
+void ensureDaemon(baseUrl).catch(() => undefined);
+
 runStdio(server);

@@ -28,6 +28,10 @@ export interface McpServerOptions {
   // the server inside the workspace, so this is the project the agent is
   // in — used to auto-scope recall so the agent never has to name it.
   cwd?: string;
+  // Self-heal hook: called when a daemon request fails with a network error
+  // (daemon down). The bin wires this to ensureDaemon so a dead daemon is
+  // revived on demand and the request retried — no human in the loop.
+  ensureUp?: () => Promise<void>;
 }
 
 interface JsonRpcRequest {
@@ -67,16 +71,29 @@ export function createMcpServer(opts: McpServerOptions) {
   ): Promise<unknown> {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (opts.secret) headers["authorization"] = `Bearer ${opts.secret}`;
-    const res = await doFetch(`${base}${path}`, {
+    const init = {
       method,
       headers,
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    });
-    const text = await res.text();
-    try {
-      return JSON.parse(text);
-    } catch {
-      return { raw: text, status: res.status };
+    };
+    // One self-heal retry: a network error means the daemon is down; revive
+    // it and try again so the user's request just works.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const res = await doFetch(`${base}${path}`, init);
+        const text = await res.text();
+        try {
+          return JSON.parse(text);
+        } catch {
+          return { raw: text, status: res.status };
+        }
+      } catch (err) {
+        if (attempt === 0 && opts.ensureUp) {
+          await opts.ensureUp();
+          continue;
+        }
+        throw err;
+      }
     }
   }
 

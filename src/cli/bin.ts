@@ -9,11 +9,10 @@
 // connect writes ./.mcp.json so any MCP client shares the one local brain;
 // export/import move your memory between machines via the daemon's API.
 
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-import { spawn } from "node:child_process";
 import {
   writeMcpConfig,
   mcpConfigPathFor,
@@ -23,11 +22,10 @@ import {
 } from "./connect.js";
 import { TOOLS, writeTool, writeAgentsMd, type LaunchInfo } from "./tools.js";
 import { handleSessionStart, handleCapture, readStdin } from "./hook.js";
+import { ensureDaemon, daemonAlive, DAEMON_ENTRY } from "../daemon/ensure.js";
+import { installService, uninstallService } from "../daemon/service.js";
 
 const DAEMON_URL = process.env.MEMWARDEN_URL ?? "http://localhost:3111";
-
-// dist/cli/bin.js -> dist/index.js (the daemon entrypoint).
-const DAEMON_ENTRY = join(dirname(fileURLToPath(import.meta.url)), "..", "index.js");
 
 // Absolute paths to the installed CLI and MCP bins, so the configs/hooks we
 // write run today (pre-publish) regardless of cwd. dist/cli/bin.js -> here.
@@ -152,47 +150,6 @@ async function importBrain(file: string | undefined): Promise<void> {
   console.log(`[memwarden] imported brain from ${file}:`, out.imported);
 }
 
-// --- daemon lifecycle ---------------------------------------------
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-async function daemonAlive(url: string): Promise<boolean> {
-  try {
-    const res = await fetch(`${url}/memwarden/livez`);
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Make sure the daemon is up. If not, spawn it detached so it outlives this
- * shell, pointed at a stable user-global brain (~/.memwarden) so every tool
- * shares one memory regardless of where it was launched.
- */
-async function ensureDaemon(
-  url: string,
-  dataDir: string,
-): Promise<"already" | "started" | "failed"> {
-  if (await daemonAlive(url)) return "already";
-  // libSQL won't create the data directory; make it so the spawned daemon
-  // can open its db instead of crashing silently on boot.
-  mkdirSync(dataDir, { recursive: true });
-  const child = spawn(process.execPath, [DAEMON_ENTRY], {
-    detached: true,
-    stdio: "ignore",
-    env: { ...process.env, MEMWARDEN_DATA_DIR: dataDir },
-  });
-  child.unref();
-  for (let i = 0; i < 60; i++) {
-    await sleep(250);
-    if (await daemonAlive(url)) return "started";
-  }
-  return "failed";
-}
-
 // --- `memwarden up` -----------------------------------------------
 
 async function up(rest: string[]): Promise<void> {
@@ -204,17 +161,34 @@ async function up(rest: string[]): Promise<void> {
 
   console.log(`\nmemwarden up\n`);
 
-  // 1. daemon — autostart it, but don't abort the wiring if it can't come up
-  //    (the configs still point at it; the user can start it later).
-  const state = await ensureDaemon(daemonUrl, dataDir);
-  if (state === "failed") {
+  // 1. daemon — install a self-healing OS service (starts at login, restarts
+  //    on crash). Fall back to a detached spawn if there's no service manager.
+  //    Either way the wiring continues; the configs point at this daemon.
+  const sleep = (ms: number): Promise<void> =>
+    new Promise((r) => setTimeout(r, ms));
+  const svc = installService(dataDir);
+  if (svc.ok) {
+    let alive = await daemonAlive(daemonUrl);
+    for (let i = 0; i < 40 && !alive; i++) {
+      await sleep(250);
+      alive = await daemonAlive(daemonUrl);
+    }
     console.log(
-      `  daemon    ⚠ could not start at ${daemonUrl} (port in use?). ` +
-        `Wiring tools anyway; start it with: node ${DAEMON_ENTRY}`,
+      `  daemon    ${alive ? "✓" : "⚠"} ${daemonUrl}  ${svc.kind}: ${svc.message}` +
+        (alive ? `  brain: ${dataDir}` : "  (starting…)"),
     );
   } else {
-    const brain = state === "already" ? "(already running)" : `brain: ${dataDir}`;
-    console.log(`  daemon    ✓ ${daemonUrl}  ${brain}`);
+    const state = await ensureDaemon(daemonUrl, dataDir);
+    if (state === "failed") {
+      console.log(
+        `  daemon    ⚠ could not start at ${daemonUrl} (port in use?). ` +
+          `Wiring tools anyway; start it with: node ${DAEMON_ENTRY}`,
+      );
+    } else {
+      const note =
+        svc.kind === "unsupported" ? "background" : `service skipped: ${svc.message}`;
+      console.log(`  daemon    ✓ ${daemonUrl}  brain: ${dataDir} (${note})`);
+    }
   }
 
   // 2. wire each detected tool's MCP config (point it at this daemon)
@@ -269,11 +243,25 @@ async function up(rest: string[]): Promise<void> {
   );
 }
 
+function down(): void {
+  const r = uninstallService();
+  if (r.ok) {
+    console.log(`[memwarden] stopped and removed the ${r.kind} service.`);
+  } else {
+    console.log(
+      `[memwarden] no service to remove (${r.message}). ` +
+        `A daemon started in the background will exit when you log out.`,
+    );
+  }
+}
+
 async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2);
   switch (cmd) {
     case "up":
       return up(rest);
+    case "down":
+      return down();
     case "connect":
       return connect(rest);
     case "hook":
@@ -288,6 +276,7 @@ async function main(): Promise<void> {
       console.log(
         "usage:\n" +
           "  memwarden up [--all] [--url URL] [--secret S]   # start daemon + wire every installed tool\n" +
+          "  memwarden down                                  # stop + remove the daemon service\n" +
           "  memwarden connect [claude-code|cursor|cline|windsurf] [--with-hooks] [--url URL] [--secret S]\n" +
           "  memwarden doctor [path]\n" +
           "  memwarden export <file>\n" +

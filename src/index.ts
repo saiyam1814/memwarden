@@ -239,6 +239,19 @@ async function main(): Promise<void> {
   }
 
   const http = startHttpServer(sdk, { port: REST_PORT });
+  // Race-safe self-heal: if another memwarden already holds the port, this
+  // spawn is redundant — exit cleanly (0) rather than crash, so concurrent
+  // ensureDaemon() callers never surface an error.
+  http.server.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE") {
+      console.log(
+        `[memwarden] port ${REST_PORT} already in use — another instance is running; exiting.`,
+      );
+      process.exit(0);
+    }
+    console.error(`[memwarden] HTTP server error:`, err);
+    process.exit(1);
+  });
   console.log(
     `[memwarden] REST API: http://127.0.0.1:${REST_PORT}/memwarden/*`,
   );
