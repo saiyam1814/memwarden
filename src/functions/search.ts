@@ -248,6 +248,33 @@ function evictGhostVectors(liveIds: Set<string> | null): void {
   }
 }
 
+// Reciprocal Rank Fusion of two ranked lists that share the
+// {obsId, sessionId, score} shape (BM25 keyword + semantic vector). Score
+// becomes the summed RRF contribution; ties resolve by it. Same K as the
+// HybridSearch helper.
+const RRF_K = 60;
+type Ranked = { obsId: string; sessionId: string; score: number };
+function fuseRrf(a: Ranked[], b: Ranked[], limit: number): Ranked[] {
+  const acc = new Map<string, { sessionId: string; score: number }>();
+  const add = (list: Ranked[]) =>
+    list.forEach((r, i) => {
+      const rrf = 1 / (RRF_K + i + 1);
+      const cur = acc.get(r.obsId);
+      if (cur) {
+        cur.score += rrf;
+        if (!cur.sessionId && r.sessionId) cur.sessionId = r.sessionId;
+      } else {
+        acc.set(r.obsId, { sessionId: r.sessionId, score: rrf });
+      }
+    });
+  add(a);
+  add(b);
+  return Array.from(acc.entries())
+    .map(([obsId, v]) => ({ obsId, sessionId: v.sessionId, score: v.score }))
+    .sort((x, y) => y.score - x.score)
+    .slice(0, limit);
+}
+
 export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction(
     "mem::search",
@@ -327,7 +354,26 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       // Measure retrieval itself (not the one-time cold rebuild above) — the
       // "is finding context fast?" number.
       const searchStartedAt = performance.now();
-      const results = idx.search(query, fetchLimit);
+      const bm25Results = idx.search(query, fetchLimit);
+      // Fuse in the semantic stream when an embedding provider + vector index
+      // are present, so meaning-based queries (different words than the
+      // memory) resolve. Provider-less mode stays pure BM25. A failing
+      // embed falls back to BM25 rather than breaking search.
+      let results = bm25Results;
+      const vIdx = getVectorIndex();
+      const ep = currentEmbeddingProvider;
+      if (vIdx && ep && vIdx.size > 0) {
+        try {
+          const qVec = await ep.embed(clipEmbedInput(query));
+          if (qVec.length === ep.dimensions) {
+            results = fuseRrf(bm25Results, vIdx.search(qVec, fetchLimit), fetchLimit);
+          }
+        } catch (err) {
+          logger.warn("search: vector stream failed — BM25 only", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       metrics.recordSearch(performance.now() - searchStartedAt);
 
       // Resolve session -> project/cwd once per sessionId we touch.
