@@ -50,26 +50,34 @@ memories, 14 **paraphrased** queries (worded differently than the answers). Repr
 ```bash
 npm install
 npm run build            # compile to dist/
-npm run dev              # start the daemon + REST API on :3111
+node dist/cli/bin.js up  # one command: start the daemon + wire every installed tool
 ```
 
-Wire it into your agent so every tool shares the one local brain — run this **from your
-project directory**:
+`memwarden up` is the whole setup. It:
 
-```bash
-node dist/cli/bin.js connect claude-code --with-hooks
-```
+- **starts the daemon** in the background (a single global brain at `~/.memwarden`), spawning
+  it if it isn't already running,
+- **detects your installed tools** and writes the memwarden MCP server into each one's config,
+  in that tool's own schema, without clobbering servers you already have:
 
-That writes two files:
+  | Tool | Config it writes |
+  | --- | --- |
+  | Claude Code | `~/.claude.json` + `~/.claude/settings.json` (real `SessionStart` + `PostToolUse` hooks) |
+  | Cursor | `~/.cursor/mcp.json` |
+  | Kiro | `~/.kiro/settings/mcp.json` |
+  | Antigravity | `~/.gemini/config/mcp_config.json` |
+  | OpenCode | `~/.config/opencode/opencode.json` |
+  | OpenClaw | `~/.openclaw/openclaw.json` |
 
-- **`.mcp.json`** — gives the agent the `memory_resume`, `memory_search`, `memory_remember`,
-  `memory_verify`, and `memory_stats` tools. The same block works for Cursor, Cline, Windsurf,
-  and any MCP client.
-- **`.claude/settings.json`** — a `SessionStart` hook that auto-injects this project's memory
-  the moment you open the agent, plus a `PostToolUse` hook that captures work as it happens.
+- **drops an `AGENTS.md`** memory block in the current project, so the tools without a hook
+  system still recall and save at task boundaries.
 
-Then switch agents in the same repo and just ask *"what were we working on here?"* — it
-already knows.
+Restart each tool once. After that, recall works everywhere: type **`/recall`** (the MCP
+prompt, surfaced as `/mcp__memwarden__recall` in Claude Code), or just ask *"what were we
+working on here?"* — Claude Code captures and recalls automatically via hooks; for global
+auto-capture on the other tools, point them at the [memory proxy](#one-memory-layer-for-every-tool).
+
+Use `--all` to wire every supported tool even if it isn't detected yet.
 
 ## How it works
 
@@ -110,6 +118,9 @@ already knows.
 | `memory_remember` | Save a memory explicitly |
 | `memory_verify` | Cryptographically verify the store wasn't tampered with |
 | `memory_stats` | Live counts, compression ratio, token reduction, latency |
+
+Plus an MCP **prompt**, `recall`, surfaced as a slash command (`/mcp__memwarden__recall <query>`
+in Claude Code): type it mid-chat to pull the project's matching memory into the conversation.
 
 ## One memory layer for every tool
 
@@ -157,11 +168,12 @@ src/functions/   observe / search (BM25 + TurboQuant vector + RRF) / context / f
 src/embedding/   on-device embedding provider (transformers.js, optional)
 src/mcp/         dependency-free MCP server (stdio JSON-RPC)
 src/proxy/       OpenAI-compatible memory gateway (the universal cross-tool layer)
-src/cli/         connect / hooks / doctor / export / import
+src/cli/         up (one-command setup) / connect / hooks / doctor / export / import
+src/cli/tools.ts per-tool adapters: Claude Code, Cursor, Kiro, Antigravity, OpenCode, OpenClaw
 src/bundle/      portable Brain Bundle export & import
 src/observability/  token-reduction + latency metrics
 benchmark/       reproducible recall benchmark
-test/            184 tests: kernel, store parity, oplog, quantizer, MCP, proxy, e2e
+test/            199 tests: kernel, store parity, oplog, quantizer, MCP, proxy, tool-wiring, e2e
 ```
 
 ## Configuration
