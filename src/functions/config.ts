@@ -103,3 +103,40 @@ export function getQuantRescoreDepth(): number {
 export function getQuantSeed(): string {
   return env("MEMWARDEN_QUANT_SEED") ?? "memwarden-tq-v1";
 }
+
+// --- memory proxy (the universal cross-tool layer) -----------------
+//
+// The OpenAI-compatible gateway. Any tool that lets you point at a custom
+// base URL — Cursor, Continue, Cline, raw SDK apps — routes its model
+// calls through memwarden, which injects relevant memory and captures the
+// exchange. The model behind it can be local (Ollama :11434/v1, LM Studio
+// :1234/v1) or paid (OpenAI, OpenRouter, Together); the proxy is blind to
+// which, so it is one memory layer for all of them. The proxy is OFF until
+// an upstream is configured (it has nothing to forward to otherwise).
+
+/** Upstream OpenAI-compatible base URL, e.g. https://api.openai.com/v1. */
+export function getUpstreamUrl(): string | undefined {
+  const raw = env("MEMWARDEN_UPSTREAM_URL");
+  if (!raw) return undefined;
+  const trimmed = raw.trim().replace(/\/+$/, "");
+  return trimmed || undefined;
+}
+
+/** API key forwarded to the upstream as `Authorization: Bearer`. */
+export function getUpstreamKey(): string | undefined {
+  const raw = env("MEMWARDEN_UPSTREAM_KEY");
+  return raw && raw.trim() ? raw.trim() : undefined;
+}
+
+/** Port the memory proxy listens on. Defaults to 3113. */
+export function getProxyPort(): number {
+  const raw = env("MEMWARDEN_PROXY_PORT");
+  if (!raw) return 3113;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : 3113;
+}
+
+/** The proxy runs only once an upstream is configured to forward to. */
+export function isProxyEnabled(): boolean {
+  return getUpstreamUrl() !== undefined;
+}

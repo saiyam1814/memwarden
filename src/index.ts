@@ -22,9 +22,17 @@ import {
   setVectorIndex,
   makeVectorIndex,
 } from "./functions/index.js";
-import { isQuantizedVectorEnabled } from "./functions/config.js";
+import {
+  isQuantizedVectorEnabled,
+  isProxyEnabled,
+  getUpstreamUrl,
+  getUpstreamKey,
+  getProxyPort,
+  getSecret,
+} from "./functions/config.js";
 import { createEmbeddingProvider } from "./embedding/index.js";
 import { registerApiTriggers } from "./triggers/api.js";
+import { startProxyServer } from "./proxy/server.js";
 
 const REST_PORT = parseInt(process.env.MEMWARDEN_REST_PORT ?? "3111", 10);
 const STORE_URL =
@@ -235,6 +243,30 @@ async function main(): Promise<void> {
     `[memwarden] REST API: http://127.0.0.1:${REST_PORT}/memwarden/*`,
   );
 
+  // The memory proxy — the universal cross-tool layer. Off until an upstream
+  // is configured (it has nothing to forward to otherwise). When on, point
+  // any OpenAI-compatible tool's base URL at it and every model call, local
+  // or paid, flows through memwarden's recall + capture.
+  let proxy: { close(): Promise<void> } | undefined;
+  const upstreamUrl = getUpstreamUrl();
+  if (isProxyEnabled() && upstreamUrl) {
+    const proxyPort = getProxyPort();
+    const cwd = process.cwd();
+    proxy = startProxyServer({
+      port: proxyPort,
+      upstreamUrl,
+      daemonUrl: `http://127.0.0.1:${REST_PORT}`,
+      project: cwd,
+      cwd,
+      ...(getUpstreamKey() ? { upstreamKey: getUpstreamKey() as string } : {}),
+      ...(getSecret() ? { secret: getSecret() as string } : {}),
+    });
+    console.log(
+      `[memwarden] memory proxy: http://127.0.0.1:${proxyPort}/v1 -> ${upstreamUrl} ` +
+        `(point any OpenAI-compatible tool here for automatic memory)`,
+    );
+  }
+
   const timers = installSweeps(sdk);
 
   let shuttingDown = false;
@@ -244,6 +276,7 @@ async function main(): Promise<void> {
     console.log(`\n[memwarden] Shutting down...`);
     for (const t of timers) clearInterval(t);
     await http.close().catch(() => undefined);
+    if (proxy) await proxy.close().catch(() => undefined);
     await sdk.shutdown();
     process.exit(0);
   };

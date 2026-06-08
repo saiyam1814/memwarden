@@ -94,7 +94,7 @@ already knows.
 
 | | memwarden | typical agent memory |
 | --- | --- | --- |
-| Cross-agent (one brain, every tool) | ✅ MCP + hooks | varies |
+| Cross-agent (one brain, every tool) | ✅ MCP + hooks + OpenAI-compatible proxy | varies |
 | Compressed storage | ✅ TurboQuant, ~6–11× | usually raw float32 |
 | Tamper-evident | ✅ hash-chained oplog + `memory_verify` | ✗ |
 | Portable, self-owned | ✅ `export`/`import` Brain Bundle | often vendor-locked |
@@ -110,6 +110,34 @@ already knows.
 | `memory_remember` | Save a memory explicitly |
 | `memory_verify` | Cryptographically verify the store wasn't tampered with |
 | `memory_stats` | Live counts, compression ratio, token reduction, latency |
+
+## One memory layer for every tool
+
+Three ways in, so memory follows you regardless of the tool:
+
+- **MCP** — agentic tools that speak it (Cursor, Claude Code, Cline, Windsurf,
+  Kiro, Antigravity, Codex): `connect` once, then `memory_resume`/`memory_search`.
+- **Hooks** — automatic SessionStart inject + PostToolUse capture (`--with-hooks`).
+- **Proxy** — the universal one. An OpenAI-compatible gateway that any tool can
+  point its base URL at. It injects relevant memory and captures the answer, and
+  it is **blind to the model behind it** — local (Ollama, LM Studio) or paid
+  (OpenAI, OpenRouter, Together) all speak the same `/v1/chat/completions`, so it
+  is one memory layer for all of them.
+
+```bash
+# point the proxy at any upstream, local or paid:
+MEMWARDEN_UPSTREAM_URL=https://api.openai.com/v1 MEMWARDEN_UPSTREAM_KEY=sk-... \
+  node dist/index.js
+# or a local model — no key needed:
+MEMWARDEN_UPSTREAM_URL=http://localhost:11434/v1 node dist/index.js
+
+# then in your tool, set the OpenAI base URL to:
+#   http://localhost:3113/v1
+```
+
+Every model call now flows through memwarden: relevant project memory is injected
+as a system message ahead of the conversation, and the exchange is captured back —
+no tool-specific integration. Streaming (SSE) passes straight through.
 
 ## Portability
 
@@ -128,11 +156,12 @@ src/state/       StateKV, memory + libSQL stores, append-only hash-chained oplog
 src/functions/   observe / search (BM25 + TurboQuant vector + RRF) / context / forget
 src/embedding/   on-device embedding provider (transformers.js, optional)
 src/mcp/         dependency-free MCP server (stdio JSON-RPC)
-src/cli/         connect / hooks / export / import
+src/proxy/       OpenAI-compatible memory gateway (the universal cross-tool layer)
+src/cli/         connect / hooks / doctor / export / import
 src/bundle/      portable Brain Bundle export & import
 src/observability/  token-reduction + latency metrics
 benchmark/       reproducible recall benchmark
-test/            171 tests: kernel, store parity, oplog, quantizer, MCP, e2e
+test/            184 tests: kernel, store parity, oplog, quantizer, MCP, proxy, e2e
 ```
 
 ## Configuration
@@ -144,6 +173,9 @@ test/            171 tests: kernel, store parity, oplog, quantizer, MCP, e2e
 | `MEMWARDEN_QUANT_BITS` | `4` | `2` or `4` bits per dimension |
 | `MEMWARDEN_FORGET_TTL_DAYS` | `30` | retention window for the forget sweep |
 | `MEMWARDEN_SECRET` | unset | bearer token for the REST API |
+| `MEMWARDEN_UPSTREAM_URL` | unset | upstream OpenAI-compatible base URL; enables the proxy |
+| `MEMWARDEN_UPSTREAM_KEY` | unset | API key forwarded to the upstream (omit for local models) |
+| `MEMWARDEN_PROXY_PORT` | `3113` | port the memory proxy listens on |
 
 ## Roadmap
 
