@@ -213,6 +213,14 @@ export class Kernel implements ISdk {
         const p = payload as { scope: string };
         return (await this.store.list(p.scope)) as R;
       }
+      case "state::verify": {
+        // Tamper-evidence: verify the whole oplog hash chain. Read-only.
+        return (await this.store.verifyOplog()) as R;
+      }
+      case "state::oplog-count": {
+        const entries = await this.store.readOplog();
+        return { count: entries.length } as R;
+      }
       case "stream::set":
       case "stream::send": {
         // Live-viewer surface. Best-effort fan-out to in-process

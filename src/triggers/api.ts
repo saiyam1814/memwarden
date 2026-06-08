@@ -15,7 +15,11 @@
 
 import type { ApiRequest, ISdk } from "../kernel/index.js";
 import type { HookPayload } from "../functions/types.js";
-import { getSecret } from "../functions/config.js";
+import { getSecret, getQuantBits } from "../functions/config.js";
+import { getVectorIndex, getEmbeddingProvider } from "../functions/index.js";
+import { QuantizedVectorIndex } from "../functions/quantized-vector-index.js";
+import { StateKV } from "../state/kv.js";
+import { KV } from "../state/schema.js";
 import { timingSafeCompare } from "./auth.js";
 
 type Response = {
@@ -287,5 +291,81 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
       http_method: "POST",
       middleware_function_ids: ["middleware::api-auth"],
     },
+  });
+
+  // --- GET /memwarden/verify --------------------------------------
+  // Tamper-evidence: prove the memory store's oplog hash chain is intact.
+  // The differentiating guarantee — memory you can cryptographically trust.
+  sdk.registerFunction(
+    "api::verify",
+    async (): Promise<Response> => {
+      const result = (await sdk.trigger({
+        function_id: "state::verify",
+        payload: {},
+      })) as { ok: true } | { ok: false; brokenAt: number };
+      const count = (await sdk.trigger({
+        function_id: "state::oplog-count",
+        payload: {},
+      })) as { count: number };
+      return {
+        status_code: result.ok ? 200 : 409,
+        body: {
+          verified: result.ok,
+          oplogEntries: count.count,
+          ...(result.ok ? {} : { brokenAt: result.brokenAt }),
+        },
+      };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::verify",
+    config: { api_path: "/memwarden/verify", http_method: "GET" },
+  });
+
+  // --- GET /memwarden/stats ---------------------------------------
+  // Live self-custody dashboard: memory counts, the active embedding
+  // provider, and the TurboQuant compression ratio.
+  sdk.registerFunction(
+    "api::stats",
+    async (): Promise<Response> => {
+      const kv = new StateKV(sdk);
+      const [memories, sessions] = await Promise.all([
+        kv.list(KV.memories).catch(() => []),
+        kv.list(KV.sessions).catch(() => []),
+      ]);
+      const provider = getEmbeddingProvider();
+      const vec = getVectorIndex();
+      const body: Record<string, unknown> = {
+        memories: memories.length,
+        sessions: sessions.length,
+        vectors: vec?.size ?? 0,
+        embedding: provider
+          ? { provider: provider.name, dimensions: provider.dimensions }
+          : null,
+      };
+      if (vec instanceof QuantizedVectorIndex) {
+        const { dims, paddedDims, bits, rescoreDepth } = vec.params;
+        const fullBytes = dims * 4;
+        const codeBytes = Math.ceil((paddedDims * bits) / 8) + 4; // codes + norm
+        const storedBytes = codeBytes + (rescoreDepth > 0 ? fullBytes : 0);
+        body["compression"] = {
+          algorithm: "TurboQuant",
+          bits: getQuantBits(),
+          fullBytesPerVector: fullBytes,
+          storedBytesPerVector: storedBytes,
+          ratio: Math.round((fullBytes / storedBytes) * 10) / 10,
+          rescore: rescoreDepth,
+        };
+      } else {
+        body["compression"] = null;
+      }
+      return { status_code: 200, body };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::stats",
+    config: { api_path: "/memwarden/stats", http_method: "GET" },
   });
 }
