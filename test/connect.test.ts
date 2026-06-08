@@ -11,6 +11,10 @@ import {
   mergeMcpConfig,
   writeMcpConfig,
   mcpConfigPathFor,
+  buildClaudeHooks,
+  mergeClaudeHooks,
+  writeClaudeHooks,
+  claudeSettingsPathFor,
 } from "../src/cli/connect.js";
 
 const dirs: string[] = [];
@@ -33,6 +37,49 @@ describe("buildMcpServerEntry", () => {
   it("includes url and secret when given", () => {
     const e = buildMcpServerEntry({ url: "http://h:9", secret: "x" });
     expect(e.env).toEqual({ MEMWARDEN_URL: "http://h:9", MEMWARDEN_SECRET: "x" });
+  });
+  it("honors a command/args override (local bin pre-publish)", () => {
+    const e = buildMcpServerEntry({ mcpCommand: "/usr/bin/node", mcpArgs: ["/abs/mcp.js"] });
+    expect(e.command).toBe("/usr/bin/node");
+    expect(e.args).toEqual(["/abs/mcp.js"]);
+  });
+});
+
+describe("Claude hooks", () => {
+  it("builds SessionStart (inject) and PostToolUse (capture) groups", () => {
+    const h = buildClaudeHooks('"node" "/abs/bin.js"');
+    expect(h.SessionStart![0]!.hooks[0]!.command).toContain("hook session-start");
+    expect(h.PostToolUse![0]!.hooks[0]!.command).toContain("hook capture");
+    expect(h.PostToolUse![0]!.matcher).toBe("*");
+  });
+
+  it("merges without clobbering the user's other hooks, idempotently", () => {
+    const userHooks = {
+      hooks: {
+        PostToolUse: [{ matcher: "Bash", hooks: [{ type: "command" as const, command: "my-linter" }] }],
+      },
+    };
+    const once = mergeClaudeHooks(userHooks, "BASE");
+    // user's Bash hook preserved, memwarden capture added
+    expect(once.hooks!.PostToolUse!.some((g) => g.hooks[0]!.command === "my-linter")).toBe(true);
+    expect(once.hooks!.PostToolUse!.some((g) => g.hooks[0]!.command.includes("hook capture"))).toBe(true);
+    // re-running does not duplicate memwarden entries
+    const twice = mergeClaudeHooks(once, "BASE");
+    const captures = twice.hooks!.PostToolUse!.filter((g) =>
+      g.hooks[0]!.command.includes("hook capture"),
+    );
+    expect(captures.length).toBe(1);
+  });
+
+  it("writes .claude/settings.json under the project dir", () => {
+    const dir = tempDir();
+    const path = claudeSettingsPathFor(dir);
+    const { created } = writeClaudeHooks(path, '"node" "/abs/bin.js"');
+    expect(created).toBe(true);
+    const written = JSON.parse(readFileSync(path, "utf8"));
+    expect(written.hooks.SessionStart[0].hooks[0].command).toContain(
+      "hook session-start",
+    );
   });
 });
 

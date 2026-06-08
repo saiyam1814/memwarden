@@ -16,22 +16,44 @@ Every coding agent now remembers things; none of them verify what they remember,
 vendor's memory is their lock-in. memwarden is the trust + portability layer: verified memory
 that belongs to the user.
 
-## Quick start (dev)
+## Quick start
 
 ```bash
 npm install
-npm test          # kernel, store parity, oplog integrity, MCP, e2e
-npm run dev       # boots the kernel + REST API on :3111
+npm run build           # compile to dist/
+npm run dev             # start the daemon + REST API on :3111
 ```
+
+Wire it into your coding agent so every tool shares the one local brain:
 
 ```bash
-curl -X POST localhost:3111/memwarden/observe \
-  -H 'content-type: application/json' \
-  -d '{"sessionId":"s1","project":"demo","content":"auth module uses iam, not authz"}'
-
-curl 'localhost:3111/memwarden/search?q=auth'
-curl 'localhost:3111/memwarden/context?project=demo'
+# from your project directory:
+node dist/cli/bin.js connect claude-code --with-hooks
 ```
+
+That writes two files in the project:
+
+- **`.mcp.json`** — the MCP server, giving the agent the `memory_resume`,
+  `memory_search`, `memory_remember`, `memory_verify`, and `memory_stats`
+  tools. The same block works for Cursor, Cline, Windsurf, and any MCP client.
+- **`.claude/settings.json`** — a `SessionStart` hook that auto-injects this
+  project's memory the moment you open the agent, and a `PostToolUse` hook
+  that captures work automatically.
+
+Now switch from one agent to another in the same repo and just ask *"what
+were we working on here?"* — it already knows. Embeddings run on-device
+(`all-MiniLM-L6-v2`, ~23MB, downloaded once, no API key); set
+`MEMWARDEN_EMBEDDING_PROVIDER=none` for keyword-only mode.
+
+Move your memory between machines with the portable Brain Bundle:
+
+```bash
+node dist/cli/bin.js export brain.json     # on machine A
+node dist/cli/bin.js import brain.json     # on machine B
+```
+
+> Pre-publish, run the CLI as `node dist/cli/bin.js …`. Once published it
+> becomes `npx @memwarden/mcp` / a global `memwarden` command.
 
 ## How it works
 

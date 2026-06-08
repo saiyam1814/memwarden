@@ -10,9 +10,24 @@
 // export/import move your memory between machines via the daemon's API.
 
 import { readFileSync, writeFileSync } from "node:fs";
-import { writeMcpConfig, mcpConfigPathFor, buildMcpServerEntry } from "./connect.js";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import {
+  writeMcpConfig,
+  mcpConfigPathFor,
+  buildMcpServerEntry,
+  writeClaudeHooks,
+  claudeSettingsPathFor,
+} from "./connect.js";
+import { handleSessionStart, handleCapture, readStdin } from "./hook.js";
 
 const DAEMON_URL = process.env.MEMWARDEN_URL ?? "http://localhost:3111";
+
+// Absolute paths to the installed CLI and MCP bins, so the configs/hooks we
+// write run today (pre-publish) regardless of cwd. dist/cli/bin.js -> here.
+const SELF = fileURLToPath(import.meta.url);
+const MCP_BIN = join(dirname(SELF), "..", "mcp", "bin.js");
+const HOOK_BASE = `"${process.execPath}" "${SELF}"`;
 
 function authHeaders(): Record<string, string> {
   const h: Record<string, string> = { "content-type": "application/json" };
@@ -41,16 +56,44 @@ function parseFlags(argv: string[]): {
 
 function connect(rest: string[]): void {
   const { target, url, secret } = parseFlags(rest);
-  const opts = { ...(url ? { url } : {}), ...(secret ? { secret } : {}) };
+  const withHooks = rest.includes("--with-hooks");
+  // Launch the local built MCP bin so the config works before publish.
+  const opts = {
+    ...(url ? { url } : {}),
+    ...(secret ? { secret } : {}),
+    mcpCommand: process.execPath,
+    mcpArgs: [MCP_BIN],
+  };
   const path = mcpConfigPathFor(target, process.cwd());
   const { created } = writeMcpConfig(path, opts);
   console.log(
     `[memwarden] ${created ? "wrote" : "updated"} ${path} — '${target}' now shares the local brain.`,
   );
-  console.log(`[memwarden] Universal MCP block for any other tool:\n`);
-  console.log(
-    JSON.stringify({ mcpServers: { memwarden: buildMcpServerEntry(opts) } }, null, 2),
-  );
+
+  if (withHooks) {
+    const settings = claudeSettingsPathFor(process.cwd());
+    writeClaudeHooks(settings, HOOK_BASE);
+    console.log(
+      `[memwarden] wrote ${settings} — SessionStart auto-injects this project's memory; PostToolUse auto-captures.`,
+    );
+  } else {
+    console.log(
+      `[memwarden] tip: add --with-hooks to auto-inject context on session start and capture automatically.`,
+    );
+  }
+}
+
+async function hook(rest: string[]): Promise<void> {
+  const event = rest[0];
+  const raw = await readStdin();
+  const deps = {
+    baseUrl: DAEMON_URL,
+    ...(process.env.MEMWARDEN_SECRET ? { secret: process.env.MEMWARDEN_SECRET } : {}),
+  };
+  let out = "";
+  if (event === "session-start") out = await handleSessionStart(raw, deps);
+  else if (event === "capture") out = await handleCapture(raw, deps);
+  if (out) process.stdout.write(out);
 }
 
 async function exportBrain(file: string | undefined): Promise<void> {
@@ -84,6 +127,8 @@ async function main(): Promise<void> {
   switch (cmd) {
     case "connect":
       return connect(rest);
+    case "hook":
+      return hook(rest);
     case "export":
       return exportBrain(rest[0]);
     case "import":
@@ -91,7 +136,7 @@ async function main(): Promise<void> {
     default:
       console.log(
         "usage:\n" +
-          "  memwarden connect [claude-code|cursor|cline|windsurf] [--url URL] [--secret S]\n" +
+          "  memwarden connect [claude-code|cursor|cline|windsurf] [--with-hooks] [--url URL] [--secret S]\n" +
           "  memwarden export <file>\n" +
           "  memwarden import <file>",
       );
