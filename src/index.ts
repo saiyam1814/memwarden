@@ -16,7 +16,14 @@ import { registerWorker, startHttpServer } from "./kernel/index.js";
 import type { Kernel } from "./kernel/index.js";
 import { StoreLibsql } from "./state/store-libsql.js";
 import { StateKV } from "./state/kv.js";
-import { registerCoreFunctions } from "./functions/index.js";
+import {
+  registerCoreFunctions,
+  setEmbeddingProvider,
+  setVectorIndex,
+  makeVectorIndex,
+} from "./functions/index.js";
+import { isQuantizedVectorEnabled } from "./functions/config.js";
+import { createEmbeddingProvider } from "./embedding/index.js";
 import { registerApiTriggers } from "./triggers/api.js";
 
 const REST_PORT = parseInt(process.env.MEMWARDEN_REST_PORT ?? "3111", 10);
@@ -195,6 +202,33 @@ async function main(): Promise<void> {
   console.log(
     `[memwarden] kernel ready — ${registered} function module(s) registered, store=${STORE_URL}`,
   );
+
+  // Semantic memory: wire the embedding provider and the (TurboQuant-
+  // compressed by default) vector index. With no provider, memwarden runs
+  // BM25-only — identical to the prior behavior. The model loads lazily on
+  // first observe/search; warm it in the background so the first request is
+  // fast without blocking boot.
+  const embProvider = createEmbeddingProvider();
+  if (embProvider) {
+    setEmbeddingProvider(embProvider);
+    setVectorIndex(makeVectorIndex(embProvider.dimensions));
+    const quantized = isQuantizedVectorEnabled();
+    console.log(
+      `[memwarden] semantic memory: ${embProvider.name} (${embProvider.dimensions}d), ` +
+        `storage=${quantized ? "TurboQuant-compressed" : "full-precision"}`,
+    );
+    const warmable = embProvider as { warmup?: () => Promise<void> };
+    if (typeof warmable.warmup === "function") {
+      warmable.warmup().catch((err: unknown) => {
+        console.warn(
+          `[memwarden] embedding model warmup failed — vector stream stays off until it loads:`,
+          err instanceof Error ? err.message : err,
+        );
+      });
+    }
+  } else {
+    console.log(`[memwarden] semantic memory: disabled (BM25-only)`);
+  }
 
   const http = startHttpServer(sdk, { port: REST_PORT });
   console.log(

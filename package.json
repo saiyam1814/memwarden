@@ -18,6 +18,9 @@
     "@libsql/client": "^0.15.0",
     "zod": "^4.0.0"
   },
+  "optionalDependencies": {
+    "@huggingface/transformers": "^3.0.0"
+  },
   "devDependencies": {
     "@types/node": "^25.9.1",
     "tsx": "^4.19.0",

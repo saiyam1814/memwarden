@@ -62,12 +62,24 @@ export function getSecret(): string | undefined {
 }
 
 /**
- * TurboQuant vector quantization (arXiv:2504.19874): when enabled the
- * vector index stores 2/4-bit codes instead of full Float32 embeddings.
- * Off by default; the full-precision VectorIndex remains the baseline.
+ * TurboQuant vector quantization (arXiv:2504.19874): the vector index
+ * stores 2/4-bit codes instead of full Float32 embeddings (~8-16x smaller).
+ * This is memwarden's distinguishing storage layer, so it is ON BY DEFAULT
+ * whenever an embedding provider is active — there is no reason to hold
+ * full-precision vectors once semantic memory is on. Set
+ * MEMWARDEN_QUANT_VECTOR=false to force the full-precision baseline, or
+ * =true to force it on even without a provider (e.g. tests).
  */
 export function isQuantizedVectorEnabled(): boolean {
-  return flag("MEMWARDEN_QUANT_VECTOR");
+  const raw = env("MEMWARDEN_QUANT_VECTOR");
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  // Unset: follow the embedding provider. Read the env directly to avoid a
+  // config<->embedding import cycle.
+  const provider = (process.env.MEMWARDEN_EMBEDDING_PROVIDER ?? "local")
+    .trim()
+    .toLowerCase();
+  return provider !== "none";
 }
 
 /** Bits per dimension for the quantized index. 4 (default) or 2. */
