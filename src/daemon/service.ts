@@ -13,7 +13,7 @@
 // falls back to a detached spawn.
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DAEMON_ENTRY } from "./ensure.js";
@@ -38,8 +38,25 @@ function systemdPath(home: string): string {
   return join(home, ".config", "systemd", "user", "memwarden.service");
 }
 
-function macPlist(node: string, dataDir: string): string {
+// XML-escape a value before interpolating it into the plist (the secret is
+// base64url so it has no XML metacharacters, but be defensive).
+function xmlEscape(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function macPlist(node: string, dataDir: string, secret?: string): string {
   const log = join(dataDir, "daemon.log");
+  // The managed daemon resolves its auth secret from MEMWARDEN_SECRET, so it
+  // must be in the service environment or a login-launched daemon would run
+  // open. Only emitted when a secret was resolved.
+  const secretEntry = secret
+    ? `\n    <key>MEMWARDEN_SECRET</key><string>${xmlEscape(secret)}</string>`
+    : "";
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -52,7 +69,7 @@ function macPlist(node: string, dataDir: string): string {
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>MEMWARDEN_DATA_DIR</key><string>${dataDir}</string>
+    <key>MEMWARDEN_DATA_DIR</key><string>${dataDir}</string>${secretEntry}
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key>
@@ -64,14 +81,19 @@ function macPlist(node: string, dataDir: string): string {
 `;
 }
 
-function systemdUnit(node: string, dataDir: string): string {
+function systemdUnit(node: string, dataDir: string, secret?: string): string {
+  // Same reason as the plist: the managed daemon needs MEMWARDEN_SECRET in its
+  // environment to enforce auth. Only emitted when a secret was resolved.
+  const secretEnv = secret
+    ? `\nEnvironment=MEMWARDEN_SECRET=${secret}`
+    : "";
   return `[Unit]
 Description=memwarden memory daemon
 After=network.target
 
 [Service]
 ExecStart=${node} ${DAEMON_ENTRY}
-Environment=MEMWARDEN_DATA_DIR=${dataDir}
+Environment=MEMWARDEN_DATA_DIR=${dataDir}${secretEnv}
 Restart=on-failure
 RestartSec=2
 
@@ -80,8 +102,13 @@ WantedBy=default.target
 `;
 }
 
-/** Install + start the supervised daemon for this platform. Best-effort. */
-export function installService(dataDir: string): ServiceResult {
+/**
+ * Install + start the supervised daemon for this platform. Best-effort. When
+ * `secret` is provided it is baked into the service environment so the
+ * login-launched daemon enforces auth (otherwise a managed daemon would run
+ * open even though the CLI generated a secret).
+ */
+export function installService(dataDir: string, secret?: string): ServiceResult {
   const home = homedir();
   const node = process.execPath;
   try {
@@ -94,7 +121,13 @@ export function installService(dataDir: string): ServiceResult {
     const path = plistPath(home);
     try {
       mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, macPlist(node, dataDir), "utf8");
+      writeFileSync(path, macPlist(node, dataDir, secret), "utf8");
+      // Lock the plist down: it now carries the secret in plaintext.
+      try {
+        chmodSync(path, 0o600);
+      } catch {
+        // best-effort
+      }
       try {
         execFileSync("launchctl", ["unload", path], { stdio: "ignore" });
       } catch {
@@ -116,7 +149,13 @@ export function installService(dataDir: string): ServiceResult {
     const path = systemdPath(home);
     try {
       mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, systemdUnit(node, dataDir), "utf8");
+      writeFileSync(path, systemdUnit(node, dataDir, secret), "utf8");
+      // Lock the unit down: it now carries the secret in plaintext.
+      try {
+        chmodSync(path, 0o600);
+      } catch {
+        // best-effort
+      }
       execFileSync("systemctl", ["--user", "daemon-reload"], { stdio: "ignore" });
       execFileSync("systemctl", ["--user", "enable", "--now", "memwarden"], {
         stdio: "ignore",

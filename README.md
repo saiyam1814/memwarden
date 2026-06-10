@@ -2,45 +2,141 @@
 
 # 🧠 memwarden
 
-### Memory your AI agents can trust. Verify it, audit what's stale, never touch it.
+### The memory firewall for AI coding agents.
 
-Every AI coding tool can share one local brain. The crowded part is making that happen;
-memwarden does it, then goes further: it makes the memory **tamper-evident**, **audits
-whether each memory is still safe to inject**, and **heals itself so you never touch it.** Works
-across Claude Code, Codex, Cursor, Kiro, Antigravity, OpenCode, and OpenClaw.
+**Your agent's memory is lying to you. Prove yours isn't.**
 
-`verifiable` · `staleness audit` · `self-healing` · `cross-tool` · `local-first` · `no API key`
+memwarden is verified, self-custodied memory for AI coding agents. It is local-first,
+dependency-light, and works across every tool you use — Claude Code, Codex, Cursor, Kiro,
+Antigravity, OpenCode, OpenClaw. The point isn't to remember *more*. It's that nothing gets
+injected into your agent's context without provenance that still checks out.
+
+`memory firewall` · `verified recall` · `tamper-evident` · `self-custodied` · `cross-tool` · `no API key`
 
 </div>
 
 ---
 
-## The problem
+## The problem nobody else is solving
 
-Every coding agent forgets the moment a session ends, so you re-explain the architecture,
-re-teach preferences, and re-discover the same bug, in every tool, every day. The obvious fix
-is shared memory across tools. But shared memory is only useful if you can trust it: a memory
-that points at code you deleted, or that nothing backs up, is worse than none, because the
-agent injects it with confidence.
+Every memory layer ships the same feature: *remember more.* None of them ask the harder
+question — **is the memory still true?**
 
-## Why it's different
+The documented pain of 2026 is not forgetting. It's **confidently wrong recall**: a third of
+stored facts go stale within 90 days, ChatGPT memory silently poisons answers, and Mem0's own
+reporting concedes that staleness is unsolved. OWASP added Memory Poisoning (ASI06) to its 2026
+Agentic Top 10. Meanwhile the projects with traction — claude-mem, Mem0, MemPalace, agentmemory —
+ship **zero trust surface**: no provenance, no verification, no staleness detection, no
+tamper-evidence. They store everything and trust everything.
 
-Most memory layers stop at "remember more." memwarden is built around **memory you can rely
-on**:
+A memory that points at code you deleted, or that nothing backs up, is worse than no memory at
+all — because the agent injects it with full confidence.
 
-- **Verified Recall — is this memory still true?** Every memory records a content hash of the
-  files it came from. Recall is firewalled by default: a memory whose files were deleted or
-  changed since capture (`stale`) is never injected; `memwarden doctor` reports the same.
-  Auditing whether memory is still *true*, not just whether it exists, is the part nobody else
-  leads with.
-- **Tamper-evident.** Every write lands in a SHA-256 hash-chained oplog; `memory_verify` detects
-  any edit, reorder, or drop. (Tamper-*evident*, not tamper-proof — signing is not built yet.)
-- **Self-healing.** Once it is up you never touch it: it revives on use and restarts on crash
-  and at login.
-- **Compressed and yours.** TurboQuant 2/4-bit vectors (6–11× smaller, zero recall loss),
-  on-device embeddings, two runtime dependencies, a portable bundle, no vendor.
+memwarden is built around the opposite default: **memory is untrusted until its source still
+checks out.**
 
-The cross-tool reach below is table stakes. The trust layer is what makes it memwarden.
+## Three reasons it exists
+
+**1. Verified Recall — the anti-feature.** Memory is firewalled before it reaches a model.
+A memory whose source file was deleted or changed since capture is `stale` and never injected.
+Run `memwarden doctor` against any memory store and get a red/yellow/green audit of what's
+verified, what's merely sourced, what's stale, and what has no provenance at all. It's a
+shareable artifact you can point at your own existing memory and watch it light up yellow.
+
+**2. Rug-pull insurance.** Mem0 sunset OpenMemory. Cursor shipped Memories, then pulled it.
+Your second brain shouldn't depend on a vendor's roadmap. memwarden is self-custodied,
+tamper-evident, and portable: one `export` produces a Brain Bundle that survives the next pivot.
+Zero cloud. The data lives at `~/.memwarden` and nowhere else.
+
+**3. The memory firewall.** Nothing enters your agent's context without provenance that still
+holds. The unique lever — possible only for a coding-agent tool because the repo is ground
+truth — is tying memory validity to **source-file content hashes**. The repo tells us, on every
+recall, whether a memory is still earned.
+
+## Why file hashes are the moat
+
+Other tools have no way to check whether a memory is still true, so they don't try. A coding
+agent does: the repository on disk is the source of truth. When memwarden captures a code-backed
+memory, it records a SHA-256 content hash for each referenced file (best-effort, files up to
+~2 MB). On recall it re-hashes the live file and compares. If the file is gone or its content
+moved, the memory is provably stale — not by heuristic, by hash.
+
+Nobody else ties memory validity to source-file hashes. That's the moat.
+
+## Verified Recall — what the four states mean
+
+Every memory is classified against the live repo:
+
+- **verified** — a captured source-file hash still matches the file on disk (code-backed and
+  current).
+- **sourced_unverified** — it has a source (a command, or files that were present but not
+  hashable), but no content hash to re-check. Allowed, but not content-verified.
+- **stale** — a referenced file was deleted, or its content changed since capture.
+- **unsourced** — no provenance at all: no files, no command, not user-confirmed.
+
+**The firewall drops `stale` before injecting. It does not drop `unsourced`** — unsourced means
+*unverified*, not *dangerous*, so it stays available for explicit lookups. `memory_resume`, the
+`/recall` prompt, the Claude Code SessionStart hook, and the proxy all run recall with the
+firewall on. It scans a wide window to backfill lower-ranked safe results and warns (rather than
+silently capping) if that window is exhausted. It also drops an older memory that a newer safe
+memory contradicts, using conservative subject/value claims — no LLM, no fuzzy black box. Plain
+`memory_search` stays unfiltered for deliberate lookups; the REST API refuses `safe_only` without
+a `cwd` to verify against rather than pass memory through unchecked.
+
+## The shareable audit: `memwarden doctor`
+
+Point it at a repo and it runs the exact same check as a report, plus conservative conflict
+detection:
+
+```bash
+node dist/cli/bin.js doctor .
+
+  VERIFIED:        8 memories (code-backed, current)
+  SOURCED:         3 memories (sourced, not content-verified)
+  STALE:           2 memories reference files that changed/deleted
+  UNSOURCED:       1 memory has no evidence
+  CONFLICTS:       1 possible contradiction
+
+  [stale]    Edit — references files that no longer match (changed: src/legacy.ts)
+  [conflict] Edit may contradict Edit — same subject "auth" has incompatible values
+```
+
+This is the artifact. Run it against your current memory store and see how much of it is still
+earned.
+
+## Déjà Fix — never solve the same error twice, across every tool
+
+memwarden is the one process that sees **every** agent's sessions on your machine, so it can do
+something no per-tool memory can: when any agent (Claude Code, Codex, Cursor, …) resolves an
+error, it captures `{error signature → root cause + fix}` with the same provenance file-hashes.
+When **any** agent later hits a matching error, the verified fix is surfaced automatically —
+but only if its referenced files still hash-match. A stale fix is never surfaced.
+
+```bash
+# Codex solved a failing test yesterday. Today Claude Code hits the same failure:
+#   Déjà Fix (memwarden): this error was solved by codex on 2026-06-09 and the fix
+#   is verified current against your working tree.
+#   Root cause: clock skew  ·  Fix: mock NTP in conftest
+
+# scriptable too — pipe any failing command's output straight in:
+npm test 2>&1 | node dist/cli/bin.js dejafix lookup
+```
+
+Three properties, all load-bearing: it is **cross-agent** (a fix learned in Codex helps Claude
+Code), **project-scoped** (a fix never leaks across repos), and **safe by construction** — it
+reuses Verified Recall, so file drift or deletion auto-suppresses the fix. The hook auto-injects
+only `verified current` fixes; `sourced, unverified` ones stay available via `dejafix lookup`,
+`/recall`, and the `dejafix_lookup` MCP tool but are never silently pushed into your context.
+
+## Tamper-evident, honestly
+
+Every write lands in an append-only, SHA-256 hash-chained oplog. `memory_verify` walks the chain
+and recomputes every hash, so an **edit or a reorder** of any past entry breaks the chain at the
+first touched entry.
+
+It is **tamper-evident, not tamper-proof.** There is no signing. The chain detects edits and
+reorders, but it does **not** detect tail-truncation — dropping the newest entries leaves a
+shorter, still-valid chain. We say "tamper-evident" and mean exactly that.
 
 ## Setup is one command
 
@@ -52,12 +148,13 @@ node dist/cli/bin.js up
 
 `memwarden up` is the whole thing. It:
 
-- **starts a self-healing daemon** in the background (one global brain at `~/.memwarden`), and
-  registers it as an OS service so it restarts on crash and starts at login,
+- **starts a self-healing daemon** in the background (one global brain at `~/.memwarden`) and
+  registers it as an OS service (macOS LaunchAgent / Linux systemd `--user`) so it restarts on
+  crash and starts at login,
 - **detects your installed tools** and writes the memwarden MCP server into each one's config,
   in that tool's own schema, without clobbering servers you already have,
-- **writes an `AGENTS.md`** block so tools without a hook system still recall and save
-  automatically.
+- **writes an `AGENTS.md`** block so tools without a hook system still recall and save on every
+  task.
 
 | Tool | What `up` writes | How memory flows |
 | --- | --- | --- |
@@ -73,25 +170,42 @@ Restart each tool once so it loads the new server. `memwarden down` removes the 
 
 ## How memory crosses your tools
 
-This is the honest mechanics, because it matters. There are exactly three ways memory reaches
-a tool, and `memwarden up` wires whichever ones each tool supports:
+Cross-tool reach is table stakes — the trust layer above is the point. Still, the mechanics
+matter, so here they are honestly. There are exactly three ways memory reaches a tool, and
+`memwarden up` wires whichever ones each tool supports:
 
-1. **Hooks (Claude Code).** Mechanical. A `SessionStart` hook injects this project's memory
-   before you type a word; a `PostToolUse` hook captures your work as it happens. The agent
-   cannot forget to do it.
+1. **Hooks (Claude Code).** Mechanical. A `SessionStart` hook injects this project's verified
+   memory before you type a word; a `PostToolUse` hook captures your work as it happens. The
+   agent cannot forget to do it.
 2. **Standing instruction (Codex, Cursor, Kiro, Antigravity, OpenCode, OpenClaw).** `up` writes
-   an `AGENTS.md` block telling the agent to recall at the start of every task and to save what
-   it learns. The agent does this itself, on every task, without you asking. This is the same
-   mechanism every cross-tool memory layer uses for these tools: they expose no deeper hook, so
-   "automatic" means a standing instruction the agent follows, backed by the `/recall` command
-   when you want to force it.
-3. **Proxy (any model-configurable tool, local or paid).** Mechanical at the API boundary.
-   Point the tool's model base URL at the memwarden proxy and every turn is recalled and
-   captured with no agent cooperation at all.
+   an `AGENTS.md` block telling the agent to recall at the start of every task and save what it
+   learns. This is the same mechanism every cross-tool memory layer uses for these tools: they
+   expose no deeper hook, so "automatic" means a standing instruction the agent follows, backed
+   by the `/recall` command when you want to force it.
+3. **Proxy (model-configurable tools).** Mechanical at the API boundary, but only where you
+   control the model endpoint — OpenCode, OpenClaw, Ollama, LM Studio, or any custom OpenAI base
+   URL. Point the tool's base URL at the memwarden proxy on `:3113` and every turn is recalled
+   and captured with no agent cooperation. It does **not** intercept Claude Code (own protocol —
+   covered by hooks) or Cursor/Kiro/Antigravity (their own backends).
 
 So: capture in Claude Code, then open Cursor or Codex and they pull up what Claude learned. On
-Claude Code that handoff is mechanical; on the MCP tools the agent does it via the standing
-instruction (or you type `/recall`); through the proxy it is mechanical for any model.
+Claude Code that handoff is mechanical via hooks; on the MCP tools the agent does it via the
+standing instruction (or you type `/recall`); through the proxy it is mechanical for any model
+endpoint you control.
+
+## The 60-second trust demo
+
+Run the product thesis locally without starting a daemon:
+
+```bash
+npm run demo:trust
+```
+
+It creates a temp repo, captures a code-backed memory, changes the file, and proves `safe_only`
+recall refuses the now-stale memory while plain search can still find it. Then it captures two
+sourced claims (`runtime uses node 22` / `runtime uses bun runtime`), proves safe recall keeps
+**both** (it never silently drops a true fact), and shows `memwarden doctor` flagging the
+contradiction as an advisory.
 
 ## Self-healing
 
@@ -102,6 +216,28 @@ Once it is up, you never touch it.
 - **On crash or reboot** — the OS service (macOS LaunchAgent / Linux systemd `--user`) restarts
   it on failure and starts it at login.
 - **Race-safe** — a second daemon on the same port exits cleanly instead of crash-looping.
+
+## How it works
+
+```
+  your tool  ──observe──▶  compress (on-device)  ──▶  libSQL store + hash-chained oplog
+                                                            │
+   MiniLM embed ──▶ TurboQuant 4-bit codes ──▶ vector index │  (tamper-evident)
+                                                            ▼
+  your tool  ◀──verified recall──  BM25 + vector (RRF), firewalled, packed under a token budget
+```
+
+1. **Capture.** `observe` compresses raw tool output into a compact record (no LLM call), and
+   hashes the source files it references.
+2. **Embed and compress.** text → `all-MiniLM-L6-v2` vector → **TurboQuant** 2/4-bit codes
+   (Google's quantization algorithm, [arXiv:2504.19874](https://arxiv.org/abs/2504.19874),
+   implemented from scratch in pure TypeScript).
+3. **Store and chain.** Every write lands in the SHA-256 hash-chained oplog, so the store is
+   tamper-evident and `memory_verify` can confirm the chain is intact.
+4. **Verified recall.** Hybrid BM25 + vector search (RRF), scoped to your project by canonical
+   path (symlinks and path spellings resolved, so recall never silently misses), firewalled so
+   stale memory never reaches the model, packed under a token budget. (Contradictions are
+   surfaced by `doctor` as advisories — recall never silently drops a true memory.)
 
 ## The numbers
 
@@ -124,88 +260,43 @@ memories, 14 **paraphrased** queries (worded differently than the answers). Repr
 > (quantized == full-precision) and semantic recall beats lexical. Larger, noisier corpora
 > land below 100%, but the relationship holds.
 
-## How it works
-
-```
-  your tool  ──observe──▶  compress (on-device)  ──▶  libSQL store + hash-chained oplog
-                                                            │
-   MiniLM embed ──▶ TurboQuant 4-bit codes ──▶ vector index │  (tamper-evident)
-                                                            ▼
-  your tool  ◀──resume / recall──  BM25 + vector (RRF), packed under a token budget
-```
-
-1. **Capture.** `observe` compresses raw tool output into a compact record (no LLM call).
-2. **Embed and compress.** text → `all-MiniLM-L6-v2` vector → **TurboQuant** 2/4-bit codes
-   (Google's quantization algorithm, [arXiv:2504.19874](https://arxiv.org/abs/2504.19874),
-   implemented from scratch in pure TypeScript).
-3. **Store and chain.** Every write lands in a SHA-256 hash-chained oplog, so the store is
-   tamper-evident and `memory_verify` can prove it.
-4. **Recall.** Hybrid BM25 + vector search, scoped to your project by canonical path (symlinks
-   and path spellings resolved, so recall never silently misses), packed under a token budget.
-
-## Verified Recall — memory you can trust
-
-Recall is only half the job. The other half is knowing the memory is still *true*. Every memory
-records the files it came from and, for each hashable file (under ~2 MB, present at capture), a
-content hash, so memwarden can classify it against the live repo:
-
-- **verified** — a referenced file still exists and matches its captured hash
-- **sourced_unverified** — sourced (a command, or files present but none hashable), so allowed
-  but not content-verified
-- **stale** — a referenced file was deleted, or its content changed since capture
-- **unsourced** — no evidence at all (no files, no command, not user-confirmed)
-
-**Recall is firewalled by default.** `memory_resume`, `/recall`, the SessionStart hook, and the
-proxy all pass `safe_only`, so a memory that points at code you have since changed or deleted is
-never injected into a model (and the firewall backfills lower-ranked verified results rather than
-returning fewer). Plain `memory_search` stays unfiltered for explicit lookups; the REST API
-rejects `safe_only` without a `cwd` to verify against rather than silently passing memory through.
-
-`memwarden doctor` runs the same check as a report against the live repo:
-
-```bash
-node dist/cli/bin.js doctor .
-
-  VERIFIED:        8 memories (code-backed, current)
-  SOURCED:         3 memories (sourced, not content-verified)
-  STALE:           2 memories reference files that changed/deleted
-  UNSOURCED:       1 memory has no evidence
-
-  [stale]  Edit — references files that no longer match (changed: src/legacy.ts)
-```
-
 ## What makes it different
 
 | | memwarden | typical agent memory |
 | --- | --- | --- |
+| Memory firewall (stale never injected) | ✅ Verified Recall (`safe_only`) | ✗ |
+| Trust audit (stale / unsourced / conflicts) | ✅ `memwarden doctor` | ✗ |
+| Validity tied to source-file hashes | ✅ per-file SHA-256 | ✗ |
+| Tamper-evident store | ✅ hash-chained oplog + `memory_verify` | ✗ |
 | One-command setup across every tool | ✅ `memwarden up` (7 tools) | manual, per tool |
 | Self-healing daemon (use + crash + reboot) | ✅ | ✗ |
-| Trust audit (stale / unsourced) | ✅ `memwarden doctor` | ✗ |
+| Self-custodied, portable | ✅ `export` / `import` Brain Bundle | often vendor-locked |
 | Compressed storage | ✅ TurboQuant, ~6–11× | usually raw float32 |
-| Tamper-evident | ✅ hash-chained oplog + `memory_verify` | ✗ |
-| Portable, self-owned | ✅ `export` / `import` Brain Bundle | often vendor-locked |
 | Runtime dependencies | **2** (libSQL, zod); embeddings + MCP add nothing native | heavier |
 
 ## MCP tools and the `/recall` command
 
 | Tool | What it does |
 | --- | --- |
-| `memory_resume` | Recall what was worked on in this project, across all past sessions and tools |
-| `memory_search` | Hybrid semantic + keyword search |
+| `memory_resume` | Verified recall of what was worked on in this project, across all past sessions and tools |
+| `memory_search` | Hybrid semantic + keyword search (unfiltered, for explicit lookups) |
 | `memory_remember` | Save a memory explicitly |
-| `memory_verify` | Check the oplog hash chain is intact (tamper-evident; not yet signed) |
+| `memory_verify` | Confirm the oplog hash chain is intact (tamper-evident; not signed) |
 | `memory_stats` | Live counts, compression ratio, token reduction, latency |
 
 Plus an MCP **prompt**, `recall`, surfaced as a slash command (`/mcp__memwarden__recall <query>`
-in Claude Code): type it mid-chat to pull this project's matching memory into the conversation.
+in Claude Code): type it mid-chat to pull this project's matching, verified memory into the
+conversation.
 
-## The proxy — one memory layer for local or paid models
+## The proxy — one memory layer for the models you control
 
-An OpenAI-compatible gateway that any model-configurable tool can point its base URL at. It
-injects relevant memory and captures the answer, and it is blind to the model behind it. Local
-(Ollama, LM Studio) and paid (OpenAI, OpenRouter, Together) all speak the same
+An OpenAI-compatible gateway on `:3113` that any model-configurable tool can point its base URL
+at. It injects relevant verified memory, captures the answer, and is blind to the model behind
+it. Local (Ollama, LM Studio) and paid (OpenAI, OpenRouter, Together) all speak the same
 `/v1/chat/completions`, so it is one memory layer for all of them. Streaming (SSE) passes
-straight through.
+straight through. It applies only where you control the model endpoint — tools with their own
+protocol or backend (Claude Code, Cursor, Kiro, Antigravity) are covered by hooks or the
+standing instruction instead.
 
 ```bash
 # paid upstream:
@@ -215,32 +306,34 @@ MEMWARDEN_UPSTREAM_URL=http://localhost:11434/v1 node dist/index.js
 # then point your tool's OpenAI base URL at:  http://localhost:3113/v1
 ```
 
-## Portability
+## Portability — your memory survives the next pivot
 
 ```bash
 node dist/cli/bin.js export brain.json     # on machine A
 node dist/cli/bin.js import brain.json     # on machine B
 ```
 
-Your memory is a portable JSON bundle. No vendor in the loop.
+Your memory is a portable JSON Brain Bundle. No cloud, no vendor in the loop. When the next
+memory startup gets acquired or sunset, you keep your brain.
 
 ## Layout
 
 ```
 src/kernel/      in-process runtime: function registry, trigger dispatch, pubsub, HTTP
 src/state/       StateKV, memory + libSQL stores, append-only hash-chained oplog
-src/functions/   observe / search (BM25 + TurboQuant vector + RRF) / doctor / context / forget
+src/functions/   observe / search (BM25 + TurboQuant vector + RRF) / doctor / conflicts / dejafix / context / forget
 src/functions/verify.ts  Verified Recall: content-hash provenance -> verified / sourced_unverified / stale / unsourced
 src/functions/paths.ts   canonical project/cwd scoping (recall never silently misses)
 src/embedding/   on-device embedding provider (transformers.js, optional)
 src/mcp/         dependency-free MCP server (stdio JSON-RPC) + the recall prompt
-src/proxy/       OpenAI-compatible memory gateway (the universal cross-tool layer)
+src/proxy/       OpenAI-compatible memory gateway (for model endpoints you control)
 src/daemon/      ensure (self-heal on use) + service (self-heal on crash/reboot)
-src/cli/         up / down / connect / doctor / hooks / export / import
+src/cli/         up / down / connect / doctor / dejafix / hooks / export / import
 src/cli/tools.ts per-tool adapters: Claude Code, Codex, Cursor, Kiro, Antigravity, OpenCode, OpenClaw
 src/bundle/      portable Brain Bundle export & import
 benchmark/       reproducible recall benchmark
-test/            217 tests: kernel, store parity, oplog, quantizer, MCP, proxy, tool-wiring,
+test/            267 tests: kernel, store parity, oplog, quantizer, MCP, proxy, tool-wiring,
+                 Verified Recall, Déjà Fix, conflict audit, HTTP security (auth/host/content-type),
                  path scoping, self-heal, cross-tool reliability harness, e2e
 ```
 
@@ -260,10 +353,11 @@ test/            217 tests: kernel, store parity, oplog, quantizer, MCP, proxy, 
 
 ## Not built yet (so this README does not pretend otherwise)
 
-Verified Recall checks deletion and content drift today. **Conflict detection** (flagging a
-newer memory that contradicts an older one) is not built yet. Tamper-*evidence* ships via the
-hash chain, but oplog *signing* (Ed25519), *encrypted* Brain Bundles, and an ANN index for
->1M-memory scale are not. These are candidates, not claims.
+Verified Recall checks deletion and content drift; `doctor` additionally flags conservative
+subject/value conflicts as advisories (it never drops them from recall).
+Tamper-*evidence* ships via the hash chain, but oplog *signing* (Ed25519), *encrypted* Brain
+Bundles, and an ANN index for >1M-memory scale are not. These are candidates, not claims. The
+hash chain detects edits and reorders; it does not detect tail-truncation.
 
 ## License
 

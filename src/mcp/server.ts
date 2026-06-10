@@ -7,7 +7,7 @@
 // shares the one local brain.
 //
 // Beyond the usual save/search/context tools, it exposes the two memwarden
-// has and others don't: memory_verify (cryptographic oplog integrity) and
+// has and others don't: memory_verify (tamper-evident oplog integrity) and
 // memory_stats (live TurboQuant compression ratio).
 //
 // It also exposes an MCP *prompt*, `recall`, which clients surface as a
@@ -206,9 +206,85 @@ export function createMcpServer(opts: McpServerOptions) {
         }),
     },
     {
+      name: "dejafix_lookup",
+      description:
+        "Déjà Fix: before you try to fix an error, check if ANY agent (Claude, Codex, Cursor, …) already solved this exact error in THIS project. Paste the error message, stack trace, or failing-test output. Returns matching fixes that are still valid — each verified against the live repo (a fix whose files changed or vanished is suppressed, never surfaced) and badged 'verified current' or 'sourced, unverified'. Call this whenever you hit an error before debugging from scratch.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          error_text: {
+            type: "string",
+            description:
+              "The error message, stack trace, or failing-test output to look up.",
+          },
+          cwd: {
+            type: "string",
+            description:
+              "Working directory to scope to. Defaults to where this server was launched (the current project).",
+          },
+        },
+        required: ["error_text"],
+      },
+      call: (a) =>
+        api("POST", "/memwarden/dejafix/lookup", {
+          error_text: str(a["error_text"]),
+          cwd: str(a["cwd"], serverCwd),
+        }),
+    },
+    {
+      name: "dejafix_record",
+      description:
+        "Déjà Fix: record how an error was resolved so any agent that hits it again can recall the fix. Provide the original error text and a short fix narrative; optionally a root cause and the files the fix touched (hashed now so stale fixes are auto-suppressed later). Call this right after you resolve a non-trivial error.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          error_text: {
+            type: "string",
+            description: "The error message/stack trace that was resolved.",
+          },
+          fix: {
+            type: "string",
+            description: "Short narrative of the fix that resolved it.",
+          },
+          root_cause: {
+            type: "string",
+            description: "Optional one-line root cause.",
+          },
+          files: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Files the fix touched/relied on (relative to cwd). Hashed for drift detection.",
+          },
+          cwd: {
+            type: "string",
+            description:
+              "Working directory to scope to. Defaults to where this server was launched.",
+          },
+        },
+        required: ["error_text", "fix"],
+      },
+      call: (a) =>
+        api("POST", "/memwarden/dejafix/record", {
+          error_text: str(a["error_text"]),
+          fix: str(a["fix"]),
+          ...(typeof a["root_cause"] === "string" && a["root_cause"]
+            ? { root_cause: a["root_cause"] }
+            : {}),
+          ...(Array.isArray(a["files"])
+            ? {
+                files: (a["files"] as unknown[]).filter(
+                  (f): f is string => typeof f === "string",
+                ),
+              }
+            : {}),
+          cwd: str(a["cwd"], serverCwd),
+        }),
+    },
+    {
       name: "memory_verify",
       description:
-        "Check the oplog hash chain is intact: tamper-EVIDENT integrity. Detects edits, reorders, or drops in the memory log (it is not tamper-proof — there is no signing yet).",
+        "Check the oplog hash chain is intact: tamper-EVIDENT integrity. Detects edits and reorders within the memory log (not tamper-proof: there is no signing yet, and truncating the newest entries is not detectable).",
       inputSchema: { type: "object", properties: {} },
       call: () => api("GET", "/memwarden/verify"),
     },

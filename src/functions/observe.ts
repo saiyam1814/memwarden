@@ -24,6 +24,7 @@ import { isAutoCompressEnabled, getAgentId } from "./config.js";
 import { buildSyntheticCompression } from "./compress-synthetic.js";
 import { extractProvenance } from "./provenance.js";
 import { hashFiles } from "./verify.js";
+import { recordFix, looksLikeResolvedFix } from "./dejafix.js";
 import { getSearchIndex, vectorIndexAddGuarded } from "./search.js";
 import { logger } from "./logger.js";
 import { metrics } from "../observability/metrics.js";
@@ -283,6 +284,44 @@ export function registerObserveFunction(
         }
         synthetic.provenance = prov;
         metrics.recordObserve(JSON.stringify(raw), JSON.stringify(synthetic));
+
+        // Déjà Fix opportunistic capture. When this observation already looks
+        // like a recorded fix (contains BOTH a recognizable error AND
+        // resolution language), extract its error signature and store a
+        // FixMemory so any agent that later hits the same error can recall the
+        // verified fix. Reuses the same provenance (with fileHashes) we just
+        // built, so Verified Recall can detect drift. Strictly best-effort and
+        // gated: it must never throw on or block the observe hot path, and
+        // non-fix observations are completely untouched.
+        try {
+          const fixText = [
+            synthetic.title,
+            synthetic.narrative,
+            ...(synthetic.facts ?? []),
+          ]
+            .filter((s): s is string => typeof s === "string" && s.length > 0)
+            .join("\n");
+          if (payload.cwd && looksLikeResolvedFix(fixText)) {
+            const tool = raw.agentId ?? payload.agent;
+            await recordFix(kv, {
+              errorText: fixText,
+              observationId: obsId,
+              fix: synthetic.narrative || synthetic.title,
+              provenance: prov,
+              cwd: payload.cwd,
+              timestamp: payload.timestamp,
+              sessionId: payload.sessionId,
+              ...(tool ? { tool } : {}),
+            });
+          }
+        } catch (err) {
+          // The side path must never break observe.
+          logger.warn("dejafix opportunistic capture failed", {
+            obsId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+
         await kv.set(KV.observations(payload.sessionId), obsId, synthetic);
         getSearchIndex().add(synthetic);
         await vectorIndexAddGuarded(

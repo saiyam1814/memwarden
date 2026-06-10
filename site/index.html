@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>memwarden — one memory for every AI coding tool</title>
-<meta name="description" content="Run one command and your work in Claude Code, Codex, Cursor, Kiro, Antigravity, OpenCode and OpenClaw flows into a single local brain. Cross-tool, self-healing, verifiable, no API key." />
-<meta property="og:title" content="memwarden — one memory for every AI coding tool" />
-<meta property="og:description" content="One command. Cross-tool memory that is local, self-healing, verifiable, and yours." />
+<title>memwarden — the memory firewall for AI coding agents</title>
+<meta name="description" content="Your agent's memory is lying to you. Prove yours isn't. Verified, self-custodied memory for AI coding agents: nothing reaches your agent's context without provenance that still checks out. Local-first, cross-tool, no API key." />
+<meta property="og:title" content="memwarden — the memory firewall for AI coding agents" />
+<meta property="og:description" content="Your agent's memory is lying to you. Prove yours isn't. Verified, self-custodied memory: stale or unsourced context never reaches the model." />
 <style>
   :root{
     --bg:#0a0d14; --bg2:#0e131d; --card:#121826; --card2:#0f1521; --line:#1f2839;
@@ -106,65 +106,116 @@
   <nav>
     <div class="brand">🧠 mem<span>warden</span></div>
     <div class="nav-links">
-      <a href="#trust">Trust</a>
+      <a href="#trust">Verified Recall</a>
+      <a href="#dejafix">Déjà Fix</a>
+      <a href="#moat">The moat</a>
       <a href="#setup">Setup</a>
       <a href="#cross">Cross-tool</a>
-      <a href="#proof">Proof</a>
-      <a href="https://github.com/theshiphq/memwarden">GitHub</a>
+      <a href="https://github.com/saiyam1814/memwarden">GitHub</a>
     </div>
   </nav>
 
   <header>
-    <span class="pill">verifiable · staleness audit · self-healing · cross-tool</span>
-    <h1>Memory your AI agents<br/>can <span class="grad">trust</span></h1>
-    <p class="sub">Every AI coding tool can share one local brain. memwarden goes further: it
-      keeps the memory tamper-evident, audits whether each memory is still safe to inject, and
-      heals itself so you never touch it. Across Claude Code, Codex, Cursor, Kiro, Antigravity,
-      OpenCode and OpenClaw.</p>
+    <span class="pill">memory firewall · verified recall · tamper-evident · self-custodied</span>
+    <h1>The memory <span class="grad">firewall</span><br/>for AI coding agents</h1>
+    <p class="sub">Your agent's memory is lying to you. Prove yours isn't. memwarden is verified,
+      self-custodied memory: nothing reaches your agent's context without provenance that still
+      checks out. Across Claude Code, Codex, Cursor, Kiro, Antigravity, OpenCode and OpenClaw.</p>
 
     <div class="cmd">
       <code>$ <span class="p">memwarden up</span></code>
       <button class="copy" onclick="navigator.clipboard&&navigator.clipboard.writeText('node dist/cli/bin.js up');this.textContent='copied'">copy</button>
     </div>
     <div class="cta">
-      <a class="btn primary" href="#setup">How it works</a>
-      <a class="btn ghost" href="https://github.com/theshiphq/memwarden">View on GitHub</a>
+      <a class="btn primary" href="#trust">See Verified Recall</a>
+      <a class="btn ghost" href="https://github.com/saiyam1814/memwarden">View on GitHub</a>
     </div>
 
     <div class="stats">
-      <div class="stat"><b class="accent">7</b><small>tools wired<br/>by one command</small></div>
-      <div class="stat"><b>0%</b><small>recall lost to compression<br/>(quantized == full)</small></div>
-      <div class="stat"><b>5.9×</b><small>smaller vectors<br/>TurboQuant 4-bit</small></div>
-      <div class="stat"><b>~1ms</b><small>per search<br/>on-device</small></div>
+      <div class="stat"><b class="accent">4</b><small>trust states<br/>verified → stale</small></div>
+      <div class="stat"><b>0</b><small>stale memories<br/>reach the model</small></div>
+      <div class="stat"><b>7</b><small>tools wired<br/>by one command</small></div>
+      <div class="stat"><b>0</b><small>cloud · self-custodied<br/>lives at ~/.memwarden</small></div>
     </div>
   </header>
 
   <section id="why">
-    <h2>Agents forget. Every session. Every tool.</h2>
-    <p class="lead">You re-explain the architecture, re-teach preferences, and re-discover the
-      same bug, in every tool, every day. Built-in memory files cap out and go stale, and each
-      vendor's memory is their lock-in. memwarden is the memory that follows you across tools,
-      costs fewer tokens to recall, and that you actually own.</p>
+    <h2>The problem isn't forgetting. It's confidently wrong recall.</h2>
+    <p class="lead">A third of stored facts go stale within 90 days. ChatGPT memory silently
+      poisons answers; Mem0's own reporting concedes staleness is unsolved; OWASP added Memory
+      Poisoning (ASI06) to its 2026 Agentic Top 10. Yet every memory layer with traction — claude-mem,
+      Mem0, MemPalace, agentmemory — ships zero trust surface: no provenance, no verification, no
+      staleness detection. A memory that points at code you deleted is worse than none, because the
+      agent injects it with full confidence. memwarden flips the default: memory is untrusted until
+      its source still checks out.</p>
     <div class="grid">
-      <div class="feat"><div class="ic">🩺</div><h3>Trustworthy, not just stored</h3><p>The <code>doctor</code> audits whether each memory is still safe to inject: it flags memory that points at deleted files (stale) or has no evidence (unsourced). Auditing trust is the part nobody else leads with.</p></div>
-      <div class="feat"><div class="ic">🔐</div><h3>Verifiable and yours</h3><p>Every write lands in a SHA-256 hash-chained log you can cryptographically verify. On-device, two dependencies, a portable bundle. No vendor.</p></div>
-      <div class="feat"><div class="ic">♻️</div><h3>Self-healing</h3><p>Once it is up you never touch it. It revives itself if a tool finds it down, and an OS service restarts it on crash and starts it at login.</p></div>
+      <div class="feat"><div class="ic">🩺</div><h3>Verified Recall — the anti-feature</h3><p>Memory is firewalled before it reaches a model. Stale memory is never injected. <code>memwarden doctor</code> runs the same check as a red/yellow/green audit against any existing store. Point it at your own memory and watch it light up yellow.</p></div>
+      <div class="feat"><div class="ic">🪂</div><h3>Rug-pull insurance</h3><p>Mem0 sunset OpenMemory; Cursor shipped Memories then pulled it. memwarden is self-custodied, tamper-evident, and portable: one <code>export</code> Brain Bundle survives the next vendor pivot. Zero cloud.</p></div>
+      <div class="feat"><div class="ic">🧱</div><h3>The memory firewall</h3><p>Nothing enters your agent's context without provenance that still holds. The unique lever — possible only for a coding tool because the repo is ground truth — is tying memory validity to source-file content hashes.</p></div>
     </div>
   </section>
 
   <section id="trust">
-    <h2>Memory you can trust</h2>
-    <p class="lead">Recall is only half the job. The other half is knowing the memory is still
-      safe to use. Every memory carries provenance, and <kbd>memwarden doctor</kbd> audits it
-      against your live repo. This is the part that makes memwarden its own thing, not another
-      shared-memory layer.</p>
+    <h2>Verified Recall — four states, one firewall</h2>
+    <p class="lead">Every memory is classified against the live repo before it can reach a model.
+      <kbd>memory_resume</kbd>, the <kbd>/recall</kbd> prompt, the Claude Code SessionStart hook,
+      and the proxy all run with the firewall on. <b>It drops <code>stale</code> before injecting.
+      It does not drop <code>unsourced</code></b> — unsourced means <i>unverified</i>, not
+      <i>dangerous</i>, so it stays available for explicit lookups.</p>
+    <div class="grid">
+      <div class="feat"><div class="ic" style="color:var(--good)">●</div><h3>verified</h3><p>A captured source-file hash still matches the file on disk. Code-backed and current.</p></div>
+      <div class="feat"><div class="ic" style="color:var(--accent2)">●</div><h3>sourced_unverified</h3><p>Has a source (a command, or files present but not hashable) but no content hash to re-check. Allowed, not content-verified.</p></div>
+      <div class="feat"><div class="ic" style="color:var(--warn)">●</div><h3>stale → dropped</h3><p>A referenced file was deleted, or its content changed since capture. Never injected into the model.</p></div>
+    </div>
+    <p class="lead" style="margin-top:24px">The shareable artifact: <kbd>memwarden doctor</kbd>
+      runs the same check as a report, plus conservative subject/value conflict detection — no LLM,
+      no fuzzy black box. Run it against your current store and see how much is still earned.</p>
 <pre>$ <span class="a">memwarden doctor .</span>
 
-  SAFE TO INJECT: 12 memories
-  <span class="y">STALE:           2 memories reference files that changed</span>
+  <span class="g">VERIFIED:        8 memories (code-backed, current)</span>
+  SOURCED:         3 memories (sourced, not content-verified)
+  <span class="y">STALE:           2 memories reference files that changed/deleted</span>
   <span class="y">UNSOURCED:       1 memory has no evidence</span>
+  <span class="y">CONFLICTS:       1 possible contradiction</span>
 
-  [stale]  Edit — references 1 file(s) that no longer exist: src/legacy.ts</pre>
+  [stale]     Edit — references files that no longer match (changed: src/legacy.ts)
+  [conflict] Edit may contradict Edit — same subject "auth" has incompatible values</pre>
+  </section>
+
+  <section id="dejafix">
+    <h2>Déjà Fix — never solve the same error twice</h2>
+    <p class="lead">memwarden is the one process that sees <b>every</b> agent's sessions, so it can
+      do what no per-tool memory can: when any agent resolves an error, it captures
+      <code>{error&nbsp;signature&nbsp;&rarr;&nbsp;root&nbsp;cause&nbsp;+&nbsp;fix}</code> with
+      provenance file-hashes. When any agent later hits a matching error, the verified fix is
+      surfaced automatically &mdash; but only if its files still hash-match. A stale fix is never
+      surfaced.</p>
+<pre><span class="c"># Codex solved a failing test yesterday. Today Claude Code hits the same failure:</span>
+<span class="ok">Déjà Fix (memwarden): this error was solved by codex on 2026-06-09</span>
+<span class="ok">and the fix is verified current against your working tree.</span>
+  root cause: clock skew   ·   fix: mock NTP in conftest
+
+<span class="c"># scriptable too — pipe a failing command's output straight in:</span>
+npm test 2>&1 | node dist/cli/bin.js <span class="a">dejafix lookup</span></pre>
+    <p class="note"><b>Cross-agent</b> (a fix learned in Codex helps Claude Code), <b>project-scoped</b>
+      (a fix never leaks across repos), and <b>safe by construction</b> &mdash; it reuses Verified
+      Recall, so file drift or deletion auto-suppresses it. Only <code>verified current</code> fixes
+      auto-inject; sourced-but-unverified ones stay available on demand, never silently pushed.</p>
+  </section>
+
+  <section id="moat">
+    <h2>Why file hashes are the moat</h2>
+    <p class="lead">Other tools have no way to check whether a memory is still true, so they don't
+      try. A coding agent does: the repository on disk is the source of truth. When memwarden
+      captures a code-backed memory it records a SHA-256 content hash for each referenced file
+      (best-effort, files up to ~2&nbsp;MB). On recall it re-hashes the live file and compares. If
+      the file moved or vanished, the memory is provably stale — not by heuristic, by hash. Nobody
+      else ties memory validity to source-file hashes.</p>
+    <div class="grid">
+      <div class="feat"><div class="ic">🔗</div><h3>Tamper-evident, honestly</h3><p>Every write lands in an append-only SHA-256 hash-chained oplog. <kbd>memory_verify</kbd> recomputes the chain, so an edit or reorder of any past entry breaks it. <b>Tamper-evident, not tamper-proof:</b> there is no signing, and the chain does not detect tail-truncation (dropping the newest entries).</p></div>
+      <div class="feat"><div class="ic">🔒</div><h3>Self-custodied</h3><p>The brain lives at <code>~/.memwarden</code> and nowhere else. On-device embeddings, two runtime dependencies, no cloud, no vendor in the loop.</p></div>
+      <div class="feat"><div class="ic">♻️</div><h3>Self-healing</h3><p>Once it is up you never touch it. It revives itself if a tool finds it down, and an OS service restarts it on crash and starts it at login.</p></div>
+    </div>
   </section>
 
   <section id="setup">
@@ -180,42 +231,46 @@
       <div class="tool"><b>Antigravity</b><small class="inst">instruction + /recall</small></div>
       <div class="tool"><b>OpenCode</b><small class="inst">instruction + /recall</small></div>
       <div class="tool"><b>OpenClaw</b><small class="inst">instruction + /recall</small></div>
-      <div class="tool"><b>any model</b><small class="auto">proxy · fully automatic</small></div>
+      <div class="tool"><b>endpoints you control</b><small class="auto">proxy · OpenCode/Ollama/custom URL</small></div>
     </div>
   </section>
 
   <section id="cross">
     <h2>How memory crosses your tools</h2>
-    <p class="lead">The honest mechanics. There are exactly three ways memory reaches a tool,
-      and <kbd>up</kbd> wires whichever ones each tool supports. We do not pretend any of it is
-      magic.</p>
+    <p class="lead">Cross-tool reach is table stakes — the trust layer is the point. Still, the
+      mechanics matter, so here they are honestly. There are exactly three ways memory reaches a
+      tool, and <kbd>up</kbd> wires whichever ones each tool supports. We do not pretend any of it
+      is magic.</p>
     <div class="doors">
       <div class="door">
         <div class="n">Door 1 · mechanical</div>
         <h3>Hooks</h3>
-        <p>Claude Code injects this project's memory before you type, and captures your work as
-          it happens. The agent cannot forget to do it.</p>
+        <p>Claude Code injects this project's verified memory before you type, and captures your
+          work as it happens. The agent cannot forget to do it.</p>
         <span class="tag mech">guaranteed</span>
       </div>
       <div class="door">
         <div class="n">Door 2 · standing instruction</div>
         <h3>MCP + AGENTS.md</h3>
         <p>For Codex, Cursor, Kiro, Antigravity, OpenCode and OpenClaw, <kbd>up</kbd> writes an
-          instruction telling the agent to recall first and save as it goes. It does so on every
-          task. This is how every cross-tool memory layer does these tools, plus <kbd>/recall</kbd>
-          when you want to force it.</p>
+          instruction telling the agent to recall first and save as it goes. This is how every
+          cross-tool memory layer does these tools, plus <kbd>/recall</kbd> when you want to force
+          it.</p>
         <span class="tag soft">agent follows it</span>
       </div>
       <div class="door">
         <div class="n">Door 3 · mechanical</div>
         <h3>The proxy</h3>
-        <p>Point any model-configurable tool at the memwarden proxy and every turn is recalled
-          and captured, local model or paid, with no agent cooperation at all.</p>
+        <p>Point a tool's model base URL at the memwarden proxy on <code>:3113</code> and every
+          turn is recalled and captured with no agent cooperation. Works only where you control
+          the endpoint: OpenCode, OpenClaw, Ollama, LM Studio, custom OpenAI base URLs.</p>
         <span class="tag mech">guaranteed</span>
       </div>
     </div>
-    <p class="note">Only hooks and the proxy are mechanically guaranteed. For MCP-only tools,
-      "automatic" means a standing instruction the agent follows, the same mechanism every
+    <p class="note">Only hooks and the proxy are mechanically guaranteed. The proxy applies to
+      model endpoints you control, not to tools with their own protocol or backend (Claude Code is
+      covered by hooks; Cursor, Kiro and Antigravity by the standing instruction). For MCP-only
+      tools, "automatic" means a standing instruction the agent follows, the same mechanism every
       memory layer uses, backed by <kbd>/recall</kbd> on demand.</p>
   </section>
 
@@ -224,9 +279,9 @@
     <p class="lead">Capture, compress on-device, store with integrity, recall the right slice
       under a token budget. Scoping is by canonical path, so recall never silently misses.</p>
     <div class="flow">
-      <b>your tool</b> &nbsp;──observe──▶&nbsp; compress &nbsp;──▶&nbsp; libSQL store + <b>hash-chained oplog</b><br/><br/>
+      <b>your tool</b> &nbsp;──observe + hash files──▶&nbsp; compress &nbsp;──▶&nbsp; libSQL store + <b>hash-chained oplog</b><br/><br/>
       &nbsp;&nbsp;MiniLM embed &nbsp;──▶&nbsp; <b>TurboQuant</b> 4-bit codes &nbsp;──▶&nbsp; vector index<br/><br/>
-      <b>your tool</b> &nbsp;◀──resume / recall──&nbsp; BM25 + vector (RRF), packed under a token budget
+      <b>your tool</b> &nbsp;◀──verified recall──&nbsp; BM25 + vector (RRF), <b>firewalled</b>, packed under a token budget
     </div>
   </section>
 
@@ -241,24 +296,32 @@
       <tr><td>Keyword search (lexical baseline)</td><td>71%</td><td>79%</td></tr>
     </table>
     <p class="note">100% is on a small, clean corpus. The point: compression is free (quantized
-      == full-precision) and semantic recall beats lexical. 217 tests, including a cross-tool
-      reliability harness that proves memory captured in one tool is recalled in another.</p>
+      == full-precision) and semantic recall beats lexical. 267 tests, including a Verified Recall
+      suite, the Déjà Fix engine, HTTP security (auth / host firewall / content-type), and a
+      cross-tool reliability harness that proves memory captured in one tool is recalled in
+      another.</p>
   </section>
 
   <section id="start">
     <h2>Quick start</h2>
-    <p class="lead">Two runtime dependencies. No API key. Embeddings run on your machine.</p>
+    <p class="lead">Two runtime dependencies. No API key. No cloud. Embeddings run on your machine.</p>
 <pre><span class="c"># install, build, and wire everything</span>
 npm install &amp;&amp; npm run build
 node dist/cli/bin.js <span class="a">up</span>
 
 <span class="c"># restart a tool, then in any of them:</span>
-<span class="g">/recall</span>                                <span class="c"># or just ask "what were we working on here?"</span></pre>
+<span class="g">/recall</span>                                <span class="c"># or just ask "what were we working on here?"</span>
+
+<span class="c"># audit any memory store — the shareable red/yellow/green artifact:</span>
+node dist/cli/bin.js <span class="a">doctor .</span>
+
+<span class="c"># see the firewall refuse stale recall + doctor flag a conflict, locally:</span>
+npm run <span class="a">demo:trust</span></pre>
   </section>
 
   <footer>
-    <p><b>🧠 memwarden</b> — one memory for every AI coding tool. Local, self-healing, verifiable. Apache-2.0.</p>
-    <p><a href="https://github.com/theshiphq/memwarden">github.com/theshiphq/memwarden</a></p>
+    <p><b>🧠 memwarden</b> — the memory firewall for AI coding agents. Verified, self-custodied, tamper-evident. Apache-2.0.</p>
+    <p><a href="https://github.com/saiyam1814/memwarden">github.com/saiyam1814/memwarden</a></p>
   </footer>
 
 </div>

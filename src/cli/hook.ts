@@ -66,7 +66,7 @@ export async function handleSessionStart(
         format: "narrative",
         limit: 20,
         token_budget: 1500,
-        safe_only: true, // Verified Recall: SessionStart injects only verified memory
+        safe_only: true, // Verified Recall: SessionStart never injects stale memory
       }),
     });
     if (!res.ok) return "";
@@ -89,9 +89,12 @@ export async function handleSessionStart(
 }
 
 /**
- * PostToolUse: forward the tool call to the daemon's observe path. Returns
- * empty string — capture hooks inject nothing. Failures are swallowed so a
- * downed daemon never breaks the agent's turn.
+ * PostToolUse: forward the tool call to the daemon's observe path, and — the
+ * Déjà Fix path — if the tool's output looks like an error, ask the daemon
+ * whether any agent already solved it and inject the verified fix. Capture is
+ * best-effort and failures are swallowed so a downed daemon never breaks the
+ * agent's turn. Returns the Déjà Fix injection (or "" when there's nothing
+ * verified to surface).
  */
 export async function handleCapture(
   raw: string,
@@ -121,7 +124,71 @@ export async function handleCapture(
   } catch {
     // swallow — capture is best-effort
   }
-  return "";
+
+  return dejaFixInjection(evt, cwd, deps, doFetch);
+}
+
+// Cheap client-side gate: only ask the daemon for a fix when the output plausibly
+// contains an error, so a clean tool call doesn't cost a second round-trip.
+const ERROR_HINT_RE = /\b(error|errno|exception|traceback|failed|failure|panic)\b|[✕✗×]/i;
+
+function outputText(toolResponse: unknown): string {
+  if (typeof toolResponse === "string") return toolResponse;
+  if (toolResponse == null) return "";
+  try {
+    return JSON.stringify(toolResponse);
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * If the tool output looks like an error, look it up in Déjà Fix. Inject ONLY
+ * a "verified current" fix (every referenced file still hash-matches) — the
+ * conservative, trustworthy default; sourced-but-unverified fixes stay
+ * available via /recall and the dejafix tools but are never auto-injected.
+ */
+async function dejaFixInjection(
+  evt: HookEvent,
+  cwd: string,
+  deps: HookDeps,
+  doFetch: typeof fetch,
+): Promise<string> {
+  const text = outputText(evt.tool_response);
+  if (!text.trim() || !ERROR_HINT_RE.test(text)) return "";
+  try {
+    const res = await doFetch(`${deps.baseUrl}/memwarden/dejafix/lookup`, {
+      method: "POST",
+      headers: headers(deps),
+      body: JSON.stringify({ error_text: text, cwd }),
+    });
+    if (!res.ok) return "";
+    const data = (await res.json()) as {
+      fixes?: Array<{
+        fix?: string;
+        rootCause?: string;
+        tool?: string;
+        timestamp?: string;
+        status?: string;
+      }>;
+    };
+    const fix = (data.fixes ?? []).find((f) => f.status === "verified" && f.fix);
+    if (!fix || !fix.fix) return "";
+    const who = fix.tool ? `by ${fix.tool}` : "earlier";
+    const when = fix.timestamp ? ` on ${fix.timestamp.slice(0, 10)}` : "";
+    const cause = fix.rootCause ? `\nRoot cause: ${fix.rootCause}` : "";
+    return JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: "PostToolUse",
+        additionalContext:
+          `Déjà Fix (memwarden): this error was solved ${who}${when} ` +
+          `and the fix is verified current against your working tree.${cause}\n` +
+          `Fix: ${fix.fix}`,
+      },
+    });
+  } catch {
+    return "";
+  }
 }
 
 /** Read all of stdin as a string. */

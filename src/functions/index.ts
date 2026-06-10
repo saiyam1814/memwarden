@@ -11,6 +11,7 @@ import { registerContextFunction } from "./context.js";
 import { registerSearchFunction } from "./search.js";
 import { registerForgetFunction } from "./forget.js";
 import { registerDoctorFunction } from "./doctor.js";
+import { registerDejaFixFunctions } from "./dejafix.js";
 import { DedupMap } from "./dedup.js";
 import { getTokenBudget, getMaxObservationsPerSession } from "./config.js";
 
@@ -20,6 +21,15 @@ export { registerSearchFunction } from "./search.js";
 export { registerForgetFunction } from "./forget.js";
 export { registerDoctorFunction } from "./doctor.js";
 export type { DoctorReport } from "./doctor.js";
+export {
+  registerDejaFixFunctions,
+  recordFix,
+  lookupFix,
+  errorSignature,
+  looksLikeResolvedFix,
+  DEJAFIX_SCOPE,
+} from "./dejafix.js";
+export type { FixMemory, VerifiedFix, RecordFixInput } from "./dejafix.js";
 export {
   getSearchIndex,
   getVectorIndex,
@@ -64,6 +74,7 @@ export function registerCoreFunctions(
   registerSearchFunction(sdk, kv);
   registerForgetFunction(sdk, kv);
   registerDoctorFunction(sdk, kv);
+  registerDejaFixFunctions(sdk, kv);
 
   return kv;
 }

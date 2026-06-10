@@ -1,8 +1,8 @@
 //
-// Verified Recall: the classifier (verified / stale / unsourced, including
-// content drift) and the recall firewall end to end — capture a memory that
-// references a real file, recall it, then change the file and confirm
-// safe_only recall drops it while plain search still returns it.
+// Verified Recall: the classifier (verified / sourced_unverified / stale /
+// unsourced, including content drift) and the recall firewall end to end —
+// capture a memory that references a real file, recall it, then change the
+// file and confirm safe_only recall drops it while plain search still returns it.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -104,15 +104,21 @@ describe("classifyProvenance", () => {
 });
 
 describe("Verified Recall firewall (safe_only)", () => {
-  async function observe(root: string, file: string, output: string) {
+  async function observe(
+    root: string,
+    file: string,
+    output: string,
+    sessionId = "s1",
+    timestamp = new Date().toISOString(),
+  ) {
     return sdk.trigger({
       function_id: "mem::observe",
       payload: {
         hookType: "post_tool_use",
-        sessionId: "s1",
+        sessionId,
         project: root,
         cwd: root,
-        timestamp: new Date().toISOString(),
+        timestamp,
         data: { tool_name: "Edit", tool_input: { file_path: file }, tool_output: output },
       },
     });
@@ -164,5 +170,39 @@ describe("Verified Recall firewall (safe_only)", () => {
       payload: { query: "bearer auth tokens galore", cwd: root, project: root, limit: 2, safe_only: true },
     })) as { results: unknown[] };
     expect(r.results.length).toBe(1);
+  });
+
+  it("does NOT silently drop conflicting memories from safe recall (both are kept, no conflicts_dropped)", async () => {
+    // A trust tool must never lose a correct fact on a fuzzy contradiction
+    // heuristic. safe_only only firewalls STALE memory; conflicting-but-fresh
+    // memories both survive recall (conflict reporting is doctor-only).
+    const root = repo();
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "src", "runtime.ts"), "export const runtime = 'current';\n");
+
+    await observe(root, "src/runtime.ts", "runtime uses node 22", "s1", "2026-01-01T00:00:00.000Z");
+    await observe(root, "src/runtime.ts", "runtime uses bun runtime", "s2", "2026-01-02T00:00:00.000Z");
+
+    const safe = (await sdk.trigger({
+      function_id: "mem::search",
+      payload: { query: "runtime uses", cwd: root, project: root, limit: 10, safe_only: true },
+    })) as {
+      results: Array<{ observation: { narrative: string } }>;
+      conflicts_dropped?: number;
+    };
+
+    // No conflict-based dropping: both memories are returned, and the field is
+    // gone from the contract entirely.
+    expect(safe.conflicts_dropped).toBeUndefined();
+    expect(safe.results.length).toBe(2);
+    const narratives = safe.results.map((r) => r.observation.narrative).join(" ");
+    expect(narratives).toContain("bun runtime");
+    expect(narratives).toContain("node 22");
+
+    const plain = (await sdk.trigger({
+      function_id: "mem::search",
+      payload: { query: "runtime uses", cwd: root, project: root, limit: 10 },
+    })) as { results: unknown[] };
+    expect(plain.results.length).toBe(2);
   });
 });

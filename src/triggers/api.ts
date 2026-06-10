@@ -302,8 +302,9 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
   });
 
   // --- GET /memwarden/verify --------------------------------------
-  // Tamper-evidence: prove the memory store's oplog hash chain is intact.
-  // The differentiating guarantee — memory you can cryptographically trust.
+  // Tamper-evidence: show the memory store's oplog hash chain is intact.
+  // The differentiating guarantee — memory whose history is tamper-evident
+  // (detects edits/reorders; not signed, so it is evidence, not proof).
   sdk.registerFunction(
     "api::verify",
     async (): Promise<Response> => {
@@ -328,7 +329,12 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
   sdk.registerTrigger({
     type: "http",
     function_id: "api::verify",
-    config: { api_path: "/memwarden/verify", http_method: "GET" },
+    config: {
+      api_path: "/memwarden/verify",
+      http_method: "GET",
+      // Auth'd when a secret is set: oplog state is private brain metadata.
+      middleware_function_ids: ["middleware::api-auth"],
+    },
   });
 
   // --- GET /memwarden/stats ---------------------------------------
@@ -375,7 +381,12 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
   sdk.registerTrigger({
     type: "http",
     function_id: "api::stats",
-    config: { api_path: "/memwarden/stats", http_method: "GET" },
+    config: {
+      api_path: "/memwarden/stats",
+      http_method: "GET",
+      // Auth'd when a secret is set: stats expose memory/session counts.
+      middleware_function_ids: ["middleware::api-auth"],
+    },
   });
 
   // --- POST /memwarden/doctor -------------------------------------
@@ -398,6 +409,127 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
     function_id: "api::doctor",
     config: {
       api_path: "/memwarden/doctor",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  // --- POST /memwarden/dejafix/lookup -----------------------------
+  // Déjà Fix: surface verified fixes for an error any agent already solved.
+  // Returns only fixes whose referenced files still hash-match (Verified
+  // Recall) — a stale fix is never returned. cwd is required: it is both the
+  // project firewall (a fix learned in repo A never leaks to repo B) and the
+  // working tree the fix is verified against.
+  sdk.registerFunction(
+    "api::dejafix-lookup",
+    async (
+      req: ApiRequest<{ error_text?: string; errorText?: string; cwd?: string }>,
+    ): Promise<Response> => {
+      const body = (req.body ?? {}) as {
+        error_text?: string;
+        errorText?: string;
+        cwd?: string;
+      };
+      const errorText =
+        asNonEmptyString(body.error_text) ?? asNonEmptyString(body.errorText);
+      if (!errorText) {
+        return { status_code: 400, body: { error: "error_text is required" } };
+      }
+      const cwd = asNonEmptyString(body.cwd);
+      if (!cwd) {
+        return {
+          status_code: 400,
+          body: { error: "cwd is required (the repo to verify fixes against)" },
+        };
+      }
+      const result = await sdk.trigger({
+        function_id: "mem::dejafix_lookup",
+        payload: { errorText, cwd },
+      });
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::dejafix-lookup",
+    config: {
+      api_path: "/memwarden/dejafix/lookup",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  // --- POST /memwarden/dejafix/record -----------------------------
+  // Record a {error -> root cause + fix} so any agent that hits the same error
+  // later gets it back. Referenced files are hashed now so drift is detectable.
+  sdk.registerFunction(
+    "api::dejafix-record",
+    async (
+      req: ApiRequest<{
+        error_text?: string;
+        errorText?: string;
+        signature?: string;
+        fix?: string;
+        root_cause?: string;
+        rootCause?: string;
+        files?: unknown;
+        cwd?: string;
+        tool?: string;
+        session_id?: string;
+        sessionId?: string;
+      }>,
+    ): Promise<Response> => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const fix = asNonEmptyString(body["fix"]);
+      if (!fix) {
+        return { status_code: 400, body: { error: "fix is required" } };
+      }
+      const cwd = asNonEmptyString(body["cwd"]);
+      if (!cwd) {
+        return { status_code: 400, body: { error: "cwd is required" } };
+      }
+      const errorText =
+        asNonEmptyString(body["error_text"]) ??
+        asNonEmptyString(body["errorText"]);
+      const signature = asNonEmptyString(body["signature"]);
+      if (!errorText && !signature) {
+        return {
+          status_code: 400,
+          body: { error: "error_text or signature is required" },
+        };
+      }
+      const files = Array.isArray(body["files"])
+        ? (body["files"] as unknown[]).filter(
+            (f): f is string => typeof f === "string" && f.trim().length > 0,
+          )
+        : undefined;
+      const payload: Record<string, unknown> = { fix, cwd };
+      if (errorText) payload["errorText"] = errorText;
+      if (signature) payload["signature"] = signature;
+      const rootCause =
+        asNonEmptyString(body["root_cause"]) ??
+        asNonEmptyString(body["rootCause"]);
+      if (rootCause) payload["rootCause"] = rootCause;
+      if (files && files.length > 0) payload["files"] = files;
+      const tool = asNonEmptyString(body["tool"]);
+      if (tool) payload["tool"] = tool;
+      const sessionId =
+        asNonEmptyString(body["session_id"]) ??
+        asNonEmptyString(body["sessionId"]);
+      if (sessionId) payload["sessionId"] = sessionId;
+
+      const result = await sdk.trigger({
+        function_id: "mem::dejafix_record",
+        payload,
+      });
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::dejafix-record",
+    config: {
+      api_path: "/memwarden/dejafix/record",
       http_method: "POST",
       middleware_function_ids: ["middleware::api-auth"],
     },

@@ -91,3 +91,93 @@ describe("handleCapture", () => {
     ).resolves.toBe("");
   });
 });
+
+describe("handleCapture — Déjà Fix injection", () => {
+  // Route the mock fetch by URL: observe always ok; lookup returns whatever the
+  // test sets. This asserts the REAL response contract (fixes[].status/fix),
+  // the lesson from the SessionStart-wrong-key bug.
+  function router(lookupBody: unknown, lookupOk = true) {
+    return vi.fn(async (url: string) => {
+      if (typeof url === "string" && url.includes("/memwarden/dejafix/lookup")) {
+        return jsonResponse(lookupBody, lookupOk);
+      }
+      return jsonResponse({ observationId: "obs_x" });
+    }) as unknown as typeof fetch;
+  }
+
+  const errorEvent = JSON.stringify({
+    session_id: "s3",
+    cwd: "/work/gamma",
+    tool_name: "Bash",
+    tool_input: { command: "npm test" },
+    tool_response: "FAIL test/token.test.ts > refresh\nError: clock skew detected",
+  });
+
+  it("injects a verified-current fix on a failing tool output", async () => {
+    const fetchFn = router({
+      signature: "test fail: refresh",
+      fixes: [
+        {
+          fix: "mock NTP in conftest",
+          rootCause: "clock skew",
+          tool: "codex",
+          timestamp: "2026-06-09T10:00:00.000Z",
+          status: "verified",
+          badge: "verified current",
+        },
+      ],
+    });
+
+    const out = await handleCapture(errorEvent, { baseUrl: "http://d", fetchFn });
+
+    const calls = (fetchFn as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    // observe first, then the dejafix lookup
+    expect(calls.length).toBe(2);
+    const lookupUrl = calls[1]![0] as string;
+    const lookupBody = JSON.parse((calls[1]![1] as { body: string }).body);
+    expect(lookupUrl).toContain("/memwarden/dejafix/lookup");
+    expect(lookupBody.cwd).toBe("/work/gamma");
+    expect(lookupBody.error_text).toContain("clock skew");
+
+    const parsed = JSON.parse(out);
+    expect(parsed.hookSpecificOutput.hookEventName).toBe("PostToolUse");
+    expect(parsed.hookSpecificOutput.additionalContext).toContain("Déjà Fix");
+    expect(parsed.hookSpecificOutput.additionalContext).toContain("mock NTP in conftest");
+    expect(parsed.hookSpecificOutput.additionalContext).toContain("codex");
+  });
+
+  it("does NOT auto-inject a sourced-but-unverified fix (conservative)", async () => {
+    const fetchFn = router({
+      signature: "test fail: refresh",
+      fixes: [
+        { fix: "maybe restart", timestamp: "2026-06-09T10:00:00.000Z", status: "sourced_unverified", badge: "sourced, unverified" },
+      ],
+    });
+    const out = await handleCapture(errorEvent, { baseUrl: "http://d", fetchFn });
+    // lookup still happened (output was an error), but nothing is injected
+    const calls = (fetchFn as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    expect(calls.length).toBe(2);
+    expect(out).toBe("");
+  });
+
+  it("does not call lookup at all when the output is not error-shaped", async () => {
+    const fetchFn = router({ signature: null, fixes: [] });
+    const out = await handleCapture(
+      JSON.stringify({ cwd: "/work/gamma", tool_name: "Read", tool_response: "file contents, all good" }),
+      { baseUrl: "http://d", fetchFn },
+    );
+    const calls = (fetchFn as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    expect(calls.length).toBe(1); // observe only — no second round-trip
+    expect(out).toBe("");
+  });
+
+  it("never throws if the lookup fails", async () => {
+    const fetchFn = vi.fn(async (url: string) => {
+      if (typeof url === "string" && url.includes("/dejafix/")) throw new Error("down");
+      return jsonResponse({ observationId: "obs_x" });
+    }) as unknown as typeof fetch;
+    await expect(
+      handleCapture(errorEvent, { baseUrl: "http://d", fetchFn }),
+    ).resolves.toBe("");
+  });
+});

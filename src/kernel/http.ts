@@ -89,6 +89,21 @@ async function handleRequest(
 
   const method = (req.method ?? "GET").toUpperCase();
 
+  // DNS-rebinding firewall: only serve requests whose Host header is a
+  // loopback host bound to our actual listening port. A malicious webpage can
+  // rebind its hostname's DNS to 127.0.0.1, but the browser still sends the
+  // page's own hostname in Host — so a non-loopback Host means the request did
+  // not originate from a local client. We compare the Host port against the
+  // socket's local port (handles ephemeral `port: 0` correctly). This runs
+  // BEFORE CORS-exempt routes and before any body is read, so it also blocks
+  // whole-brain exfil via GET /memwarden/export. Applies to every method incl.
+  // OPTIONS.
+  const localPort = req.socket.localPort;
+  if (!isLoopbackHost(req.headers.host, localPort)) {
+    sendJson(res, 403, undefined, { error: "forbidden_host" });
+    return;
+  }
+
   // CORS preflight.
   if (method === "OPTIONS") {
     res.statusCode = 204;
@@ -103,6 +118,21 @@ async function handleRequest(
   if (!route) {
     sendJson(res, 404, undefined, { error: "not_found", path: pathname });
     return;
+  }
+
+  // Require JSON for body-bearing methods BEFORE parsing. A cross-origin
+  // text/plain POST is a "simple request" that skips the CORS preflight, so
+  // without this a webpage could POST to /observe or /import (memory
+  // poisoning). Demanding application/json forces a preflight the browser
+  // will block. Bodyless POST/PUT (e.g. action triggers) still pass.
+  if (method === "POST" || method === "PUT") {
+    if (hasRequestBody(req) && !isJsonContentType(req.headers["content-type"])) {
+      sendJson(res, 415, undefined, {
+        error: "unsupported_media_type",
+        message: "Content-Type must be application/json",
+      });
+      return;
+    }
   }
 
   const headers = normalizeHeaders(req.headers);
@@ -141,6 +171,70 @@ async function handleRequest(
 
 function routeKey(method: HttpMethod, path: string): string {
   return `${method} ${path}`;
+}
+
+/**
+ * Accept only a loopback Host header bound to our port (or with no port). The
+ * Host header is case-insensitive and may carry `:port` or be a bracketed IPv6
+ * literal; we split host/port robustly and reject anything non-loopback. This
+ * is the DNS-rebinding guard: the value reflects the hostname the client
+ * actually targeted, which a rebinding attacker cannot forge to "localhost".
+ */
+export function isLoopbackHost(
+  hostHeader: string | undefined,
+  port: number | undefined,
+): boolean {
+  if (typeof hostHeader !== "string" || hostHeader.trim() === "") return false;
+  const raw = hostHeader.trim();
+  let hostname: string;
+  let portPart: string | undefined;
+  if (raw.startsWith("[")) {
+    // Bracketed IPv6: [::1] or [::1]:3111
+    const close = raw.indexOf("]");
+    if (close === -1) return false;
+    hostname = raw.slice(1, close);
+    const after = raw.slice(close + 1);
+    portPart = after.startsWith(":") ? after.slice(1) : after || undefined;
+  } else {
+    const idx = raw.lastIndexOf(":");
+    if (idx === -1) {
+      hostname = raw;
+    } else {
+      hostname = raw.slice(0, idx);
+      portPart = raw.slice(idx + 1);
+    }
+  }
+  const h = hostname.toLowerCase();
+  const loopback = h === "localhost" || h === "::1" || h === "127.0.0.1" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+  if (!loopback) return false;
+  // A present port must match ours; absent port is allowed. If we can't
+  // determine our own port (port undefined), accept any numeric port on a
+  // loopback hostname — the hostname check already carries the guarantee.
+  if (portPart !== undefined && portPart !== "") {
+    if (!/^\d+$/.test(portPart)) return false;
+    if (port !== undefined && Number(portPart) !== port) return false;
+  }
+  return true;
+}
+
+function isJsonContentType(contentType: string | undefined): boolean {
+  if (typeof contentType !== "string") return false;
+  // Strip any parameters (charset, boundary) and lowercase the media type.
+  const media = contentType.split(";")[0]?.trim().toLowerCase() ?? "";
+  return media === "application/json";
+}
+
+// A request carries a body if it advertises one. Bodyless POST/PUT (no
+// content-length, no chunked transfer-encoding) are exempt from the
+// content-type requirement.
+function hasRequestBody(req: IncomingMessage): boolean {
+  const len = req.headers["content-length"];
+  if (typeof len === "string" && /^\d+$/.test(len) && Number(len) > 0)
+    return true;
+  const te = req.headers["transfer-encoding"];
+  if (typeof te === "string" && te.toLowerCase().includes("chunked"))
+    return true;
+  return false;
 }
 
 function applyCors(

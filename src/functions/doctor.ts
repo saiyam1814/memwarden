@@ -2,13 +2,15 @@
 // mem::doctor — the memory doctor / firewall. Audits stored memories for
 // trustworthiness against the live repo, not just integrity:
 //
-//   STALE      a memory references files that no longer exist under the root
-//   UNSOURCED  a memory has no evidence (no files, no command, not confirmed)
-//   SAFE       sourced and still valid -> safe to inject
+//   VERIFIED   code-backed memory still matches its capture-time hashes
+//   SOURCED    sourced, but not content-verified
+//   STALE      references files that no longer exist or changed under root
+//   UNSOURCED  no evidence (no files, no command, not confirmed)
+//   CONFLICTS  newer sourced memories that contradict older sourced memories
 //
-// File checks run in the daemon (same machine as the repo). Conflict
-// detection (memories that disagree) is a documented next step — we don't
-// ship a fuzzy heuristic in a tool whose whole point is trust.
+// File checks run in the daemon (same machine as the repo). Conflict detection
+// is intentionally conservative and explainable: simple subject/value claims,
+// no LLM, no fuzzy black box.
 
 import type { ISdk } from "../kernel/index.js";
 import type { StateKV } from "../state/kv.js";
@@ -16,7 +18,9 @@ import type { CompressedObservation, Memory, Session } from "./types.js";
 import { KV } from "../state/schema.js";
 import { classifyProvenance } from "./verify.js";
 import { memoryToObservation } from "./memory-utils.js";
+import { canonicalizePath } from "./paths.js";
 import { logger } from "./logger.js";
+import { detectConflicts, type MemoryConflict } from "./conflicts.js";
 
 export interface DoctorEntry {
   id: string;
@@ -30,6 +34,7 @@ export interface DoctorReport {
   sourcedUnverified: number; // sourced but not content-verified
   stale: DoctorEntry[];
   unsourced: DoctorEntry[];
+  conflicts: MemoryConflict[];
 }
 
 export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
@@ -37,6 +42,13 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
     "mem::doctor",
     async (data: { root?: string; project?: string }): Promise<DoctorReport> => {
       const root = data?.root ?? process.cwd();
+      // Project scope is canonicalized the same way search scopes recall, so
+      // /tmp vs /private/tmp (and trailing-slash/`..` spellings) of the same
+      // directory match. undefined => whole-brain audit across every project.
+      const projectFilter =
+        typeof data?.project === "string" && data.project.trim().length > 0
+          ? canonicalizePath(data.project)
+          : undefined;
       const report: DoctorReport = {
         total: 0,
         safe: 0,
@@ -44,7 +56,9 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
         sourcedUnverified: 0,
         stale: [],
         unsourced: [],
+        conflicts: [],
       };
+      const conflictCandidates: CompressedObservation[] = [];
 
       const audit = (obs: CompressedObservation) => {
         report.total++;
@@ -54,10 +68,12 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
           case "verified":
             report.verified++;
             report.safe++;
+            conflictCandidates.push(obs);
             break;
           case "sourced_unverified":
             report.sourcedUnverified++;
             report.safe++;
+            conflictCandidates.push(obs);
             break;
           case "stale":
             report.stale.push(entry);
@@ -72,7 +88,12 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
         const memories = await kv.list<Memory>(KV.memories);
         for (const m of memories) {
           if (m.isLatest === false) continue;
-          if (data?.project && m.project && m.project !== data.project) continue;
+          if (
+            projectFilter &&
+            m.project &&
+            canonicalizePath(m.project) !== projectFilter
+          )
+            continue;
           audit(memoryToObservation(m));
         }
       } catch (err) {
@@ -84,13 +105,19 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
       // Per-session observations, optionally scoped by project/cwd.
       const sessions = await kv.list<Session>(KV.sessions).catch(() => []);
       for (const s of sessions) {
-        if (data?.project && s.project && s.project !== data.project) continue;
+        if (
+          projectFilter &&
+          s.project &&
+          canonicalizePath(s.project) !== projectFilter
+        )
+          continue;
         const obs = await kv
           .list<CompressedObservation>(KV.observations(s.id))
           .catch(() => []);
         for (const o of obs) audit(o);
       }
 
+      report.conflicts = detectConflicts(conflictCandidates);
       return report;
     },
   );

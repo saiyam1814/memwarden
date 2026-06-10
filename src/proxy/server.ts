@@ -30,6 +30,7 @@ import {
 } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { URL } from "node:url";
+import { isLoopbackHost } from "../kernel/http.js";
 
 export interface ProxyOptions {
   /** Port to listen on. */
@@ -112,6 +113,17 @@ async function handle(
   res: ServerResponse,
   ctx: Ctx,
 ): Promise<void> {
+  // Same DNS-rebinding firewall as the kernel HTTP server: the proxy is a
+  // localhost-only gateway that spends the upstream API key, so a webpage that
+  // rebinds DNS to 127.0.0.1 must not reach it. The Host header reflects the
+  // hostname the client actually targeted; reject anything non-loopback.
+  if (!isLoopbackHost(req.headers.host, req.socket.localPort)) {
+    res.statusCode = 403;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ error: "forbidden_host" }));
+    return;
+  }
+
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname;
 

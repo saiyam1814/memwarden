@@ -437,11 +437,14 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       // First pass: scope-filter, and — when safe_only is on — apply the
       // Verified Recall firewall WHILE filling, so stale top hits don't starve
       // out lower-ranked verified ones. We keep scanning the fetched results
-      // (fetchLimit, ~10x the limit) until we have effectiveLimit safe ones.
+      // (fetchLimit, up to SAFE_SCAN_CAP) until we have effectiveLimit safe ones.
+      const candidateTarget = safeOnly
+        ? Math.min(fetchLimit, Math.max(effectiveLimit * 3, effectiveLimit + 20))
+        : effectiveLimit;
       const candidates: typeof results = [];
       let staleDropped = 0;
       for (const r of results) {
-        if (candidates.length >= effectiveLimit) break;
+        if (candidates.length >= candidateTarget) break;
         if (filtering) {
           const s = await loadSession(r.sessionId);
           if (s) {
@@ -461,8 +464,8 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         }
         if (safeOnly && cwdFilter) {
           const obs = await loadObsOrMemory(r);
-          // Fail closed: skip anything we can't verify or that is stale, and
-          // keep scanning so a verified result lower down can take its slot.
+          // Fail closed for stale/missing candidates. Sourced-unverified memory
+          // is allowed by design, but stale memory never gets injected.
           if (!obs || classifyProvenance(obs.provenance, cwdFilter).status === "stale") {
             staleDropped++;
             continue;
@@ -501,9 +504,16 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         }
       }
 
+      // Safe recall NEVER silently drops a memory on a fuzzy contradiction
+      // heuristic — that would lose correct facts from a trust tool. The only
+      // thing safe_only firewalls is STALE memory (handled above, when the
+      // referenced files are deleted/changed). Conflict detection is advisory
+      // only and lives in mem::doctor, not in recall.
+      const recallResults = enriched.slice(0, effectiveLimit);
+
       void recordAccessBatch(
         kv,
-        enriched.map((r) => r.observation.id),
+        recallResults.map((r) => r.observation.id),
       );
 
       const estimateTokens = (value: unknown): number =>
@@ -536,7 +546,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       };
 
       if (format === "compact") {
-        const compactResults: CompactSearchResult[] = enriched.map((r) => ({
+        const compactResults: CompactSearchResult[] = recallResults.map((r) => ({
           obsId: r.observation.id,
           sessionId: r.sessionId,
           title: r.observation.title,
@@ -555,7 +565,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       }
 
       if (format === "narrative") {
-        const narrativeResults = enriched.map((r) => ({
+        const narrativeResults = recallResults.map((r) => ({
           obsId: r.observation.id,
           sessionId: r.sessionId,
           title: r.observation.title,
@@ -577,7 +587,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         };
       }
 
-      const packed = applyTokenBudget(enriched);
+      const packed = applyTokenBudget(recallResults);
 
       // Avoid logging raw cwd/project (host paths). Log only that filters
       // were active.

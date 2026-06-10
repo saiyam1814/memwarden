@@ -15,6 +15,7 @@
     "dev": "tsx src/index.ts",
     "build": "tsc",
     "benchmark": "tsx benchmark/recall.ts",
+    "demo:trust": "tsx demo/trust.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"

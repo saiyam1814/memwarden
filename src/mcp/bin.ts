@@ -8,9 +8,12 @@
 
 import { createMcpServer, runStdio } from "./server.js";
 import { ensureDaemon } from "../daemon/ensure.js";
+import { getSecret } from "../functions/config.js";
 
 const baseUrl = process.env.MEMWARDEN_URL ?? "http://localhost:3111";
-const secret = process.env.MEMWARDEN_SECRET;
+// Resolve env first, then the persisted <dataDir>/secret file, so a server
+// launched without the env var still authenticates to a secured daemon.
+const secret = getSecret();
 
 // Self-heal: revive the daemon on demand if a request finds it down.
 const ensureUp = async (): Promise<void> => {

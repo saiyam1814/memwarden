@@ -2,6 +2,10 @@
 // Config shim. Reads process.env directly; only the handful of
 // flags the core functions consult are modelled here.
 
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 function env(name: string): string | undefined {
   const v = process.env[name];
   return v !== undefined ? v : undefined;
@@ -53,12 +57,41 @@ export function isSlotsEnabled(): boolean {
   return flag("MEMWARDEN_SLOTS");
 }
 
+// The CLI (`memwarden up`) persists the generated secret to <dataDir>/secret.
+// The daemon spawned by `up` inherits MEMWARDEN_SECRET via env, but short-lived
+// clients launched by the agent host — the Claude Code hook runs in the user's
+// shell, manually-started MCP servers — won't have that env. Without a fallback
+// they'd call a secured daemon with no Bearer and silently 401 (auto-recall dies
+// with no error). So resolution is: env first, then the persisted secret file.
+// Read the file at most once per process (the secret is stable for its lifetime).
+let cachedFileSecret: string | undefined | null = null; // null = not yet read
+
+function persistedSecret(): string | undefined {
+  if (cachedFileSecret !== null) return cachedFileSecret;
+  cachedFileSecret = undefined;
+  try {
+    const dataDir = env("MEMWARDEN_DATA_DIR") ?? join(homedir(), ".memwarden");
+    const path = join(dataDir, "secret");
+    if (existsSync(path)) {
+      const s = readFileSync(path, "utf8").trim();
+      if (s) cachedFileSecret = s;
+    }
+  } catch {
+    // Best-effort: an unreadable/absent file leaves the API open, exactly as
+    // before this fallback existed.
+  }
+  return cachedFileSecret;
+}
+
 /**
- * The shared secret used by the api-auth middleware. When unset the API is
- * open (absent secret = continue).
+ * The shared secret used by the api-auth middleware. When unset (no env var and
+ * no persisted secret file) the API is open (absent secret = continue). The
+ * daemon and every local client resolve it identically through this function.
  */
 export function getSecret(): string | undefined {
-  return env("MEMWARDEN_SECRET");
+  const fromEnv = env("MEMWARDEN_SECRET");
+  if (fromEnv && fromEnv.trim()) return fromEnv.trim();
+  return persistedSecret();
 }
 
 /**
