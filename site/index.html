@@ -106,51 +106,52 @@
   <nav>
     <div class="brand">🧠 mem<span>warden</span></div>
     <div class="nav-links">
+      <a href="#setup">Setup</a>
       <a href="#trust">Verified Recall</a>
       <a href="#dejafix">Déjà Fix</a>
-      <a href="#moat">The moat</a>
-      <a href="#setup">Setup</a>
+      <a href="#ground">Ground truth</a>
       <a href="#cross">Cross-tool</a>
       <a href="https://github.com/saiyam1814/memwarden">GitHub</a>
     </div>
   </nav>
 
   <header>
-    <span class="pill">memory firewall · verified recall · tamper-evident · self-custodied</span>
-    <h1>The memory <span class="grad">firewall</span><br/>for AI coding agents</h1>
-    <p class="sub">Your agent's memory is lying to you. Prove yours isn't. memwarden is verified,
-      self-custodied memory: nothing reaches your agent's context without provenance that still
-      checks out. Across Claude Code, Codex, Cursor, Kiro, Antigravity, OpenCode and OpenClaw.</p>
+    <span class="pill">one command · every agent remembers · verified &amp; self-custodied</span>
+    <h1>Every agent remembers.<br/>One command: <span class="grad">memwarden&nbsp;up</span></h1>
+    <p class="sub">One command wires verified, self-custodied memory into Claude Code, Codex,
+      Cursor, Kiro, Antigravity, OpenCode and OpenClaw — no cloud, no config. And memwarden never
+      injects a memory whose source no longer checks out, so what your agent recalls is memory you
+      can actually trust.</p>
 
     <div class="cmd">
       <code>$ <span class="p">memwarden up</span></code>
       <button class="copy" onclick="navigator.clipboard&&navigator.clipboard.writeText('node dist/cli/bin.js up');this.textContent='copied'">copy</button>
     </div>
+    <p class="sub" style="margin-top:10px;font-size:15px;opacity:.8">Starts a self-healing daemon and wires every installed tool into it, in that tool's own config. That's the whole setup.</p>
     <div class="cta">
-      <a class="btn primary" href="#trust">See Verified Recall</a>
+      <a class="btn primary" href="#setup">What <code>memwarden&nbsp;up</code> does</a>
       <a class="btn ghost" href="https://github.com/saiyam1814/memwarden">View on GitHub</a>
     </div>
 
     <div class="stats">
-      <div class="stat"><b class="accent">4</b><small>trust states<br/>verified → stale</small></div>
+      <div class="stat"><b class="accent">1</b><small>command wires<br/>every tool</small></div>
+      <div class="stat"><b>7</b><small>agents share<br/>one brain</small></div>
       <div class="stat"><b>0</b><small>stale memories<br/>reach the model</small></div>
-      <div class="stat"><b>7</b><small>tools wired<br/>by one command</small></div>
       <div class="stat"><b>0</b><small>cloud · self-custodied<br/>lives at ~/.memwarden</small></div>
     </div>
   </header>
 
   <section id="why">
     <h2>The problem isn't forgetting. It's confidently wrong recall.</h2>
-    <p class="lead">A third of stored facts go stale within 90 days. ChatGPT memory silently
-      poisons answers; Mem0's own reporting concedes staleness is unsolved; OWASP added Memory
-      Poisoning (ASI06) to its 2026 Agentic Top 10. Yet every memory layer with traction — claude-mem,
-      Mem0, MemPalace, agentmemory — ships zero trust surface: no provenance, no verification, no
-      staleness detection. A memory that points at code you deleted is worse than none, because the
-      agent injects it with full confidence. memwarden flips the default: memory is untrusted until
-      its source still checks out.</p>
+    <p class="lead">A stored fact silently goes stale — it points at code you've since changed or
+      deleted — and the agent injects it with full confidence anyway. The industry has started
+      naming this class of risk: OWASP added Memory Poisoning (ASI06) to its 2026 Agentic Top 10.
+      Most memory still stores everything and trusts everything. A memory that points at code you
+      deleted is worse than none. memwarden flips the default: memory is untrusted until its source
+      still checks out.</p>
     <div class="grid">
       <div class="feat"><div class="ic">🩺</div><h3>Verified Recall — the anti-feature</h3><p>Memory is firewalled before it reaches a model. Stale memory is never injected. <code>memwarden doctor</code> runs the same check as a red/yellow/green audit against any existing store. Point it at your own memory and watch it light up yellow.</p></div>
-      <div class="feat"><div class="ic">🪂</div><h3>Rug-pull insurance</h3><p>Mem0 sunset OpenMemory; Cursor shipped Memories then pulled it. memwarden is self-custodied, tamper-evident, and portable: one <code>export</code> Brain Bundle survives the next vendor pivot. Zero cloud.</p></div>
+      <div class="feat"><div class="ic">🪂</div><h3>Self-custodied &amp; portable</h3><p>Your second brain shouldn't depend on a vendor's roadmap. memwarden is local-first, tamper-evident, and portable: one <code>export</code> produces a Brain Bundle you can move between machines or agents. Zero cloud — the data lives at <code>~/.memwarden</code> and nowhere else.</p></div>
       <div class="feat"><div class="ic">🧱</div><h3>The memory firewall</h3><p>Nothing enters your agent's context without provenance that still holds. The unique lever — possible only for a coding tool because the repo is ground truth — is tying memory validity to source-file content hashes.</p></div>
     </div>
   </section>
@@ -203,14 +204,14 @@ npm test 2>&1 | node dist/cli/bin.js <span class="a">dejafix lookup</span></pre>
       auto-inject; sourced-but-unverified ones stay available on demand, never silently pushed.</p>
   </section>
 
-  <section id="moat">
-    <h2>Why file hashes are the moat</h2>
-    <p class="lead">Other tools have no way to check whether a memory is still true, so they don't
-      try. A coding agent does: the repository on disk is the source of truth. When memwarden
-      captures a code-backed memory it records a SHA-256 content hash for each referenced file
-      (best-effort, files up to ~2&nbsp;MB). On recall it re-hashes the live file and compares. If
-      the file moved or vanished, the memory is provably stale — not by heuristic, by hash. Nobody
-      else ties memory validity to source-file hashes.</p>
+  <section id="ground">
+    <h2>Source-file hashes: the ground truth</h2>
+    <p class="lead">A coding agent has something general-purpose memory doesn't: the repository on
+      disk is the source of truth. When memwarden captures a code-backed memory it records a
+      SHA-256 content hash for each referenced file (best-effort, files up to ~2&nbsp;MB). On recall
+      it re-hashes the live file and compares. If the file moved or vanished, the memory is provably
+      stale — not by heuristic, by hash. That's what lets the repo tell us, on every recall, whether
+      a memory is still earned.</p>
     <div class="grid">
       <div class="feat"><div class="ic">🔗</div><h3>Tamper-evident, honestly</h3><p>Every write lands in an append-only SHA-256 hash-chained oplog. <kbd>memory_verify</kbd> recomputes the chain, so an edit or reorder of any past entry breaks it. <b>Tamper-evident, not tamper-proof:</b> there is no signing, and the chain does not detect tail-truncation (dropping the newest entries).</p></div>
       <div class="feat"><div class="ic">🔒</div><h3>Self-custodied</h3><p>The brain lives at <code>~/.memwarden</code> and nowhere else. On-device embeddings, two runtime dependencies, no cloud, no vendor in the loop.</p></div>
@@ -222,7 +223,17 @@ npm test 2>&1 | node dist/cli/bin.js <span class="a">dejafix lookup</span></pre>
     <h2>Setup is one command</h2>
     <p class="lead"><kbd>memwarden up</kbd> starts a self-healing daemon (one global brain at
       <code>~/.memwarden</code>) and wires every installed tool into it, in that tool's own
-      config schema, without clobbering servers you already have.</p>
+      config schema, without clobbering servers you already have. No keys to paste, no cloud,
+      no config files to hand-edit.</p>
+<pre>$ <span class="a">memwarden up</span>
+  secret    <span class="g">✓</span> generated (~/.memwarden/secret)
+  daemon    <span class="g">✓</span> http://localhost:3111   brain: ~/.memwarden
+  <span class="g">✓</span> Claude Code   ~/.claude/settings.json   hooks — auto inject + auto capture
+  <span class="g">✓</span> Codex         ~/.codex/config.toml      MCP server + /recall
+  <span class="g">✓</span> Cursor        ~/.cursor/mcp.json        MCP server + /recall
+  <span class="g">✓</span> OpenCode      ~/.config/opencode/...     MCP server + /recall
+
+  Done. Every agent on this machine now shares one verified brain.</pre>
     <div class="tools">
       <div class="tool"><b>Claude Code</b><small class="auto">hooks · fully automatic</small></div>
       <div class="tool"><b>Codex</b><small class="inst">instruction + /recall</small></div>

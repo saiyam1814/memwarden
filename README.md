@@ -17,17 +17,16 @@ injected into your agent's context without provenance that still checks out.
 
 ---
 
-## The problem nobody else is solving
+## The problem: is the memory still true?
 
-Every memory layer ships the same feature: *remember more.* None of them ask the harder
-question — **is the memory still true?**
+Most memory layers are built to *remember more.* memwarden is built around a harder question:
+**is the memory still true?**
 
-The documented pain of 2026 is not forgetting. It's **confidently wrong recall**: a third of
-stored facts go stale within 90 days, ChatGPT memory silently poisons answers, and Mem0's own
-reporting concedes that staleness is unsolved. OWASP added Memory Poisoning (ASI06) to its 2026
-Agentic Top 10. Meanwhile the projects with traction — claude-mem, Mem0, MemPalace, agentmemory —
-ship **zero trust surface**: no provenance, no verification, no staleness detection, no
-tamper-evidence. They store everything and trust everything.
+The failure mode that hurts isn't forgetting — it's **confidently wrong recall**. A stored fact
+silently goes stale: it points at code you've since changed or deleted, and the agent injects it
+with full confidence anyway. The industry has started naming this class of risk — OWASP added
+Memory Poisoning (ASI06) to its 2026 Agentic Top 10 — yet memory still tends to store everything
+and trust everything.
 
 A memory that points at code you deleted, or that nothing backs up, is worse than no memory at
 all — because the agent injects it with full confidence.
@@ -43,25 +42,25 @@ Run `memwarden doctor` against any memory store and get a red/yellow/green audit
 verified, what's merely sourced, what's stale, and what has no provenance at all. It's a
 shareable artifact you can point at your own existing memory and watch it light up yellow.
 
-**2. Rug-pull insurance.** Mem0 sunset OpenMemory. Cursor shipped Memories, then pulled it.
-Your second brain shouldn't depend on a vendor's roadmap. memwarden is self-custodied,
-tamper-evident, and portable: one `export` produces a Brain Bundle that survives the next pivot.
-Zero cloud. The data lives at `~/.memwarden` and nowhere else.
+**2. Self-custodied and portable.** Your second brain shouldn't depend on a vendor's roadmap.
+memwarden is local-first, tamper-evident, and portable: one `export` produces a Brain Bundle you
+can move between machines or agents. Zero cloud. The data lives at `~/.memwarden` and nowhere else.
 
 **3. The memory firewall.** Nothing enters your agent's context without provenance that still
 holds. The unique lever — possible only for a coding-agent tool because the repo is ground
 truth — is tying memory validity to **source-file content hashes**. The repo tells us, on every
 recall, whether a memory is still earned.
 
-## Why file hashes are the moat
+## Source-file hashes: the ground truth
 
-Other tools have no way to check whether a memory is still true, so they don't try. A coding
-agent does: the repository on disk is the source of truth. When memwarden captures a code-backed
-memory, it records a SHA-256 content hash for each referenced file (best-effort, files up to
-~2 MB). On recall it re-hashes the live file and compares. If the file is gone or its content
-moved, the memory is provably stale — not by heuristic, by hash.
+A coding agent has something general-purpose memory doesn't: the repository on disk is the source
+of truth. When memwarden captures a code-backed memory, it records a SHA-256 content hash for
+each referenced file (best-effort, files up to ~2 MB). On recall it re-hashes the live file and
+compares. If the file is gone or its content moved, the memory is provably stale — not by
+heuristic, by hash.
 
-Nobody else ties memory validity to source-file hashes. That's the moat.
+Tying memory validity to source-file content hashes is what lets the repo tell us, on every
+recall, whether a memory is still earned.
 
 ## Verified Recall — what the four states mean
 
@@ -260,19 +259,19 @@ memories, 14 **paraphrased** queries (worded differently than the answers). Repr
 > (quantized == full-precision) and semantic recall beats lexical. Larger, noisier corpora
 > land below 100%, but the relationship holds.
 
-## What makes it different
+## What it does
 
-| | memwarden | typical agent memory |
-| --- | --- | --- |
-| Memory firewall (stale never injected) | ✅ Verified Recall (`safe_only`) | ✗ |
-| Trust audit (stale / unsourced / conflicts) | ✅ `memwarden doctor` | ✗ |
-| Validity tied to source-file hashes | ✅ per-file SHA-256 | ✗ |
-| Tamper-evident store | ✅ hash-chained oplog + `memory_verify` | ✗ |
-| One-command setup across every tool | ✅ `memwarden up` (7 tools) | manual, per tool |
-| Self-healing daemon (use + crash + reboot) | ✅ | ✗ |
-| Self-custodied, portable | ✅ `export` / `import` Brain Bundle | often vendor-locked |
-| Compressed storage | ✅ TurboQuant, ~6–11× | usually raw float32 |
-| Runtime dependencies | **2** (libSQL, zod); embeddings + MCP add nothing native | heavier |
+| Capability | How |
+| --- | --- |
+| Memory firewall — stale memory never injected | Verified Recall (`safe_only`) |
+| Trust audit — stale / unsourced / conflicts | `memwarden doctor` |
+| Validity tied to source-file content | per-file SHA-256, re-checked on recall |
+| Tamper-evident store | hash-chained oplog + `memory_verify` |
+| One-command setup across every tool | `memwarden up` (7 tools) |
+| Self-healing daemon (use + crash + reboot) | LaunchAgent / systemd + revive-on-use |
+| Self-custodied, portable | `export` / `import` Brain Bundle, zero cloud |
+| Compressed storage | TurboQuant, ~6–11× smaller |
+| Lean footprint | 2 runtime deps (libSQL, zod); embeddings + MCP add nothing native |
 
 ## MCP tools and the `/recall` command
 
