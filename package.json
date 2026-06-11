@@ -1,8 +1,7 @@
 {
   "name": "memwarden",
   "version": "0.0.1",
-  "private": true,
-  "description": "One brain. Every agent. Yours. Verified, self-custodied memory for AI coding agents.",
+  "description": "The memory firewall for AI coding agents. Verified, self-custodied, tamper-evident — one brain across every tool.",
   "type": "module",
   "engines": {
     "node": ">=20.0.0"
@@ -11,9 +10,33 @@
     "memwarden": "dist/cli/bin.js",
     "memwarden-mcp": "dist/mcp/bin.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/saiyam1814/memwarden.git"
+  },
+  "homepage": "https://github.com/saiyam1814/memwarden#readme",
+  "bugs": {
+    "url": "https://github.com/saiyam1814/memwarden/issues"
+  },
+  "keywords": [
+    "ai",
+    "memory",
+    "agents",
+    "mcp",
+    "claude-code",
+    "verified-recall",
+    "memory-firewall",
+    "local-first"
+  ],
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc",
+    "prepack": "npm run build",
     "benchmark": "tsx benchmark/recall.ts",
     "demo:trust": "tsx demo/trust.ts",
     "test": "vitest run",
@@ -25,10 +48,8 @@
     "@libsql/client": "^0.15.0",
     "zod": "^4.0.0"
   },
-  "optionalDependencies": {
-    "@huggingface/transformers": "^3.8.1"
-  },
   "devDependencies": {
+    "@huggingface/transformers": "^3.8.1",
     "@types/node": "^25.9.1",
     "tsx": "^4.19.0",
     "typescript": "^6.0.3",

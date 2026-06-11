@@ -137,13 +137,37 @@ It is **tamper-evident, not tamper-proof.** There is no signing. The chain detec
 reorders, but it does **not** detect tail-truncation — dropping the newest entries leaves a
 shorter, still-valid chain. We say "tamper-evident" and mean exactly that.
 
+**Deletion comes with a receipt.** `memwarden forget <id>` removes a memory from the store and
+every index, and prints a receipt citing the oplog entries that recorded the original write and
+the deletion, plus whole-chain verification — proof the delete actually happened, without
+re-disclosing the deleted content. An unknown id reports failure honestly; there is no
+`{deleted: 0, success: true}` theater here.
+
+## Start here: audit the memory you already have
+
+You don't have to install anything or trust any claim — point the auditor at the memory store
+you already use and the repo it talks about:
+
+```bash
+npx memwarden audit ~/.claude-mem/claude-mem.db --root ~/code/my-repo   # claude-mem (any SQLite store)
+npx memwarden audit CLAUDE.md                                           # a CLAUDE.md / AGENTS.md / rules pile
+npx memwarden audit mem0-export.json --root ~/code/my-repo              # a Mem0-style JSON export
+```
+
+No daemon, no setup, read-only (SQLite stores are copied before opening). The report classifies
+every memory: **MISSING** (red — references files that no longer exist), **DRIFTED** (yellow —
+files changed after the memory was recorded, when the store has timestamps), **PRESENT** (files
+exist — which is the strongest claim a store without content hashes can make), **UNANCHORED**
+(no file evidence at all). Every red and yellow memory is one your agent would have injected
+with full confidence.
+
 ## Setup is one command
 
 ```bash
-npm install
-npm run build
-node dist/cli/bin.js up
+npx memwarden up
 ```
+
+(From a checkout: `npm install && npm run build && node dist/cli/bin.js up`.)
 
 `memwarden up` is the whole thing. It:
 
@@ -166,6 +190,13 @@ node dist/cli/bin.js up
 | **OpenClaw** | `~/.openclaw/openclaw.json` | standing instruction + `/recall` |
 
 Restart each tool once so it loads the new server. `memwarden down` removes the service.
+
+**You stay in charge of the automatic paths.** `MEMWARDEN_INJECT=off` starts sessions with a
+clean slate (no auto-injection anywhere — explicit `/recall` and the MCP tools still work);
+`MEMWARDEN_CAPTURE=off` stops auto-capture. `memwarden exclude <path>` firewalls a project
+completely — no capture from it, no injection into it, across hooks and proxy alike, effective
+immediately (the list is re-read per request, so there is no "excluded but still summarized"
+failure mode). `memwarden include <path>` undoes it; `memwarden exclude --list` shows the list.
 
 ## How memory crosses your tools
 
@@ -305,6 +336,11 @@ MEMWARDEN_UPSTREAM_URL=http://localhost:11434/v1 node dist/index.js
 # then point your tool's OpenAI base URL at:  http://localhost:3113/v1
 ```
 
+When the install has a secret (`memwarden up` generates one), the proxy requires it from
+clients too: set your tool's API key to the secret (`cat ~/.memwarden/secret`). The proxy
+strips it before forwarding, so it never reaches the upstream. Without this, any local
+process could spend your upstream key and poison capture.
+
 ## Portability — your memory survives the next pivot
 
 ```bash
@@ -327,12 +363,13 @@ src/embedding/   on-device embedding provider (transformers.js, optional)
 src/mcp/         dependency-free MCP server (stdio JSON-RPC) + the recall prompt
 src/proxy/       OpenAI-compatible memory gateway (for model endpoints you control)
 src/daemon/      ensure (self-heal on use) + service (self-heal on crash/reboot)
-src/cli/         up / down / connect / doctor / dejafix / hooks / export / import
+src/cli/         up / down / connect / doctor / audit / forget / exclude / dejafix / hooks / export / import
 src/cli/tools.ts per-tool adapters: Claude Code, Codex, Cursor, Kiro, Antigravity, OpenCode, OpenClaw
 src/bundle/      portable Brain Bundle export & import
 benchmark/       reproducible recall benchmark
-test/            267 tests: kernel, store parity, oplog, quantizer, MCP, proxy, tool-wiring,
-                 Verified Recall, Déjà Fix, conflict audit, HTTP security (auth/host/content-type),
+test/            290 tests: kernel, store parity, oplog, quantizer, MCP, proxy, tool-wiring,
+                 Verified Recall, Déjà Fix, foreign-store audit, delete receipts, injection
+                 controls, conflict audit, HTTP security (auth/host/content-type),
                  path scoping, self-heal, cross-tool reliability harness, e2e
 ```
 
@@ -345,7 +382,9 @@ test/            267 tests: kernel, store parity, oplog, quantizer, MCP, proxy, 
 | `MEMWARDEN_QUANT_VECTOR` | follows embeddings | force TurboQuant on/off |
 | `MEMWARDEN_QUANT_BITS` | `4` | `2` or `4` bits per dimension |
 | `MEMWARDEN_FORGET_TTL_DAYS` | `30` | retention window for the forget sweep |
-| `MEMWARDEN_SECRET` | unset | bearer token for the REST API |
+| `MEMWARDEN_SECRET` | unset | bearer token for the REST API and the proxy (clients send it as their API key) |
+| `MEMWARDEN_INJECT` | on | `off` disables ALL auto-injection (SessionStart, Déjà Fix, proxy); `/recall` and MCP still work |
+| `MEMWARDEN_CAPTURE` | on | `off` disables ALL auto-capture (PostToolUse hook, proxy tee) |
 | `MEMWARDEN_UPSTREAM_URL` | unset | upstream OpenAI-compatible base URL; enables the proxy |
 | `MEMWARDEN_UPSTREAM_KEY` | unset | API key forwarded to the upstream (omit for local models) |
 | `MEMWARDEN_PROXY_PORT` | `3113` | port the memory proxy listens on |

@@ -55,11 +55,15 @@ afterEach(async () => {
 interface Harness {
   proxyPort: number;
   upstreamSystems: () => string[];
+  upstreamAuth: () => string | undefined;
   observed: Array<{ prompt: string; output: string }>;
 }
 
-async function harness(opts: { stream?: boolean } = {}): Promise<Harness> {
+async function harness(
+  opts: { stream?: boolean; secret?: string } = {},
+): Promise<Harness> {
   let upstreamSystems: string[] = [];
+  let upstreamAuth: string | undefined;
   const observed: Array<{ prompt: string; output: string }> = [];
 
   const daemon = await listen(async (req, res) => {
@@ -88,6 +92,7 @@ async function harness(opts: { stream?: boolean } = {}): Promise<Harness> {
 
   const upstream = await listen(async (req, res) => {
     const body = await readBody(req);
+    upstreamAuth = req.headers.authorization;
     const payload = JSON.parse(body) as {
       messages?: Array<{ role: string; content: string }>;
     };
@@ -117,18 +122,31 @@ async function harness(opts: { stream?: boolean } = {}): Promise<Harness> {
     daemonUrl: `http://127.0.0.1:${daemon.port}`,
     project: "/repo",
     cwd: "/repo",
+    ...(opts.secret ? { secret: opts.secret } : {}),
   });
   await once(proxy.server, "listening");
   cleanups.push(proxy.close);
   const proxyPort = (proxy.server.address() as AddressInfo).port;
 
-  return { proxyPort, upstreamSystems: () => upstreamSystems, observed };
+  return {
+    proxyPort,
+    upstreamSystems: () => upstreamSystems,
+    upstreamAuth: () => upstreamAuth,
+    observed,
+  };
 }
 
-async function chat(port: number, stream: boolean): Promise<string> {
+async function chat(
+  port: number,
+  stream: boolean,
+  auth?: string,
+): Promise<string> {
   const res = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      ...(auth ? { authorization: auth } : {}),
+    },
     body: JSON.stringify({
       model: "gpt-test",
       stream,
@@ -186,5 +204,74 @@ describe("memory proxy", () => {
     expect(systems.length).toBe(2);
     expect(systems[0]).toContain("You are a helpful assistant.");
     expect(systems[1]).toContain("IAM bearer tokens");
+  });
+});
+
+describe("memory proxy client auth", () => {
+  const SECRET = "test-proxy-secret";
+
+  async function status(
+    port: number,
+    path: string,
+    init: RequestInit = {},
+  ): Promise<number> {
+    const res = await fetch(`http://127.0.0.1:${port}${path}`, init);
+    await res.text();
+    return res.status;
+  }
+
+  it("rejects a request without the secret and never touches the upstream", async () => {
+    const h = await harness({ secret: SECRET });
+    const code = await status(h.proxyPort, "/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }),
+    });
+    expect(code).toBe(401);
+    // neither forwarded nor captured — the key was not spent, memory not poisoned
+    expect(h.upstreamSystems().length).toBe(0);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(h.observed.length).toBe(0);
+  });
+
+  it("rejects a wrong secret", async () => {
+    const h = await harness({ secret: SECRET });
+    const code = await status(h.proxyPort, "/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer wrong",
+      },
+      body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }),
+    });
+    expect(code).toBe(401);
+  });
+
+  it("guards passthrough paths too, not just chat", async () => {
+    const h = await harness({ secret: SECRET });
+    expect(await status(h.proxyPort, "/v1/models")).toBe(401);
+  });
+
+  it("accepts the secret as the tool's API key and strips it before the upstream", async () => {
+    const h = await harness({ secret: SECRET });
+    const reply = await chat(h.proxyPort, false, `Bearer ${SECRET}`);
+    expect(reply).toContain("Use IAM tokens.");
+    expect(h.upstreamSystems().some((s) => s.includes("IAM bearer tokens"))).toBe(true);
+    // the memwarden secret must never leak to the upstream; with no
+    // upstreamKey configured, no Authorization goes out at all
+    expect(h.upstreamAuth()).toBeUndefined();
+    const captured = await waitFor(() => h.observed.length > 0);
+    expect(captured).toBe(true);
+  });
+
+  it("leaves /livez open — health checks need no key", async () => {
+    const h = await harness({ secret: SECRET });
+    expect(await status(h.proxyPort, "/livez")).toBe(200);
+  });
+
+  it("stays open when no secret is configured (local-model default)", async () => {
+    const h = await harness();
+    const reply = await chat(h.proxyPort, false);
+    expect(reply).toContain("Use IAM tokens.");
   });
 });

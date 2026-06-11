@@ -5,6 +5,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { canonicalizePath } from "./paths.js";
 
 function env(name: string): string | undefined {
   const v = process.env[name];
@@ -55,6 +56,68 @@ export function isAutoCompressEnabled(): boolean {
 /** Memory slots are an optional context-injection feature, off by default. */
 export function isSlotsEnabled(): boolean {
   return flag("MEMWARDEN_SLOTS");
+}
+
+// --- injection / capture switches -----------------------------------
+//
+// Users must be able to turn the automatic paths off — per environment via
+// MEMWARDEN_INJECT / MEMWARDEN_CAPTURE, and per project via the excluded
+// list. The switches gate the AUTOMATIC paths only (hooks, proxy); explicit
+// asks (/recall, the MCP tools, the CLI) always work — turning off
+// auto-inject must not lobotomize deliberate recall.
+
+function offFlag(name: string): boolean {
+  const v = (env(name) ?? "").trim().toLowerCase();
+  return v === "off" || v === "false" || v === "0";
+}
+
+/** Auto-injection (SessionStart hook, Déjà Fix hook, proxy). Default on. */
+export function isInjectEnabled(): boolean {
+  return !offFlag("MEMWARDEN_INJECT");
+}
+
+/** Auto-capture (PostToolUse hook, proxy tee). Default on. */
+export function isCaptureEnabled(): boolean {
+  return !offFlag("MEMWARDEN_CAPTURE");
+}
+
+/** Where the brain lives. */
+export function getDataDir(): string {
+  return env("MEMWARDEN_DATA_DIR") ?? join(homedir(), ".memwarden");
+}
+
+/**
+ * Per-project exclusion: `<dataDir>/excluded` holds one absolute path per
+ * line (written by `memwarden exclude`). A cwd inside any excluded path is
+ * excluded — capture AND injection, every automatic surface, so an excluded
+ * project never reaches the brain and the brain never reaches it. Read on
+ * every call (the file is tiny and the daemon is long-lived; a stale cache
+ * here would mean "exclude" takes effect only on restart — the classic
+ * excluded-but-not-really bug).
+ */
+export function isProjectExcluded(cwd: string | undefined): boolean {
+  if (!cwd) return false;
+  let lines: string[];
+  try {
+    const path = join(getDataDir(), "excluded");
+    if (!existsSync(path)) return false;
+    lines = readFileSync(path, "utf8").split("\n");
+  } catch {
+    return false;
+  }
+  // Canonicalize both sides so /tmp vs /private/tmp (and trailing-slash)
+  // spellings of the same directory still match — the same rule recall
+  // scoping uses (see paths.ts).
+  const target = canonicalizePath(cwd);
+  if (!target) return false;
+  for (const line of lines) {
+    const raw = line.trim();
+    if (!raw || raw.startsWith("#")) continue;
+    const ex = canonicalizePath(raw);
+    if (!ex) continue;
+    if (target === ex || target.startsWith(ex.endsWith("/") ? ex : ex + "/")) return true;
+  }
+  return false;
 }
 
 // The CLI (`memwarden up`) persists the generated secret to <dataDir>/secret.

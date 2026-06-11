@@ -273,8 +273,10 @@ npm test 2>&1 | node dist/cli/bin.js <span class="a">dejafix lookup</span></pre>
         <div class="n">Door 3 · mechanical</div>
         <h3>The proxy</h3>
         <p>Point a tool's model base URL at the memwarden proxy on <code>:3113</code> and every
-          turn is recalled and captured with no agent cooperation. Works only where you control
-          the endpoint: OpenCode, OpenClaw, Ollama, LM Studio, custom OpenAI base URLs.</p>
+          turn is recalled and captured with no agent cooperation. On a secured install the
+          tool's API key is your memwarden secret — the proxy refuses other local processes, so
+          nothing else can spend your upstream key or poison capture. Works only where you
+          control the endpoint: OpenCode, OpenClaw, Ollama, LM Studio, custom OpenAI base URLs.</p>
         <span class="tag mech">guaranteed</span>
       </div>
     </div>
@@ -307,7 +309,7 @@ npm test 2>&1 | node dist/cli/bin.js <span class="a">dejafix lookup</span></pre>
       <tr><td>Keyword search (lexical baseline)</td><td>71%</td><td>79%</td></tr>
     </table>
     <p class="note">100% is on a small, clean corpus. The point: compression is free (quantized
-      == full-precision) and semantic recall beats lexical. 267 tests, including a Verified Recall
+      == full-precision) and semantic recall beats lexical. 290 tests, including a Verified Recall
       suite, the Déjà Fix engine, HTTP security (auth / host firewall / content-type), and a
       cross-tool reliability harness that proves memory captured in one tool is recalled in
       another.</p>

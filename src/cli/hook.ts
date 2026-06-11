@@ -14,6 +14,12 @@
 // fetch and the clock is injected, so they unit-test without a network or a
 // live agent.
 
+import {
+  isCaptureEnabled,
+  isInjectEnabled,
+  isProjectExcluded,
+} from "../functions/config.js";
+
 export interface HookDeps {
   baseUrl: string;
   secret?: string;
@@ -55,6 +61,9 @@ export async function handleSessionStart(
 ): Promise<string> {
   const evt = parse(raw);
   const cwd = evt.cwd ?? process.cwd();
+  // User switches: MEMWARDEN_INJECT=off (clean-slate sessions) and the
+  // per-project exclude list both silence auto-injection entirely.
+  if (!isInjectEnabled() || isProjectExcluded(cwd)) return "";
   const doFetch = deps.fetchFn ?? fetch;
   try {
     const res = await doFetch(`${deps.baseUrl}/memwarden/search`, {
@@ -102,8 +111,15 @@ export async function handleCapture(
 ): Promise<string> {
   const evt = parse(raw);
   const cwd = evt.cwd ?? process.cwd();
+  // An excluded project never reaches the brain (no capture) AND the brain
+  // never reaches it (no Déjà Fix injection) — the exclude gates every
+  // automatic surface, not just some of them.
+  if (isProjectExcluded(cwd)) return "";
   const doFetch = deps.fetchFn ?? fetch;
   const now = deps.now ? deps.now() : new Date().toISOString();
+  if (!isCaptureEnabled()) {
+    return isInjectEnabled() ? dejaFixInjection(evt, cwd, deps, doFetch) : "";
+  }
   try {
     await doFetch(`${deps.baseUrl}/memwarden/observe`, {
       method: "POST",
@@ -125,7 +141,7 @@ export async function handleCapture(
     // swallow — capture is best-effort
   }
 
-  return dejaFixInjection(evt, cwd, deps, doFetch);
+  return isInjectEnabled() ? dejaFixInjection(evt, cwd, deps, doFetch) : "";
 }
 
 // Cheap client-side gate: only ask the daemon for a fix when the output plausibly

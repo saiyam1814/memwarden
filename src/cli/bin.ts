@@ -18,7 +18,7 @@ import {
 } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import {
   writeMcpConfig,
@@ -221,6 +221,7 @@ async function doctor(rest: string[]): Promise<void> {
       subject: string;
       reason: string;
     }>;
+    footprint?: { bytesOnDisk: number; dataDir: string; oplogEntries: number };
   };
   console.log(
     `\nmemwarden doctor — ${root}${allProjects ? " (all projects)" : " (this project)"}\n`,
@@ -237,7 +238,209 @@ async function doctor(rest: string[]): Promise<void> {
       `  [conflict] ${c.newerTitle} may contradict ${c.olderTitle} — ${c.reason}`,
     );
   }
+  if (r.footprint) {
+    const mb = r.footprint.bytesOnDisk / (1024 * 1024);
+    const size = mb >= 1 ? `${mb.toFixed(1)} MB` : `${Math.ceil(r.footprint.bytesOnDisk / 1024)} KB`;
+    console.log(
+      `\n  FOOTPRINT:       ${size} on disk at ${r.footprint.dataDir} · ${r.footprint.oplogEntries} oplog entries`,
+    );
+  }
   console.log(`\n  ${r.total} memories audited.\n`);
+}
+
+// memwarden forget <obsId> — delete one memory and print the tamper-evident
+// receipt: the oplog entries proving the write and the delete, chain status,
+// and a hash over the receipt itself. An id that doesn't exist reports
+// exactly that — never a fake success.
+async function forget(rest: string[]): Promise<void> {
+  const obsId = rest.find((a) => !a.startsWith("--"));
+  if (!obsId) throw new Error("usage: memwarden forget <observationId> [--json]");
+  const res = await fetch(`${DAEMON_URL}/memwarden/forget`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ observation_id: obsId }),
+  });
+  if (!res.ok) throw new Error(`forget failed: HTTP ${res.status}`);
+  const r = (await res.json()) as {
+    deleted: boolean;
+    reason?: string;
+    receipt?: {
+      obsId: string;
+      title: string;
+      deletedAt: string;
+      deleteEntry: { id: number; ts: string; hash: string } | null;
+      createEntry: { id: number; ts: string; hash: string } | null;
+      chainIntact: boolean;
+      receiptHash: string;
+    };
+  };
+  if (rest.includes("--json")) {
+    console.log(JSON.stringify(r, null, 2));
+    return;
+  }
+  if (!r.deleted) {
+    console.log(`\n  Not deleted: ${r.reason ?? "unknown reason"}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  const rec = r.receipt!;
+  console.log(`\n  Deleted "${rec.title}" (${rec.obsId})\n`);
+  console.log(`  delete receipt`);
+  if (rec.createEntry) {
+    console.log(`    written   oplog #${rec.createEntry.id} at ${rec.createEntry.ts}`);
+    console.log(`              hash ${rec.createEntry.hash.slice(0, 16)}…`);
+  }
+  if (rec.deleteEntry) {
+    console.log(`    deleted   oplog #${rec.deleteEntry.id} at ${rec.deleteEntry.ts}`);
+    console.log(`              hash ${rec.deleteEntry.hash.slice(0, 16)}…`);
+  }
+  console.log(`    chain     ${rec.chainIntact ? "intact (verified end to end)" : "BROKEN — run memwarden doctor"}`);
+  console.log(`    receipt   ${rec.receiptHash}`);
+  console.log(
+    `\n  The deletion is recorded in the hash-chained oplog: removing or editing\n` +
+      `  the record would break the chain. Keep --json output as a shareable proof\n` +
+      `  the deletion happened (it contains hashes, never the deleted content).\n`,
+  );
+}
+
+// memwarden exclude/include — per-project firewall holes. An excluded
+// project is invisible to every automatic surface: no capture, no
+// injection, hooks and proxy alike. Takes effect immediately (the list is
+// re-read per request), no daemon restart.
+function excludedListPath(): string {
+  const dataDir = process.env.MEMWARDEN_DATA_DIR ?? join(homedir(), ".memwarden");
+  return join(dataDir, "excluded");
+}
+
+function readExcluded(): string[] {
+  const path = excludedListPath();
+  if (!existsSync(path)) return [];
+  return readFileSync(path, "utf8")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith("#"));
+}
+
+function writeExcluded(lines: string[]): void {
+  const path = excludedListPath();
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, lines.join("\n") + (lines.length ? "\n" : ""), "utf8");
+}
+
+function exclude(rest: string[]): void {
+  if (rest.includes("--list")) {
+    const lines = readExcluded();
+    if (lines.length === 0) {
+      console.log("[memwarden] no excluded projects.");
+      return;
+    }
+    console.log("[memwarden] excluded projects (no capture, no injection):");
+    for (const l of lines) console.log(`  ${l}`);
+    return;
+  }
+  const target = resolve(rest.find((a) => !a.startsWith("--")) ?? process.cwd());
+  const lines = readExcluded();
+  if (lines.includes(target)) {
+    console.log(`[memwarden] already excluded: ${target}`);
+    return;
+  }
+  writeExcluded([...lines, target]);
+  console.log(
+    `[memwarden] excluded ${target} — memwarden will not capture from or inject into this project. Undo: memwarden include ${target}`,
+  );
+}
+
+function include(rest: string[]): void {
+  const target = resolve(rest.find((a) => !a.startsWith("--")) ?? process.cwd());
+  const lines = readExcluded();
+  const next = lines.filter((l) => resolve(l) !== target);
+  if (next.length === lines.length) {
+    console.log(`[memwarden] not excluded: ${target}`);
+    return;
+  }
+  writeExcluded(next);
+  console.log(`[memwarden] re-included ${target}.`);
+}
+
+// memwarden audit <store> — run the memory doctor against a FOREIGN store
+// (claude-mem/any SQLite, CLAUDE.md piles, Mem0-style JSON exports) without a
+// daemon or any setup. `npx memwarden audit ~/.claude-mem/claude-mem.db` is
+// the whole onboarding.
+async function audit(rest: string[]): Promise<void> {
+  const { auditStore } = await import("../functions/audit.js");
+  const positional = rest.filter(
+    (a, i) => !a.startsWith("--") && rest[i - 1] !== "--root",
+  );
+  const storePath = positional[0];
+  if (!storePath) {
+    throw new Error(
+      "usage: memwarden audit <store.db|store.json|CLAUDE.md|dir> [--root repo] [--json]",
+    );
+  }
+  const rootIdx = rest.indexOf("--root");
+  const root = rootIdx >= 0 && rest[rootIdx + 1] ? (rest[rootIdx + 1] as string) : process.cwd();
+  const report = await auditStore(storePath, root);
+
+  if (rest.includes("--json")) {
+    console.log(JSON.stringify(report, null, 2));
+    return;
+  }
+
+  const tty = process.stdout.isTTY === true;
+  const paint = (code: string, s: string): string => (tty ? `\x1b[${code}m${s}\x1b[0m` : s);
+  const red = (s: string): string => paint("31", s);
+  const yellow = (s: string): string => paint("33", s);
+  const green = (s: string): string => paint("32", s);
+  const gray = (s: string): string => paint("90", s);
+  const bold = (s: string): string => paint("1", s);
+
+  const pct = (n: number): string =>
+    report.total > 0 ? `${Math.round((n / report.total) * 100)}%` : "0%";
+  const row = (label: string, n: number, note: string): string =>
+    `  ${label.padEnd(12)} ${String(n).padStart(5)}  ${pct(n).padStart(4)}   ${note}`;
+
+  console.log(`\n${bold("memwarden audit")} — ${report.store} (${report.kind})`);
+  console.log(`${" ".repeat(18)}vs ${report.root}\n`);
+  console.log(
+    `  ${report.total} memories scanned · ${report.anchored} anchored to ${report.uniqueFiles} file(s)\n`,
+  );
+  console.log(row(red("MISSING"), report.missing.length, "reference files that no longer exist"));
+  console.log(
+    row(
+      yellow("DRIFTED"),
+      report.drifted.length,
+      report.driftCheckable
+        ? "files changed after the memory was recorded"
+        : gray("not checkable — this store records no timestamps"),
+    ),
+  );
+  console.log(row(green("PRESENT"), report.present, "files exist — existence is this store's best case"));
+  console.log(row(gray("UNANCHORED"), report.unanchored, "no file evidence at all"));
+  console.log("");
+  for (const f of report.missing.slice(0, 5)) {
+    console.log(`  ${red("[missing]")} ${f.title} — ${f.detail}`);
+  }
+  for (const f of report.drifted.slice(0, 5)) {
+    console.log(`  ${yellow("[drifted]")} ${f.title} — ${f.detail}`);
+  }
+  if (report.missing.length > 0 || report.drifted.length > 0) console.log("");
+
+  const badCount = report.missing.length + report.drifted.length;
+  if (report.anchored > 0) {
+    const badPct = Math.round((badCount / report.anchored) * 100);
+    console.log(
+      `  ${bold(`${badCount} of ${report.anchored}`)} anchored memories (${badPct}%) are red or yellow: under\n` +
+        `  memwarden's Verified Recall they would be classified STALE and never\n` +
+        `  injected. PRESENT still isn't "verified" — that requires capture-time\n` +
+        `  content hashes, which this store does not record.\n`,
+    );
+  } else {
+    console.log(
+      `  Nothing in this store references a file at all — none of it can be\n` +
+        `  verified against the code. memwarden records file provenance with\n` +
+        `  content hashes at capture, so recall can prove what is still true.\n`,
+    );
+  }
 }
 
 // memwarden dejafix lookup|record — the cross-agent "don't re-solve a fixed
@@ -371,7 +574,12 @@ async function up(rest: string[]): Promise<void> {
       );
     } else {
       const note =
-        svc.kind === "unsupported" ? "background" : `service skipped: ${svc.message}`;
+        svc.kind === "unsupported"
+          ? process.platform === "win32"
+            ? "Windows service supervision is not supported yet — the daemon runs " +
+              "for this login session and self-heals on next use; rerun `memwarden up` after a reboot"
+            : "background"
+          : `service skipped: ${svc.message}`;
       console.log(`  daemon    ✓ ${daemonUrl}  brain: ${dataDir} (${note})`);
     }
   }
@@ -453,6 +661,14 @@ async function main(): Promise<void> {
       return hook(rest);
     case "doctor":
       return doctor(rest);
+    case "audit":
+      return audit(rest);
+    case "exclude":
+      return exclude(rest);
+    case "include":
+      return include(rest);
+    case "forget":
+      return forget(rest);
     case "dejafix":
       return dejafix(rest);
     case "export":
@@ -466,6 +682,9 @@ async function main(): Promise<void> {
           "  memwarden down                                  # stop + remove the daemon service\n" +
           "  memwarden connect [claude-code|cursor|cline|windsurf] [--with-hooks] [--url URL] [--secret S]\n" +
           "  memwarden doctor [path] [--all-projects]        # audit this project (or the whole brain)\n" +
+          "  memwarden audit <store> [--root repo] [--json]  # audit a FOREIGN store (claude-mem db, CLAUDE.md, Mem0 json)\n" +
+          "  memwarden exclude [path] | include [path] | exclude --list   # per-project: no capture, no injection\n" +
+          "  memwarden forget <observationId> [--json]       # delete one memory, get a tamper-evident receipt\n" +
           "  memwarden dejafix lookup [--cwd dir] < err.txt  # find a verified prior fix for an error\n" +
           '  memwarden dejafix record --fix "…" [--file f] [--root-cause s] < err.txt\n' +
           "  memwarden export <file>\n" +

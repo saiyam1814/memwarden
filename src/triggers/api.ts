@@ -414,6 +414,41 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
     },
   });
 
+  // --- POST /memwarden/forget --------------------------------------
+  // User-initiated deletion with a tamper-evident receipt. Auth'd: deleting
+  // memory is as sensitive as reading it.
+  sdk.registerFunction(
+    "api::forget",
+    async (
+      req: ApiRequest<{ observation_id?: string; observationId?: string }>,
+    ): Promise<Response> => {
+      const body = (req.body ?? {}) as {
+        observation_id?: string;
+        observationId?: string;
+      };
+      const observationId =
+        asNonEmptyString(body.observation_id) ??
+        asNonEmptyString(body.observationId);
+      if (!observationId) {
+        return { status_code: 400, body: { error: "observation_id is required" } };
+      }
+      const result = await sdk.trigger({
+        function_id: "mem::forget",
+        payload: { observationId },
+      });
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::forget",
+    config: {
+      api_path: "/memwarden/forget",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
   // --- POST /memwarden/dejafix/lookup -----------------------------
   // Déjà Fix: surface verified fixes for an error any agent already solved.
   // Returns only fixes whose referenced files still hash-match (Verified

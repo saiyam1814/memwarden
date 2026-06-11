@@ -109,6 +109,16 @@ describe("mem::doctor", () => {
     expect(r.stale.length).toBe(0);
   });
 
+  it("reports its disk footprint and oplog length on every audit", async () => {
+    const root = tempRepo(["src/auth.ts"]);
+    await observe(root, "src/auth.ts", "auth uses IAM tokens");
+    const r = await doctor(root);
+    expect(r.footprint).toBeDefined();
+    expect(r.footprint.oplogEntries).toBeGreaterThan(0);
+    expect(typeof r.footprint.bytesOnDisk).toBe("number");
+    expect(r.footprint.dataDir.length).toBeGreaterThan(0);
+  });
+
   it("marks a memory STALE when its file is gone", async () => {
     const root = tempRepo(["src/auth.ts"]);
     await observe(root, "src/deleted.ts", "logic that lived in a since-deleted file");

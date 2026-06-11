@@ -31,6 +31,12 @@ import {
 import { request as httpsRequest } from "node:https";
 import { URL } from "node:url";
 import { isLoopbackHost } from "../kernel/http.js";
+import { timingSafeCompare } from "../triggers/auth.js";
+import {
+  isCaptureEnabled,
+  isInjectEnabled,
+  isProjectExcluded,
+} from "../functions/config.js";
 
 export interface ProxyOptions {
   /** Port to listen on. */
@@ -42,7 +48,11 @@ export interface ProxyOptions {
   upstreamKey?: string;
   /** Local memwarden daemon base, e.g. http://127.0.0.1:3111. */
   daemonUrl: string;
-  /** Shared secret for the daemon's auth'd routes, if configured. */
+  /**
+   * The install's shared secret. Used outbound for the daemon's auth'd
+   * routes, and enforced inbound: when set, proxy clients must present it as
+   * `Authorization: Bearer <secret>` (set the tool's API key to it).
+   */
   secret?: string;
   /** Project/workspace this proxy's captures belong to (defaults to cwd). */
   project: string;
@@ -134,6 +144,33 @@ async function handle(
     return;
   }
 
+  // Client auth: when the install has a secret, the proxy requires it too.
+  // The proxy substitutes the real upstream API key and writes captures into
+  // memory, so an open localhost port would let any local process spend the
+  // key and poison capture. OpenAI-compatible tools already send their
+  // configured API key as `Authorization: Bearer` — set that key to the
+  // memwarden secret. buildUpstreamHeaders strips the client Authorization
+  // before forwarding, so the secret never reaches the upstream. /livez
+  // stays open: it spends no key and captures nothing.
+  if (ctx.secret) {
+    const auth = req.headers.authorization;
+    if (
+      typeof auth !== "string" ||
+      !timingSafeCompare(auth, `Bearer ${ctx.secret}`)
+    ) {
+      res.statusCode = 401;
+      res.setHeader("content-type", "application/json");
+      res.end(
+        JSON.stringify({
+          error: "unauthorized",
+          message:
+            "Set your tool's API key to the memwarden secret (the `secret` file in your data dir)",
+        }),
+      );
+      return;
+    }
+  }
+
   const isChat =
     req.method === "POST" &&
     (path === "/v1/chat/completions" || path === "/chat/completions");
@@ -142,13 +179,20 @@ async function handle(
 
   // For a chat completion, inject memory and remember the query so we can
   // capture the answer. Other paths pass straight through.
+  // The same switches the hooks honor: MEMWARDEN_INJECT / MEMWARDEN_CAPTURE
+  // and the per-project exclude list, checked per request so `memwarden
+  // exclude` takes effect without a daemon restart.
+  const excluded = isProjectExcluded(ctx.cwd);
+  const inject = isInjectEnabled() && !excluded;
+  const capture = isCaptureEnabled() && !excluded;
+
   let outBody = reqBody;
   let query = "";
-  if (isChat && reqBody.length) {
+  if (isChat && reqBody.length && (inject || capture)) {
     try {
       const payload = JSON.parse(reqBody.toString("utf8")) as ChatRequest;
       query = extractUserQuery(payload);
-      if (query) {
+      if (query && inject) {
         const memory = await fetchMemory(ctx, query).catch(() => "");
         if (memory) {
           outBody = Buffer.from(
@@ -179,7 +223,7 @@ async function handle(
   // Pipe the response straight back, tee-ing it so we can reconstruct the
   // assistant's answer for capture once the stream finishes.
   const captured: Buffer[] = [];
-  const wantCapture = isChat && query !== "";
+  const wantCapture = isChat && query !== "" && capture;
   upstream.on("data", (chunk: Buffer) => {
     if (wantCapture) captured.push(chunk);
     res.write(chunk);

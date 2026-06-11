@@ -12,6 +12,7 @@ import { registerSearchFunction } from "./search.js";
 import { registerForgetFunction } from "./forget.js";
 import { registerDoctorFunction } from "./doctor.js";
 import { registerDejaFixFunctions } from "./dejafix.js";
+import { registerReceiptFunction } from "./receipt.js";
 import { DedupMap } from "./dedup.js";
 import { getTokenBudget, getMaxObservationsPerSession } from "./config.js";
 
@@ -21,6 +22,8 @@ export { registerSearchFunction } from "./search.js";
 export { registerForgetFunction } from "./forget.js";
 export { registerDoctorFunction } from "./doctor.js";
 export type { DoctorReport } from "./doctor.js";
+export { registerReceiptFunction } from "./receipt.js";
+export type { DeleteReceipt, ForgetResult } from "./receipt.js";
 export {
   registerDejaFixFunctions,
   recordFix,
@@ -75,6 +78,7 @@ export function registerCoreFunctions(
   registerForgetFunction(sdk, kv);
   registerDoctorFunction(sdk, kv);
   registerDejaFixFunctions(sdk, kv);
+  registerReceiptFunction(sdk, kv);
 
   return kv;
 }

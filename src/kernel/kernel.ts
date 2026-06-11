@@ -221,6 +221,25 @@ export class Kernel implements ISdk {
         const entries = await this.store.readOplog();
         return { count: entries.length } as R;
       }
+      case "state::oplog-find": {
+        // Chain evidence for one key (delete receipts). Payloads are
+        // STRIPPED — a receipt proves an entry existed in the chain without
+        // re-disclosing the content that was just deleted.
+        const p = payload as { key: string };
+        const entries = await this.store.readOplog();
+        const matches = entries
+          .filter((e) => e.key === p.key)
+          .map((e) => ({
+            id: e.id,
+            ts: e.ts,
+            op: e.op,
+            scope: e.scope,
+            key: e.key,
+            hash: e.hash,
+            prev_hash: e.prev_hash,
+          }));
+        return { entries: matches } as R;
+      }
       case "stream::set":
       case "stream::send": {
         // Live-viewer surface. Best-effort fan-out to in-process

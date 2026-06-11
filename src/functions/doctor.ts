@@ -12,6 +12,8 @@
 // is intentionally conservative and explainable: simple subject/value claims,
 // no LLM, no fuzzy black box.
 
+import { readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 import type { ISdk } from "../kernel/index.js";
 import type { StateKV } from "../state/kv.js";
 import type { CompressedObservation, Memory, Session } from "./types.js";
@@ -19,13 +21,43 @@ import { KV } from "../state/schema.js";
 import { classifyProvenance } from "./verify.js";
 import { memoryToObservation } from "./memory-utils.js";
 import { canonicalizePath } from "./paths.js";
+import { getDataDir } from "./config.js";
 import { logger } from "./logger.js";
 import { detectConflicts, type MemoryConflict } from "./conflicts.js";
+
+/** Recursive size of a directory in bytes; 0 when it doesn't exist. */
+function dirSizeBytes(dir: string): number {
+  let total = 0;
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  for (const e of entries) {
+    const p = join(dir, e.name);
+    try {
+      if (e.isDirectory()) total += dirSizeBytes(p);
+      else if (e.isFile()) total += statSync(p).size;
+    } catch {
+      // racing deletes are fine — best-effort
+    }
+  }
+  return total;
+}
 
 export interface DoctorEntry {
   id: string;
   title: string;
   reason: string;
+}
+export interface DoctorFootprint {
+  /** Total bytes the brain occupies on disk (whole data dir). */
+  bytesOnDisk: number;
+  /** Where it lives. */
+  dataDir: string;
+  /** Append-only oplog length — growth observability. */
+  oplogEntries: number;
 }
 export interface DoctorReport {
   total: number;
@@ -35,6 +67,9 @@ export interface DoctorReport {
   stale: DoctorEntry[];
   unsourced: DoctorEntry[];
   conflicts: MemoryConflict[];
+  /** Disk/size honesty: memory layers that hide their footprint end up
+   * surprising users with gigabytes. memwarden reports it on every audit. */
+  footprint: DoctorFootprint;
 }
 
 export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
@@ -57,6 +92,7 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
         stale: [],
         unsourced: [],
         conflicts: [],
+        footprint: { bytesOnDisk: 0, dataDir: getDataDir(), oplogEntries: 0 },
       };
       const conflictCandidates: CompressedObservation[] = [];
 
@@ -118,6 +154,23 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
       }
 
       report.conflicts = detectConflicts(conflictCandidates);
+
+      // Footprint: whole-data-dir size + oplog length. Best-effort — a
+      // failure here must never sink the audit itself.
+      try {
+        const dataDir = getDataDir();
+        const { count } = await sdk.trigger<
+          Record<string, never>,
+          { count: number }
+        >({ function_id: "state::oplog-count", payload: {} });
+        report.footprint = {
+          bytesOnDisk: dirSizeBytes(dataDir),
+          dataDir,
+          oplogEntries: count,
+        };
+      } catch {
+        // leave the zero footprint from initialization
+      }
       return report;
     },
   );
