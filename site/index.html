@@ -124,12 +124,13 @@
       can actually trust.</p>
 
     <div class="cmd">
-      <code>$ <span class="p">memwarden up</span></code>
-      <button class="copy" onclick="navigator.clipboard&&navigator.clipboard.writeText('node dist/cli/bin.js up');this.textContent='copied'">copy</button>
+      <code>$ <span class="p">npx memwarden up</span></code>
+      <button class="copy" onclick="navigator.clipboard&&navigator.clipboard.writeText('npx memwarden up');this.textContent='copied'">copy</button>
     </div>
     <p class="sub" style="margin-top:10px;font-size:15px;opacity:.8">Starts a self-healing daemon and wires every installed tool into it, in that tool's own config. That's the whole setup.</p>
     <div class="cta">
       <a class="btn primary" href="#setup">What <code>memwarden&nbsp;up</code> does</a>
+      <a class="btn ghost" href="https://www.npmjs.com/package/memwarden">npm</a>
       <a class="btn ghost" href="https://github.com/saiyam1814/memwarden">View on GitHub</a>
     </div>
 
@@ -197,7 +198,7 @@
   root cause: clock skew   ·   fix: mock NTP in conftest
 
 <span class="c"># scriptable too — pipe a failing command's output straight in:</span>
-npm test 2>&1 | node dist/cli/bin.js <span class="a">dejafix lookup</span></pre>
+npm test 2>&1 | npx memwarden <span class="a">dejafix lookup</span></pre>
     <p class="note"><b>Cross-agent</b> (a fix learned in Codex helps Claude Code), <b>project-scoped</b>
       (a fix never leaks across repos), and <b>safe by construction</b> &mdash; it reuses Verified
       Recall, so file drift or deletion auto-suppresses it. Only <code>verified current</code> fixes
@@ -318,23 +319,26 @@ npm test 2>&1 | node dist/cli/bin.js <span class="a">dejafix lookup</span></pre>
   <section id="start">
     <h2>Quick start</h2>
     <p class="lead">Two runtime dependencies. No API key. No cloud. Embeddings run on your machine.</p>
-<pre><span class="c"># install, build, and wire everything</span>
-npm install &amp;&amp; npm run build
-node dist/cli/bin.js <span class="a">up</span>
+<pre><span class="c"># start here — audit the memory you ALREADY have, zero install, read-only:</span>
+npx memwarden <span class="a">audit</span> ~/.claude-mem/claude-mem.db --root ~/code/my-repo
+npx memwarden <span class="a">audit</span> CLAUDE.md             <span class="c"># or any markdown pile / Mem0 JSON export</span>
+
+<span class="c"># then wire everything — one command:</span>
+npx memwarden <span class="a">up</span>
 
 <span class="c"># restart a tool, then in any of them:</span>
 <span class="g">/recall</span>                                <span class="c"># or just ask "what were we working on here?"</span>
 
-<span class="c"># audit any memory store — the shareable red/yellow/green artifact:</span>
-node dist/cli/bin.js <span class="a">doctor .</span>
+<span class="c"># audit your own brain (verified / sourced / stale / unsourced + footprint):</span>
+npx memwarden <span class="a">doctor</span> .
 
-<span class="c"># see the firewall refuse stale recall + doctor flag a conflict, locally:</span>
-npm run <span class="a">demo:trust</span></pre>
+<span class="c"># delete with a tamper-evident receipt:</span>
+npx memwarden <span class="a">forget</span> &lt;observationId&gt;</pre>
   </section>
 
   <footer>
     <p><b>🧠 memwarden</b> — the memory firewall for AI coding agents. Verified, self-custodied, tamper-evident. Apache-2.0.</p>
-    <p><a href="https://github.com/saiyam1814/memwarden">github.com/saiyam1814/memwarden</a></p>
+    <p><a href="https://www.npmjs.com/package/memwarden">npmjs.com/package/memwarden</a> · <a href="https://github.com/saiyam1814/memwarden">github.com/saiyam1814/memwarden</a></p>
   </footer>
 
 </div>

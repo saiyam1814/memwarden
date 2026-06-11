@@ -13,6 +13,14 @@ injected into your agent's context without provenance that still checks out.
 
 `memory firewall` · `verified recall` · `tamper-evident` · `self-custodied` · `cross-tool` · `no API key`
 
+[![npm](https://img.shields.io/npm/v/memwarden?color=cb3837&label=npm&logo=npm)](https://www.npmjs.com/package/memwarden)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![node](https://img.shields.io/badge/node-%E2%89%A520-339933?logo=node.js&logoColor=white)](package.json)
+
+```bash
+npx memwarden up
+```
+
 </div>
 
 ---
