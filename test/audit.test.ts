@@ -19,6 +19,8 @@ import {
   auditStore,
   detectStoreKind,
   extractFileRefs,
+  renderAuditHtml,
+  type AuditReport,
 } from "../src/functions/audit.js";
 
 const cleanups: string[] = [];
@@ -218,5 +220,61 @@ describe("detectStoreKind", () => {
     await db.execute("CREATE TABLE t (x TEXT)");
     db.close();
     expect(detectStoreKind(join(d, "weird.store"))).toBe("sqlite");
+  });
+});
+
+describe("renderAuditHtml", () => {
+  const report: AuditReport = {
+    store: "/x/claude-mem.db",
+    kind: "sqlite",
+    root: "/repo",
+    total: 4,
+    anchored: 3,
+    uniqueFiles: 3,
+    missing: [
+      { id: "m1", title: "auth in <script>src/gone.ts</script>", origin: "obs", status: "missing", detail: "no longer exists: src/gone.ts" },
+    ],
+    drifted: [
+      { id: "m2", title: "refactor done", origin: "obs", status: "drifted", detail: "changed after capture: src/moved.ts" },
+    ],
+    present: 1,
+    unanchored: 1,
+    driftCheckable: true,
+  };
+
+  it("produces a self-contained HTML document with the verdict and findings", () => {
+    const html = renderAuditHtml(report);
+    expect(html.startsWith("<!doctype html>")).toBe(true);
+    // self-contained: no external script/style/link references
+    expect(html).not.toMatch(/<link\b/);
+    expect(html).not.toMatch(/<script\b/);
+    expect(html).toContain("/x/claude-mem.db");
+    expect(html).toContain("memories scanned");
+    expect(html).toMatch(/<b>4<\/b>\s*memories scanned/);
+    // the verdict math: 2 of 3 anchored are red/yellow = 67%
+    expect(html).toContain("2 of 3");
+    expect(html).toContain("67%");
+    expect(html).toContain("src/gone.ts");
+  });
+
+  it("escapes HTML in titles/details (no injection from store content)", () => {
+    const html = renderAuditHtml(report);
+    expect(html).not.toContain("<script>src/gone.ts</script>");
+    expect(html).toContain("&lt;script&gt;");
+  });
+
+  it("handles a store with nothing anchored", () => {
+    const empty: AuditReport = {
+      ...report,
+      total: 2,
+      anchored: 0,
+      uniqueFiles: 0,
+      missing: [],
+      drifted: [],
+      present: 0,
+      unanchored: 2,
+    };
+    const html = renderAuditHtml(empty);
+    expect(html).toContain("Nothing in this store references a file");
   });
 });

@@ -396,19 +396,46 @@ function include(rest: string[]): void {
 // daemon or any setup. `npx memwarden audit ~/.claude-mem/claude-mem.db` is
 // the whole onboarding.
 async function audit(rest: string[]): Promise<void> {
-  const { auditStore } = await import("../functions/audit.js");
+  const { auditStore, renderAuditHtml } = await import("../functions/audit.js");
+
+  // --root and --html each consume the following arg as a value (--html's is
+  // optional); mark those indices so they aren't mistaken for the positional
+  // store path.
+  const consumed = new Set<number>();
+  const rootIdx = rest.indexOf("--root");
+  const root =
+    rootIdx >= 0 && rest[rootIdx + 1] && !rest[rootIdx + 1]!.startsWith("--")
+      ? ((consumed.add(rootIdx + 1), rest[rootIdx + 1]) as string)
+      : process.cwd();
+
+  const htmlIdx = rest.indexOf("--html");
+  let htmlOut: string | undefined;
+  if (htmlIdx >= 0) {
+    const next = rest[htmlIdx + 1];
+    if (next && !next.startsWith("--")) {
+      htmlOut = next;
+      consumed.add(htmlIdx + 1);
+    } else {
+      htmlOut = "memwarden-audit.html";
+    }
+  }
+
   const positional = rest.filter(
-    (a, i) => !a.startsWith("--") && rest[i - 1] !== "--root",
+    (a, i) => !a.startsWith("--") && !consumed.has(i),
   );
   const storePath = positional[0];
   if (!storePath) {
     throw new Error(
-      "usage: memwarden audit <store.db|store.json|CLAUDE.md|dir> [--root repo] [--json]",
+      "usage: memwarden audit <store.db|store.json|CLAUDE.md|dir> [--root repo] [--json] [--html [out.html]]",
     );
   }
-  const rootIdx = rest.indexOf("--root");
-  const root = rootIdx >= 0 && rest[rootIdx + 1] ? (rest[rootIdx + 1] as string) : process.cwd();
   const report = await auditStore(storePath, root);
+
+  if (htmlOut) {
+    writeFileSync(htmlOut, renderAuditHtml(report), "utf8");
+    console.log(`[memwarden] wrote shareable audit report to ${htmlOut}`);
+    if (!rest.includes("--json")) return;
+  }
 
   if (rest.includes("--json")) {
     console.log(JSON.stringify(report, null, 2));
@@ -715,7 +742,7 @@ async function main(): Promise<void> {
           "  memwarden down                                  # stop + remove the daemon service\n" +
           "  memwarden connect [claude-code|cursor|cline|windsurf] [--with-hooks] [--url URL] [--secret S]\n" +
           "  memwarden doctor [path] [--all-projects]        # audit this project (or the whole brain)\n" +
-          "  memwarden audit <store> [--root repo] [--json]  # audit a FOREIGN store (claude-mem db, CLAUDE.md, Mem0 json)\n" +
+          "  memwarden audit <store> [--root repo] [--json] [--html [out.html]]  # audit a FOREIGN store (claude-mem db, CLAUDE.md, Mem0 json)\n" +
           "  memwarden exclude [path] | include [path] | exclude --list   # per-project: no capture, no injection\n" +
           "  memwarden forget <observationId> [--json]       # delete one memory, get a tamper-evident receipt\n" +
           "  memwarden dejafix lookup [--cwd dir] < err.txt  # find a verified prior fix for an error\n" +

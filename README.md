@@ -170,6 +170,13 @@ exist — which is the strongest claim a store without content hashes can make),
 (no file evidence at all). Every red and yellow memory is one your agent would have injected
 with full confidence.
 
+Add `--html [out.html]` for a self-contained, shareable report page (no external assets — safe to
+open, attach, or screenshot), or `--json` for the raw data:
+
+```bash
+npx memwarden audit ~/.claude-mem/claude-mem.db --root ~/code/my-repo --html audit.html
+```
+
 ## Setup is one command
 
 ```bash
@@ -381,7 +388,7 @@ src/cli/         up / down / connect / doctor / audit / forget / exclude / dejaf
 src/cli/tools.ts per-tool adapters: Claude Code, Codex, Cursor, Kiro, Antigravity, OpenCode, OpenClaw
 src/bundle/      portable Brain Bundle export & import
 benchmark/       reproducible recall benchmark
-test/            298 tests: kernel, store parity, oplog, quantizer, MCP, proxy, tool-wiring,
+test/            301 tests: kernel, store parity, oplog, quantizer, MCP, proxy, tool-wiring,
                  Verified Recall, Déjà Fix, foreign-store audit, delete receipts, injection
                  controls, conflict audit, HTTP security (auth/host/content-type),
                  path scoping, self-heal, cross-tool reliability harness, e2e
