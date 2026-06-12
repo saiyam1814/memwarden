@@ -30,7 +30,7 @@ import {
   getProxyPort,
   getSecret,
 } from "./functions/config.js";
-import { createEmbeddingProvider } from "./embedding/index.js";
+import { createEmbeddingProvider, LocalEmbeddingProvider } from "./embedding/index.js";
 import { registerApiTriggers } from "./triggers/api.js";
 import { startProxyServer } from "./proxy/server.js";
 
@@ -196,6 +196,8 @@ function installSweeps(sdk: Kernel): Array<NodeJS.Timeout> {
 }
 
 async function main(): Promise<void> {
+  // StoreLibsql ensures the data dir exists before opening the file, so a
+  // first run against a fresh MEMWARDEN_DATA_DIR no longer crashes on boot.
   const store = new StoreLibsql({ url: STORE_URL });
   const sdk = registerWorker(
     "in-process",
@@ -218,21 +220,36 @@ async function main(): Promise<void> {
   // fast without blocking boot.
   const embProvider = createEmbeddingProvider();
   if (embProvider) {
-    setEmbeddingProvider(embProvider);
-    setVectorIndex(makeVectorIndex(embProvider.dimensions));
-    const quantized = isQuantizedVectorEnabled();
-    console.log(
-      `[memwarden] semantic memory: ${embProvider.name} (${embProvider.dimensions}d), ` +
-        `storage=${quantized ? "TurboQuant-compressed" : "full-precision"}`,
-    );
-    const warmable = embProvider as { warmup?: () => Promise<void> };
-    if (typeof warmable.warmup === "function") {
-      warmable.warmup().catch((err: unknown) => {
-        console.warn(
-          `[memwarden] embedding model warmup failed — vector stream stays off until it loads:`,
-          err instanceof Error ? err.message : err,
-        );
-      });
+    // Don't claim semantic memory is on before confirming the optional
+    // '@huggingface/transformers' package is actually present — it's a
+    // devDependency, so `npx memwarden` installs run BM25-only. Probe once
+    // (cheap module resolve, no model download); only wire the vector index
+    // and advertise TurboQuant when the package is really there. Otherwise
+    // print an honest, actionable line and stay clean BM25 (no provider set,
+    // so search never logs recurring "vector stream failed" warnings).
+    const available = await LocalEmbeddingProvider.isAvailable();
+    if (available) {
+      setEmbeddingProvider(embProvider);
+      setVectorIndex(makeVectorIndex(embProvider.dimensions));
+      const quantized = isQuantizedVectorEnabled();
+      console.log(
+        `[memwarden] semantic memory: ${embProvider.name} (${embProvider.dimensions}d), ` +
+          `storage=${quantized ? "TurboQuant-compressed" : "full-precision"} (loading in background)`,
+      );
+      const warmable = embProvider as { warmup?: () => Promise<void> };
+      if (typeof warmable.warmup === "function") {
+        warmable.warmup().catch((err: unknown) => {
+          console.warn(
+            `[memwarden] embedding model warmup failed — vector stream stays off until it loads:`,
+            err instanceof Error ? err.message : err,
+          );
+        });
+      }
+    } else {
+      console.log(
+        `[memwarden] semantic memory: BM25-only (optional '@huggingface/transformers' not installed). ` +
+          `Enable on-device vectors + TurboQuant with: npm i -g @huggingface/transformers`,
+      );
     }
   } else {
     console.log(`[memwarden] semantic memory: disabled (BM25-only)`);

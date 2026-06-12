@@ -224,3 +224,40 @@ describe("MCP prompts — the /recall command", () => {
     expect(res!.error).toBeDefined();
   });
 });
+
+describe("MCP server surfaces a secured-daemon 401 instead of empty success", () => {
+  it("returns an isError tool result naming the auth problem", async () => {
+    // A daemon that REQUIRES a secret; an MCP client given none. The client
+    // must surface the 401 as a visible error, not a silent "no memory".
+    const prev = process.env.MEMWARDEN_SECRET;
+    process.env.MEMWARDEN_SECRET = "daemon-only-secret";
+    const s = registerWorker("in-process", { workerName: "mw-mcp-401" }, {
+      store: new StoreLibsql({ url: ":memory:" }),
+    });
+    try {
+      registerCoreFunctions(s, new StateKV(s));
+      registerApiTriggers(s);
+      const h = startHttpServer(s, { port: 0 });
+      await new Promise<void>((r) =>
+        h.server.listening ? r() : h.server.once("listening", () => r()),
+      );
+      const addr = h.server.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      const client = createMcpServer({ baseUrl: `http://127.0.0.1:${port}` }); // no secret
+      const res = await client.dispatch({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "memory_search", arguments: { query: "anything" } },
+      });
+      const r = res!.result as { isError?: boolean; content: Array<{ text: string }> };
+      expect(r.isError).toBe(true);
+      expect(r.content[0]!.text.toLowerCase()).toContain("unauthorized");
+      await h.close().catch(() => undefined);
+    } finally {
+      await s.shutdown();
+      if (prev === undefined) delete process.env.MEMWARDEN_SECRET;
+      else process.env.MEMWARDEN_SECRET = prev;
+    }
+  });
+});

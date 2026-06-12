@@ -124,13 +124,14 @@ describe("writeMcpConfig", () => {
     );
   });
 
-  it("recovers from a corrupt config by starting fresh", () => {
+  it("refuses to overwrite an unparseable config (never clobbers user MCP servers)", () => {
     const dir = tempDir();
     const path = join(dir, ".mcp.json");
-    writeFileSync(path, "{ not json");
-    writeMcpConfig(path);
-    const written = JSON.parse(readFileSync(path, "utf8"));
-    expect(written.mcpServers).toHaveProperty("memwarden");
+    const original = '{ "mcpServers": { "existing": {} } /* comment makes this non-strict-JSON */';
+    writeFileSync(path, original);
+    expect(() => writeMcpConfig(path)).toThrow(/not valid JSON/);
+    // file left exactly as it was — the user's config is preserved
+    expect(readFileSync(path, "utf8")).toBe(original);
   });
 
   it("creates nested parent dirs if needed", () => {

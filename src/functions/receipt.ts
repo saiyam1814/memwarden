@@ -24,6 +24,7 @@ import type { CompressedObservation, Session } from "./types.js";
 import { KV } from "../state/schema.js";
 import { getSearchIndex, vectorIndexRemove } from "./search.js";
 import { deleteAccessLog } from "./access-tracker.js";
+import { withKeyedLock } from "./keyed-mutex.js";
 import { logger } from "./logger.js";
 
 interface ChainEntry {
@@ -100,17 +101,25 @@ export function registerReceiptFunction(sdk: ISdk, kv: StateKV): void {
         return { deleted: false, reason: `no observation with id ${obsId}` };
       }
 
-      // Remove from KV and every index in lockstep (same discipline as the
-      // auto-forget sweep).
-      await kv.delete(KV.observations(found.sessionId), obsId);
-      getSearchIndex().remove(obsId);
-      vectorIndexRemove(obsId);
-      await deleteAccessLog(kv, obsId);
+      // Remove from KV and every index in lockstep, under the SAME per-session
+      // lock mem::observe takes when it adds to those global indexes —
+      // otherwise a concurrent observe could re-add this id to the BM25/vector
+      // index after we removed it (a ghost that outlives the deleted record).
+      await withKeyedLock(`obs:${found.sessionId}`, async () => {
+        await kv.delete(KV.observations(found!.sessionId), obsId);
+        getSearchIndex().remove(obsId);
+        vectorIndexRemove(obsId);
+        await deleteAccessLog(kv, obsId);
+      });
 
-      // Build the receipt from the chain.
-      const { entries } = await sdk.trigger<{ key: string }, { entries: ChainEntry[] }>({
+      // Build the receipt from the chain — scoped to this observation's own
+      // KV scope so a same-named key in another scope can't be mis-cited.
+      const { entries } = await sdk.trigger<
+        { key: string; scope: string },
+        { entries: ChainEntry[] }
+      >({
         function_id: "state::oplog-find",
-        payload: { key: obsId },
+        payload: { key: obsId, scope: KV.observations(found.sessionId) },
       });
       const deleteEntry =
         [...entries].reverse().find((e) => e.op === "delete") ?? null;

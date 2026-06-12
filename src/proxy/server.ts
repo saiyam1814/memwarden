@@ -221,16 +221,58 @@ async function handle(
   }
 
   // Pipe the response straight back, tee-ing it so we can reconstruct the
-  // assistant's answer for capture once the stream finishes.
+  // assistant's answer for capture once the stream finishes. Robust to the
+  // client disconnecting mid-stream: writing to a dead socket throws, and
+  // because handle()'s promise has already resolved by now, that throw would
+  // be an unhandled exception that can take the daemon down. So we guard the
+  // write, stop tee-ing and abort the upstream the moment the client goes
+  // away, honor backpressure, and cap the capture buffer (a huge or hostile
+  // upstream response must not balloon memory — http.ts caps request bodies;
+  // this caps the response we buffer for capture).
   const captured: Buffer[] = [];
+  let capturedBytes = 0;
+  let captureOverflow = false;
+  const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
   const wantCapture = isChat && query !== "" && capture;
+  let done = false;
+
+  const stopUpstream = (): void => {
+    if (done) return;
+    done = true;
+    upstream.destroy();
+  };
+
   upstream.on("data", (chunk: Buffer) => {
-    if (wantCapture) captured.push(chunk);
-    res.write(chunk);
+    if (done) return;
+    if (wantCapture && !captureOverflow) {
+      capturedBytes += chunk.length;
+      if (capturedBytes > MAX_CAPTURE_BYTES) {
+        captureOverflow = true; // stop buffering; still stream to the client
+        captured.length = 0;
+      } else {
+        captured.push(chunk);
+      }
+    }
+    let ok = false;
+    try {
+      ok = res.write(chunk);
+    } catch {
+      stopUpstream();
+      return;
+    }
+    if (!ok) {
+      // client can't keep up — pause until it drains
+      upstream.pause();
+      res.once("drain", () => {
+        if (!done) upstream.resume();
+      });
+    }
   });
   upstream.on("end", () => {
-    res.end();
-    if (wantCapture && (upstream.statusCode ?? 0) < 400) {
+    if (done) return;
+    done = true;
+    if (!res.writableEnded) res.end();
+    if (wantCapture && !captureOverflow && (upstream.statusCode ?? 0) < 400) {
       const answer = extractAnswer(
         Buffer.concat(captured),
         upstream.headers["content-type"],
@@ -239,8 +281,13 @@ async function handle(
     }
   });
   upstream.on("error", () => {
+    done = true;
     if (!res.writableEnded) res.end();
   });
+  // Client hung up (tab closed, request aborted): stop pulling from upstream
+  // and tee-ing into a socket that no longer exists.
+  res.on("close", stopUpstream);
+  res.on("error", stopUpstream);
 }
 
 // --- request/response plumbing -------------------------------------

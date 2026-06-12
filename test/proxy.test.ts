@@ -205,6 +205,55 @@ describe("memory proxy", () => {
     expect(systems[0]).toContain("You are a helpful assistant.");
     expect(systems[1]).toContain("IAM bearer tokens");
   });
+
+  it("survives a client that disconnects mid-stream (no crash, next request works)", async () => {
+    // A daemon that returns memory, and an upstream that streams slowly and
+    // forever, so we can abort the client while bytes are still flowing.
+    const daemon = await listen((req, res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ text: "mem" }));
+    });
+    cleanups.push(daemon.close);
+    let timer: NodeJS.Timeout | undefined;
+    const upstream = await listen((_req, res) => {
+      res.setHeader("content-type", "text/event-stream");
+      timer = setInterval(() => {
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: "x" } }] })}\n\n`);
+      }, 5);
+    });
+    cleanups.push(() => {
+      if (timer) clearInterval(timer);
+      return upstream.close();
+    });
+    const proxy = startProxyServer({
+      port: 0,
+      upstreamUrl: `http://127.0.0.1:${upstream.port}/v1`,
+      daemonUrl: `http://127.0.0.1:${daemon.port}`,
+      project: "/repo",
+      cwd: "/repo",
+    });
+    await once(proxy.server, "listening");
+    cleanups.push(proxy.close);
+    const port = (proxy.server.address() as AddressInfo).port;
+
+    // Start a streaming request, then abort it mid-flight.
+    const ac = new AbortController();
+    const inflight = fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ stream: true, messages: [{ role: "user", content: "q" }] }),
+      signal: ac.signal,
+    }).catch(() => undefined);
+    await new Promise((r) => setTimeout(r, 40)); // let some bytes flow
+    ac.abort();
+    await inflight;
+    await new Promise((r) => setTimeout(r, 40)); // give the server a beat to (not) crash
+
+    // The proxy process must still be serving — a fresh /livez succeeds.
+    const live = await fetch(`http://127.0.0.1:${port}/livez`);
+    expect(live.status).toBe(200);
+    await live.text();
+  });
 });
 
 describe("memory proxy client auth", () => {

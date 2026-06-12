@@ -92,6 +92,29 @@ describe("classifyProvenance", () => {
     expect(v.reason).toMatch(/deleted/);
   });
 
+  it("resolves relative files against provenance.cwd, not the caller's root", () => {
+    // Two projects, each with their own src/auth.ts of different content. A
+    // memory captured in projectA must verify against projectA's file even
+    // when classified while the caller is "in" projectB — never produce a
+    // false verdict from a same-named file in the wrong repo.
+    const projectA = repo();
+    const projectB = repo();
+    mkdirSync(join(projectA, "src"), { recursive: true });
+    mkdirSync(join(projectB, "src"), { recursive: true });
+    writeFileSync(join(projectA, "src", "auth.ts"), "A: bearer tokens\n");
+    writeFileSync(join(projectB, "src", "auth.ts"), "B: totally different\n");
+    const p: Provenance = {
+      cwd: projectA,
+      files: ["src/auth.ts"],
+      fileHashes: hashFiles(["src/auth.ts"], projectA),
+    };
+    // classify "from" projectB — must still verify against projectA's file
+    expect(classifyProvenance(p, projectB).status).toBe("verified");
+    // and if projectA's file drifts, it goes stale regardless of projectB
+    writeFileSync(join(projectA, "src", "auth.ts"), "A: changed\n");
+    expect(classifyProvenance(p, projectB).status).toBe("stale");
+  });
+
   it("stale when the referenced file's content changed", () => {
     const root = repo();
     writeFileSync(join(root, "b.ts"), "v1\n");

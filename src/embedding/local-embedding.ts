@@ -81,6 +81,24 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     await this.ensure();
   }
 
+  /**
+   * Fast check: is the optional '@huggingface/transformers' package even
+   * resolvable? Resolves the module (cheap) without building the pipeline or
+   * downloading the model (expensive). Lets the daemon decide at boot whether
+   * to advertise semantic memory at all, instead of claiming it's on and then
+   * silently falling back to BM25 when the package isn't installed (it's a
+   * devDependency, so npx installs won't have it).
+   */
+  static async isAvailable(): Promise<boolean> {
+    try {
+      const specifier = "@huggingface/transformers";
+      const mod = (await import(specifier)) as { pipeline?: unknown };
+      return typeof mod.pipeline === "function";
+    } catch {
+      return false;
+    }
+  }
+
   async embed(text: string): Promise<Float32Array> {
     const extractor = await this.ensure();
     const out = await extractor(text, { pooling: "mean", normalize: true });

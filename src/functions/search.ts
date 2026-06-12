@@ -310,9 +310,18 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           : undefined;
       // Verified Recall firewall: when on (recall surfaces default it on),
       // drop results that reference files now deleted or content-changed, so
-      // stale memory is never injected. Needs a cwd to check against.
-      const safeOnly =
-        (data as { safe_only?: unknown }).safe_only === true && cwdFilter !== undefined;
+      // stale memory is never injected. It needs a cwd to check against — and
+      // it FAILS CLOSED: asking for safe_only without a cwd is an error, not a
+      // silent downgrade to unfiltered results. Enforced here at the function
+      // boundary (not just the HTTP route) so no in-process caller can lose
+      // the firewall by omitting cwd.
+      const wantsSafeOnly = (data as { safe_only?: unknown }).safe_only === true;
+      if (wantsSafeOnly && cwdFilter === undefined) {
+        throw new Error(
+          "mem::search: safe_only requires a cwd to verify memory against (the firewall fails closed)",
+        );
+      }
+      const safeOnly = wantsSafeOnly && cwdFilter !== undefined;
       const format = typeof data.format === "string" ? data.format : "full";
       if (!["full", "compact", "narrative"].includes(format)) {
         throw new Error(

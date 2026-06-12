@@ -63,7 +63,11 @@ export function registerForgetFunction(sdk: ISdk, kv: StateKV): void {
           // Keep if newer than the cutoff, or if the timestamp is unparseable
           // (never forget on bad data).
           if (Number.isNaN(ts) || ts > cutoff) continue;
-          if (obs.importance >= floor) continue;
+          // Keep when importance is high OR missing/NaN. A record with no
+          // importance must not be treated as low-importance and swept — the
+          // intent is "high-importance always kept", and `undefined >= floor`
+          // / `NaN >= floor` are both false, which would wrongly delete it.
+          if (!Number.isFinite(obs.importance) || obs.importance >= floor) continue;
           const access = await getAccessLog(kv, obs.id);
           if (access.count > 0) continue;
 

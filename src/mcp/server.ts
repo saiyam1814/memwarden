@@ -82,13 +82,30 @@ export function createMcpServer(opts: McpServerOptions) {
       try {
         const res = await doFetch(`${base}${path}`, init);
         const text = await res.text();
+        // An HTTP error must NOT look like an empty-but-successful result —
+        // otherwise a secured daemon's 401 (secret missing/mismatched in this
+        // process) silently reads as "no memory" and auto-recall dies with no
+        // sign of the real cause. Surface it as a thrown error the tool layer
+        // turns into a visible isError result.
+        if (!res.ok) {
+          const detail =
+            res.status === 401
+              ? "unauthorized — the daemon requires a secret this MCP server can't resolve " +
+                "(set MEMWARDEN_SECRET or ensure <dataDir>/secret is readable)"
+              : `daemon returned HTTP ${res.status}`;
+          throw new Error(`memwarden ${path}: ${detail}`);
+        }
         try {
           return JSON.parse(text);
         } catch {
           return { raw: text, status: res.status };
         }
       } catch (err) {
-        if (attempt === 0 && opts.ensureUp) {
+        // Retry once only on a genuine network error (daemon down). An HTTP
+        // error (e.g. 401) is deterministic — reviving the daemon won't fix
+        // it, so don't loop; rethrow.
+        const isNetworkError = !(err instanceof Error && err.message.startsWith("memwarden "));
+        if (attempt === 0 && isNetworkError && opts.ensureUp) {
           await opts.ensureUp();
           continue;
         }

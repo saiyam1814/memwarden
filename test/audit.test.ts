@@ -61,6 +61,13 @@ describe("extractFileRefs", () => {
     expect(pathRefs).toEqual(["src/auth.ts"]);
     expect(bareRefs).toEqual([]);
   });
+
+  it("does not catastrophically backtrack on adversarial input (ReDoS guard)", () => {
+    const evil = "a/".repeat(20000) + "x".repeat(200000) + " no-dot-ending";
+    const start = Date.now();
+    extractFileRefs(evil);
+    expect(Date.now() - start).toBeLessThan(1000); // was ~4.7s before the bound
+  });
 });
 
 describe("audit: markdown pile", () => {
@@ -130,6 +137,26 @@ describe("audit: sqlite store (claude-mem-shaped)", () => {
     expect(r.missing[0]!.id).toBe("o3");
     expect(r.unanchored).toBe(1);
     expect(r.driftCheckable).toBe(true);
+  });
+
+  it("treats space-separated no-timezone timestamps as UTC (SQLite CURRENT_TIMESTAMP)", async () => {
+    const repo = makeRepo(); // moved.ts mtime = NEW (2026-06-01), stable.ts = OLD
+    const store = tempDir();
+    const dbPath = join(store, "claude-mem.db");
+    const db = createClient({ url: `file:${dbPath}` });
+    await db.execute("CREATE TABLE observations (id TEXT, narrative TEXT, files TEXT, created_at TEXT)");
+    // "2026-03-01 00:00:00" — SQLite's UTC convention, NO 'Z'. Parsed as local
+    // tz this would shift hours and flip the drift verdict. stable.ts (mtime
+    // OLD, before MID) must read PRESENT regardless of the host timezone.
+    await db.execute({
+      sql: "INSERT INTO observations VALUES (?, ?, ?, ?)",
+      args: ["o1", "constant in src/stable.ts", "[]", "2026-03-01 00:00:00"],
+    });
+    db.close();
+    const r = await auditStore(dbPath, repo);
+    expect(r.driftCheckable).toBe(true);
+    expect(r.present).toBe(1); // not falsely DRIFTED by a tz offset
+    expect(r.drifted.length).toBe(0);
   });
 
   it("never modifies the original store file", async () => {

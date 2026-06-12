@@ -23,6 +23,8 @@
 // as withKeyedLock).
 
 import { createClient, type Client, type InStatement } from "@libsql/client";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import {
   applyUpdateOps,
   type MutationListener,
@@ -73,6 +75,19 @@ export class StoreLibsql implements StateStore {
   private closed = false;
 
   constructor(options: StoreLibsqlOptions) {
+    // For a local `file:` URL, ensure the parent directory exists first.
+    // libSQL/SQLite does NOT create missing directories and fails with
+    // SQLITE_CANTOPEN — so a first run against a fresh data dir would crash
+    // on boot. Create it here so every caller (daemon, tests, tools) is safe.
+    const fileMatch = /^file:(.+)$/.exec(options.url);
+    if (fileMatch) {
+      const dir = dirname(fileMatch[1] as string);
+      try {
+        mkdirSync(dir, { recursive: true });
+      } catch {
+        // best-effort; createClient below surfaces a real open error
+      }
+    }
     this.client = createClient(
       options.authToken === undefined
         ? { url: options.url }

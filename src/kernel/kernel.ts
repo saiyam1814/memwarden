@@ -224,11 +224,14 @@ export class Kernel implements ISdk {
       case "state::oplog-find": {
         // Chain evidence for one key (delete receipts). Payloads are
         // STRIPPED — a receipt proves an entry existed in the chain without
-        // re-disclosing the content that was just deleted.
-        const p = payload as { key: string };
+        // re-disclosing the content that was just deleted. Filter by scope
+        // too: keys are opaque strings with no cross-scope uniqueness
+        // guarantee, so a key-only match could cite an unrelated entry from
+        // another scope and produce a wrong (but self-consistent) receipt.
+        const p = payload as { key: string; scope?: string };
         const entries = await this.store.readOplog();
         const matches = entries
-          .filter((e) => e.key === p.key)
+          .filter((e) => e.key === p.key && (p.scope === undefined || e.scope === p.scope))
           .map((e) => ({
             id: e.id,
             ts: e.ts,

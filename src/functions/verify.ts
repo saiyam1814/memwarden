@@ -75,12 +75,20 @@ export function classifyProvenance(
   }
   const files = prov?.files ?? [];
   const hashes = prov?.fileHashes ?? {};
+  // Resolve RELATIVE files against the cwd the memory was captured in, not
+  // the caller's cwd. provenance.files are relative to provenance.cwd; using
+  // `root` instead would verify a memory against a DIFFERENT project's file
+  // of the same relative name (e.g. two repos both with src/auth.ts) and
+  // produce a false `verified` (hashes happen to match) or false `stale`
+  // (the other repo lacks the file). Absolute files are unaffected. Fall
+  // back to `root` only when the memory recorded no cwd.
+  const base = prov?.cwd && isAbsolute(prov.cwd) ? prov.cwd : root;
   const deleted: string[] = [];
   const changed: string[] = [];
   let hashMatched = 0; // existing files whose captured hash still matches
   let unchecked = 0; // existing files we could not content-check
   for (const f of files) {
-    const abs = resolveUnder(root, f);
+    const abs = resolveUnder(base, f);
     if (!existsSync(abs)) {
       deleted.push(f);
       continue;

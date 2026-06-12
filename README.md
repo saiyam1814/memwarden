@@ -18,7 +18,8 @@ injected into your agent's context without provenance that still checks out.
 [![node](https://img.shields.io/badge/node-%E2%89%A520-339933?logo=node.js&logoColor=white)](package.json)
 
 ```bash
-npx memwarden up
+npx memwarden audit <your-memory-store>   # zero-install: audit what you already have
+npm install -g memwarden && memwarden up   # persistent: wire every tool
 ```
 
 </div>
@@ -172,10 +173,15 @@ with full confidence.
 ## Setup is one command
 
 ```bash
-npx memwarden up
+npm install -g memwarden
+memwarden up
 ```
 
-(From a checkout: `npm install && npm run build && node dist/cli/bin.js up`.)
+`up` wires long-lived hooks, MCP servers, and a self-healing daemon, so it needs a stable
+install — a global install (above) or a project-local one. Running it straight from `npx`'s
+transient cache is refused with a pointer here, because npm later deletes that cache and the
+wiring would break. (The zero-install `npx memwarden audit <store>` needs none of this. From a
+checkout: `npm install && npm run build && node dist/cli/bin.js up`.)
 
 `memwarden up` is the whole thing. It:
 
@@ -375,7 +381,7 @@ src/cli/         up / down / connect / doctor / audit / forget / exclude / dejaf
 src/cli/tools.ts per-tool adapters: Claude Code, Codex, Cursor, Kiro, Antigravity, OpenCode, OpenClaw
 src/bundle/      portable Brain Bundle export & import
 benchmark/       reproducible recall benchmark
-test/            290 tests: kernel, store parity, oplog, quantizer, MCP, proxy, tool-wiring,
+test/            298 tests: kernel, store parity, oplog, quantizer, MCP, proxy, tool-wiring,
                  Verified Recall, Déjà Fix, foreign-store audit, delete receipts, injection
                  controls, conflict audit, HTTP security (auth/host/content-type),
                  path scoping, self-heal, cross-tool reliability harness, e2e

@@ -60,19 +60,32 @@ export function claudeSettingsPathFor(dir: string): string {
  * groups. `hookBase` is the shell command that runs the memwarden CLI, e.g.
  * `"node" "/abs/dist/cli/bin.js"`; the event subcommand is appended.
  */
+// Trailing shell comment stamped on every hook command we write, so we can
+// recognize our own entries on re-run WITHOUT a loose `includes("memwarden")`
+// that would also match (and then delete) a user's own hook that merely
+// mentions memwarden (e.g. a custom logging wrapper).
+const MEMWARDEN_HOOK_MARKER = "# memwarden-managed";
+
 export function buildClaudeHooks(hookBase: string): Record<string, HookGroup[]> {
   return {
     SessionStart: [
-      { hooks: [{ type: "command", command: `${hookBase} hook session-start` }] },
+      { hooks: [{ type: "command", command: `${hookBase} hook session-start ${MEMWARDEN_HOOK_MARKER}` }] },
     ],
     PostToolUse: [
-      { matcher: "*", hooks: [{ type: "command", command: `${hookBase} hook capture` }] },
+      { matcher: "*", hooks: [{ type: "command", command: `${hookBase} hook capture ${MEMWARDEN_HOOK_MARKER}` }] },
     ],
   };
 }
 
 function isMemwardenHookGroup(g: HookGroup): boolean {
-  return g.hooks.some((h) => h.command.includes("memwarden") || h.command.includes("hook session-start") || h.command.includes("hook capture"));
+  // Match our marker (current writes) or the exact subcommand strings we have
+  // always written (legacy entries from before the marker), so upgrades clean
+  // up old entries without duplicating. NOT a broad substring match.
+  return g.hooks.some(
+    (h) =>
+      h.command.includes(MEMWARDEN_HOOK_MARKER) ||
+      /\bhook (?:session-start|capture)\b/.test(h.command),
+  );
 }
 
 /**
@@ -145,7 +158,15 @@ export function writeMcpConfig(
     try {
       existing = JSON.parse(readFileSync(configPath, "utf8")) as McpConfig;
     } catch {
-      existing = null; // corrupt/non-JSON: start fresh rather than throw
+      // An existing-but-unparseable config is NOT ours to overwrite —
+      // clobbering it would wipe every MCP server the user configured (and
+      // editor configs increasingly allow comments / trailing commas, which
+      // fail strict JSON.parse). Refuse and leave the file untouched, matching
+      // tools.ts's safe-by-default behavior.
+      throw new Error(
+        `refusing to overwrite ${configPath}: it exists but is not valid JSON. ` +
+          `Fix or remove it, then re-run.`,
+      );
     }
   }
   const merged = mergeMcpConfig(existing, buildMcpServerEntry(opts));

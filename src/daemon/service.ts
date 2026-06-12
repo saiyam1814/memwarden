@@ -111,6 +111,22 @@ WantedBy=default.target
 export function installService(dataDir: string, secret?: string): ServiceResult {
   const home = homedir();
   const node = process.execPath;
+
+  // The secret and dataDir are interpolated into generated service units. A
+  // newline (or, on systemd, other control chars) would let a chosen value
+  // inject extra directives — e.g. `--secret $'x\nExecStartPre=/bin/evil'`
+  // would add a rogue ExecStartPre that runs at login. The auto-generated
+  // secret is base64url (safe), but `--secret`/`MEMWARDEN_DATA_DIR` are
+  // user-controlled, so reject anything with a newline/CR/NUL up front.
+  const hasControlChar = (s: string): boolean => /[\r\n\0]/.test(s);
+  if (hasControlChar(dataDir) || (secret !== undefined && hasControlChar(secret))) {
+    return {
+      kind: process.platform === "darwin" ? "launchd" : "systemd",
+      ok: false,
+      message: "refusing to install service: secret or data dir contains a newline/control character",
+    };
+  }
+
   try {
     mkdirSync(dataDir, { recursive: true });
   } catch {

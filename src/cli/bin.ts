@@ -35,11 +35,36 @@ import { getSecret } from "../functions/config.js";
 
 const DAEMON_URL = process.env.MEMWARDEN_URL ?? "http://localhost:3111";
 
-// Absolute paths to the installed CLI and MCP bins, so the configs/hooks we
-// write run today (pre-publish) regardless of cwd. dist/cli/bin.js -> here.
+// Absolute paths to the installed CLI and MCP bins. The configs/hooks/service
+// we write bake these in, so they must point at a STABLE install — a global
+// (`npm i -g memwarden`) or a project-local `node_modules/.bin`. dist/cli/bin.js -> here.
 const SELF = fileURLToPath(import.meta.url);
 const MCP_BIN = join(dirname(SELF), "..", "mcp", "bin.js");
 const HOOK_BASE = `"${process.execPath}" "${SELF}"`;
+
+// True when this CLI is running out of npm's transient npx cache
+// (`~/.npm/_npx/<hash>/…`). That directory is garbage-collected, so any
+// absolute path we bake from it (MCP command, Claude hooks, the daemon
+// service unit) silently breaks once the cache is evicted. `up`/`connect`
+// wire long-lived integrations, so they must refuse to run from there and
+// point the user at a stable install. The one-shot `audit` needs nothing
+// persistent, so it is exempt.
+function runningFromNpxCache(): boolean {
+  return /[\\/]_npx[\\/]/.test(SELF);
+}
+
+function requireStableInstall(cmd: string): boolean {
+  if (!runningFromNpxCache()) return true;
+  console.error(
+    `\n[memwarden] '${cmd}' wires long-lived hooks, MCP servers, and a self-healing\n` +
+      `daemon that need a stable install — but this is running from npx's transient\n` +
+      `cache, which npm deletes later (the wiring would break). Install it first:\n\n` +
+      `    npm install -g memwarden\n` +
+      `    memwarden ${cmd}\n\n` +
+      `(The zero-install \`npx memwarden audit <store>\` needs none of this.)\n`,
+  );
+  return false;
+}
 
 function authHeaders(): Record<string, string> {
   const h: Record<string, string> = { "content-type": "application/json" };
@@ -136,6 +161,10 @@ function parseFlags(argv: string[]): {
 }
 
 function connect(rest: string[]): void {
+  if (!requireStableInstall("connect")) {
+    process.exitCode = 1;
+    return;
+  }
   const { target, url, secret } = parseFlags(rest);
   const withHooks = rest.includes("--with-hooks");
   // Launch the local built MCP bin so the config works before publish.
@@ -532,6 +561,10 @@ async function importBrain(file: string | undefined): Promise<void> {
 // --- `memwarden up` -----------------------------------------------
 
 async function up(rest: string[]): Promise<void> {
+  if (!requireStableInstall("up")) {
+    process.exitCode = 1;
+    return;
+  }
   const { url, secret: flagSecret } = parseFlags(rest);
   const daemonUrl = url ?? DAEMON_URL;
   const home = homedir();
