@@ -34,7 +34,7 @@ import {
   removeAgentsMd,
   type LaunchInfo,
 } from "./tools.js";
-import { HOST_HOOKS, hostHookById } from "./host-hooks.js";
+import { HOST_HOOKS, hostHookById, hooklessToolIds } from "./host-hooks.js";
 import {
   handleSessionStart,
   handleCapture,
@@ -721,9 +721,8 @@ async function up(rest: string[]): Promise<void> {
   //    (instruction-following is the last resort, hooks are the mechanism).
   //    --agents-md forces it for every tool.
   const wantAgentsMd = rest.includes("--agents-md");
-  const hookless = targets.filter(
-    (t) => !hostHookById(t.id) && t.id !== "antigravity", // antigravity rides the gemini adapter
-  );
+  const hooklessIds = hooklessToolIds(targets.map((t) => t.id));
+  const hookless = targets.filter((t) => hooklessIds.includes(t.id));
   if (wantAgentsMd || hookless.length > 0) {
     const agents = writeAgentsMd(process.cwd());
     console.log("");

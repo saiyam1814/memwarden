@@ -641,3 +641,12 @@ export const HOST_HOOKS: HostHookAdapter[] = [
 export function hostHookById(id: string): HostHookAdapter | undefined {
   return HOST_HOOKS.find((h) => h.id === id);
 }
+
+/**
+ * Which of these tool ids still need the AGENTS.md instruction fallback:
+ * the ones no hook adapter covers. Antigravity rides the gemini adapter
+ * (the ~/.gemini family shares its settings.json hooks).
+ */
+export function hooklessToolIds(toolIds: string[]): string[] {
+  return toolIds.filter((id) => !hostHookById(id) && id !== "antigravity");
+}

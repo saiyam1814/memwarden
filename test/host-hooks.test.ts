@@ -22,6 +22,7 @@ import {
   OPENCODE_PLUGIN_SENTINEL,
   HOST_HOOKS,
   hostHookById,
+  hooklessToolIds,
 } from "../src/cli/host-hooks.js";
 import { unmergeAgentsMd, removeAgentsMd, writeAgentsMd, mergeAgentsMd } from "../src/cli/tools.js";
 import { unmergeClaudeHooks, mergeClaudeHooks } from "../src/cli/connect.js";
@@ -225,6 +226,14 @@ describe("adapter registry round-trips against a fake $HOME", () => {
     const [r] = hostHookById("cursor")!.write(home, BASE);
     expect(r!.status).toBe("skipped");
     expect(readFileSync(path, "utf8")).toBe("{ trailing-comma: yes, }");
+  });
+
+  it("AGENTS.md is a fallback: only hook-less tools qualify", () => {
+    const all = ["claude-code", "codex", "cursor", "kiro", "antigravity", "opencode", "openclaw"];
+    // openclaw is the only detected tool with no hook coverage; antigravity
+    // rides the gemini adapter (shared ~/.gemini settings.json hooks).
+    expect(hooklessToolIds(all)).toEqual(["openclaw"]);
+    expect(hooklessToolIds(["claude-code", "cursor"])).toEqual([]);
   });
 
   it("every registry adapter carries a distinct hook host id", () => {

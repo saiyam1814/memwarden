@@ -197,20 +197,31 @@ checkout: `npm install && npm run build && node dist/cli/bin.js up`.)
   crash and starts at login,
 - **detects your installed tools** and writes the memwarden MCP server into each one's config,
   in that tool's own schema, without clobbering servers you already have,
-- **writes an `AGENTS.md`** block so tools without a hook system still recall and save on every
-  task.
+- **writes native lifecycle hooks** for every detected tool that has a hook (or plugin) system,
+  so capture and injection are mechanical — the agent cannot forget to do them,
+- **writes an `AGENTS.md`** block only as a fallback, for detected tools with no hook system
+  (or for everything, with `up --agents-md`).
 
-| Tool | What `up` writes | How memory flows |
-| --- | --- | --- |
-| **Claude Code** | `~/.claude.json` + `~/.claude/settings.json` hooks | mechanical (auto inject + auto capture) |
-| **Codex** | `~/.codex/config.toml` | standing instruction + `/recall` |
-| **Cursor** | `~/.cursor/mcp.json` | standing instruction + `/recall` |
-| **Kiro** | `~/.kiro/settings/mcp.json` | standing instruction + `/recall` |
-| **Antigravity** | `~/.gemini/config/mcp_config.json` | standing instruction + `/recall` |
-| **OpenCode** | `~/.config/opencode/opencode.json` | standing instruction + `/recall` |
-| **OpenClaw** | `~/.openclaw/openclaw.json` | standing instruction + `/recall` |
+| Tool | MCP config `up` writes | Hooks `up` writes | How memory flows |
+| --- | --- | --- | --- |
+| **Claude Code** | `~/.claude.json` | `~/.claude/settings.json` | mechanical (hooks) |
+| **Codex** | `~/.codex/config.toml` | `~/.codex/hooks.json` | mechanical (hooks, after `/hooks` trust) |
+| **Cursor** | `~/.cursor/mcp.json` | `~/.cursor/hooks.json` | mechanical (hooks) |
+| **Gemini CLI** | shared with Antigravity | `~/.gemini/settings.json` | mechanical (hooks) |
+| **Kiro** | `~/.kiro/settings/mcp.json` | each `~/.kiro/agents/*.json` | mechanical (hooks, per custom agent) |
+| **Antigravity** | `~/.gemini/config/mcp_config.json` | — (Gemini CLI runs the `~/.gemini` hooks) | MCP tools + `/recall` |
+| **OpenCode** | `~/.config/opencode/opencode.json` | plugin in `~/.config/opencode/plugins/` | mechanical (plugin) |
+| **OpenClaw** | `~/.openclaw/openclaw.json` | — (no hook system) | `AGENTS.md` instruction + `/recall` |
 
-Restart each tool once so it loads the new server. `memwarden down` removes the service.
+Restart each tool once so it loads the new server and hooks. Codex additionally requires you to
+trust the hooks once: open Codex and run `/hooks`. `memwarden down` removes the service;
+`memwarden down --all` also unwires every hook and the `AGENTS.md` block (only entries memwarden
+wrote — your own hooks are never touched).
+
+`memwarden status` shows the whole picture per tool — **detected** (installed), **configured**
+(MCP + hooks present in the config files), and **live** (a hook from that host actually reached
+the daemon, and when). Wired-but-never-live is the failure it exists to catch: usually the tool
+needs a restart, or Codex hooks are not trust-pinned yet.
 
 **You stay in charge of the automatic paths.** `MEMWARDEN_INJECT=off` starts sessions with a
 clean slate (no auto-injection anywhere — explicit `/recall` and the MCP tools still work);
@@ -225,24 +236,27 @@ Cross-tool reach is table stakes — the trust layer above is the point. Still, 
 matter, so here they are honestly. There are exactly three ways memory reaches a tool, and
 `memwarden up` wires whichever ones each tool supports:
 
-1. **Hooks (Claude Code).** Mechanical. A `SessionStart` hook injects this project's verified
-   memory before you type a word; a `PostToolUse` hook captures your work as it happens. The
-   agent cannot forget to do it.
-2. **Standing instruction (Codex, Cursor, Kiro, Antigravity, OpenCode, OpenClaw).** `up` writes
-   an `AGENTS.md` block telling the agent to recall at the start of every task and save what it
-   learns. This is the same mechanism every cross-tool memory layer uses for these tools: they
-   expose no deeper hook, so "automatic" means a standing instruction the agent follows, backed
-   by the `/recall` command when you want to force it.
+1. **Hooks (Claude Code, Codex, Cursor, Gemini CLI, Kiro, OpenCode).** Mechanical. A
+   session-start hook injects this project's verified memory before you type a word; a
+   post-tool-use hook captures your work as it happens. One `memwarden hook` binary speaks each
+   host's dialect natively (`--host codex|cursor|gemini|kiro|opencode`) — same canonical event
+   in, each host's own response schema out. The agent cannot forget to do it. Two honest
+   caveats: Codex runs hooks only after you trust them via `/hooks`, and Kiro attaches hooks per
+   custom agent (none defined = nothing to hook until you create one).
+2. **Standing instruction (OpenClaw, and anything else without hooks).** `up` falls back to an
+   `AGENTS.md` block telling the agent to recall at the start of every task and save what it
+   learns. Soft — the agent must follow it — which is exactly why it is now the fallback, not
+   the default, backed by the `/recall` command when you want to force it.
 3. **Proxy (model-configurable tools).** Mechanical at the API boundary, but only where you
    control the model endpoint — OpenCode, OpenClaw, Ollama, LM Studio, or any custom OpenAI base
    URL. Point the tool's base URL at the memwarden proxy on `:3113` and every turn is recalled
    and captured with no agent cooperation. It does **not** intercept Claude Code (own protocol —
    covered by hooks) or Cursor/Kiro/Antigravity (their own backends).
 
-So: capture in Claude Code, then open Cursor or Codex and they pull up what Claude learned. On
-Claude Code that handoff is mechanical via hooks; on the MCP tools the agent does it via the
-standing instruction (or you type `/recall`); through the proxy it is mechanical for any model
-endpoint you control.
+So: capture in Claude Code, then open Cursor or Codex and they pull up what Claude learned —
+mechanically, via each tool's own hooks. `memwarden status` tells you which of those pipes have
+actually carried traffic (the per-host live heartbeat), so "it works across tools" is something
+you can check, not something you take on faith.
 
 ## The 60-second trust demo
 
@@ -346,8 +360,8 @@ at. It injects relevant verified memory, captures the answer, and is blind to th
 it. Local (Ollama, LM Studio) and paid (OpenAI, OpenRouter, Together) all speak the same
 `/v1/chat/completions`, so it is one memory layer for all of them. Streaming (SSE) passes
 straight through. It applies only where you control the model endpoint — tools with their own
-protocol or backend (Claude Code, Cursor, Kiro, Antigravity) are covered by hooks or the
-standing instruction instead.
+protocol or backend (Claude Code, Cursor, Kiro, Antigravity) are covered by their native hooks
+instead.
 
 ```bash
 # paid upstream:
@@ -384,8 +398,9 @@ src/embedding/   on-device embedding provider (transformers.js, optional)
 src/mcp/         dependency-free MCP server (stdio JSON-RPC) + the recall prompt
 src/proxy/       OpenAI-compatible memory gateway (for model endpoints you control)
 src/daemon/      ensure (self-heal on use) + service (self-heal on crash/reboot)
-src/cli/         up / down / connect / doctor / audit / forget / exclude / dejafix / hooks / export / import
-src/cli/tools.ts per-tool adapters: Claude Code, Codex, Cursor, Kiro, Antigravity, OpenCode, OpenClaw
+src/cli/         up / down / status / connect / doctor / audit / forget / exclude / dejafix / hooks / export / import
+src/cli/tools.ts per-tool MCP adapters: Claude Code, Codex, Cursor, Kiro, Antigravity, OpenCode, OpenClaw
+src/cli/host-hooks.ts  native lifecycle-hook adapters: Claude Code, Codex, Cursor, Gemini CLI, Kiro, OpenCode
 src/bundle/      portable Brain Bundle export & import
 benchmark/       reproducible recall benchmark
 test/            301 tests: kernel, store parity, oplog, quantizer, MCP, proxy, tool-wiring,
