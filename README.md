@@ -241,7 +241,7 @@ matter, so here they are honestly. There are exactly three ways memory reaches a
    by the `/recall` command when you want to force it.
 3. **Proxy (model-configurable tools).** Mechanical at the API boundary, but only where you
    control the model endpoint — OpenCode, OpenClaw, Ollama, LM Studio, or any custom OpenAI base
-   URL. Point the tool's base URL at the memwarden proxy on `:3113` and every turn is recalled
+   URL. Point the tool's base URL at the memwarden proxy on `:3141` and every turn is recalled
    and captured with no agent cooperation. It does **not** intercept Claude Code (own protocol —
    covered by hooks) or Cursor/Kiro/Antigravity (their own backends).
 
@@ -347,7 +347,7 @@ conversation.
 
 ## The proxy — one memory layer for the models you control
 
-An OpenAI-compatible gateway on `:3113` that any model-configurable tool can point its base URL
+An OpenAI-compatible gateway on `:3141` that any model-configurable tool can point its base URL
 at. It injects relevant verified memory, captures the answer, and is blind to the model behind
 it. Local (Ollama, LM Studio) and paid (OpenAI, OpenRouter, Together) all speak the same
 `/v1/chat/completions`, so it is one memory layer for all of them. Streaming (SSE) passes
@@ -360,7 +360,7 @@ standing instruction instead.
 MEMWARDEN_UPSTREAM_URL=https://api.openai.com/v1 MEMWARDEN_UPSTREAM_KEY=sk-... node dist/index.js
 # local model, no key:
 MEMWARDEN_UPSTREAM_URL=http://localhost:11434/v1 node dist/index.js
-# then point your tool's OpenAI base URL at:  http://localhost:3113/v1
+# then point your tool's OpenAI base URL at:  http://localhost:3141/v1
 ```
 
 When the install has a secret (`memwarden up` generates one), the proxy requires it from
@@ -414,7 +414,7 @@ test/            303 tests: kernel, store parity, oplog, quantizer, MCP, proxy, 
 | `MEMWARDEN_CAPTURE` | on | `off` disables ALL auto-capture (PostToolUse hook, proxy tee) |
 | `MEMWARDEN_UPSTREAM_URL` | unset | upstream OpenAI-compatible base URL; enables the proxy |
 | `MEMWARDEN_UPSTREAM_KEY` | unset | API key forwarded to the upstream (omit for local models) |
-| `MEMWARDEN_PROXY_PORT` | `3113` | port the memory proxy listens on |
+| `MEMWARDEN_PROXY_PORT` | `3141` | port the memory proxy listens on |
 
 ## Not built yet (so this README does not pretend otherwise)
 

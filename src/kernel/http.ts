@@ -21,9 +21,9 @@ export interface HttpServerOptions {
 
 const DEFAULT_ORIGINS = [
   "http://localhost:3111",
-  "http://localhost:3113",
+  "http://localhost:3141",
   "http://127.0.0.1:3111",
-  "http://127.0.0.1:3113",
+  "http://127.0.0.1:3141",
 ];
 const ALLOWED_METHODS = "GET,POST,PUT,DELETE,OPTIONS";
 const ALLOWED_HEADERS = "Content-Type,Authorization";

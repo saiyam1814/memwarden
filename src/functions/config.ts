@@ -224,12 +224,12 @@ export function getUpstreamKey(): string | undefined {
   return raw && raw.trim() ? raw.trim() : undefined;
 }
 
-/** Port the memory proxy listens on. Defaults to 3113. */
+/** Port the memory proxy listens on. Defaults to 3141. */
 export function getProxyPort(): number {
   const raw = env("MEMWARDEN_PROXY_PORT");
-  if (!raw) return 3113;
+  if (!raw) return 3141;
   const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : 3113;
+  return Number.isFinite(n) && n > 0 ? n : 3141;
 }
 
 /** The proxy runs only once an upstream is configured to forward to. */

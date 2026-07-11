@@ -254,11 +254,11 @@ describe("E2E: boot -> observe -> search (BM25) -> context over the REST wire", 
 
     const preflight = await fetch(`${base}/observe`, {
       method: "OPTIONS",
-      headers: { Origin: "http://localhost:3113" },
+      headers: { Origin: "http://localhost:3141" },
     });
     expect(preflight.status).toBe(204);
     expect(preflight.headers.get("access-control-allow-origin")).toBe(
-      "http://localhost:3113",
+      "http://localhost:3141",
     );
   });
 

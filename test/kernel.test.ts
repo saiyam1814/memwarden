@@ -320,10 +320,10 @@ describe("HTTP routing", () => {
     try {
       const res = await fetch(`http://127.0.0.1:${port}/memwarden/livez`, {
         method: "OPTIONS",
-        headers: { Origin: "http://localhost:3113" },
+        headers: { Origin: "http://localhost:3141" },
       });
       expect(res.status).toBe(204);
-      expect(res.headers.get("access-control-allow-origin")).toBe("http://localhost:3113");
+      expect(res.headers.get("access-control-allow-origin")).toBe("http://localhost:3141");
       expect(res.headers.get("access-control-allow-methods")).toContain("POST");
     } finally {
       await http.close();
