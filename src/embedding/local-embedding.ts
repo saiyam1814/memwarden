@@ -55,14 +55,27 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
         // `memwarden up` installs it). Throws actionably when neither hits.
         const mod = await importTransformers();
         const pipeline = mod.pipeline as
-          | ((task: string, model: string) => Promise<FeatureExtractor>)
+          | ((
+              task: string,
+              model: string,
+              opts?: { dtype?: string },
+            ) => Promise<FeatureExtractor>)
           | undefined;
         if (typeof pipeline !== "function") {
           throw new Error(
             "@huggingface/transformers did not export a usable 'pipeline'",
           );
         }
-        const extractor = await pipeline("feature-extraction", this.model);
+        // fp16 by default: recall measured identical to fp32 on the recall
+        // benchmark while cutting the always-on daemon from ~386MB to ~300MB
+        // RSS. MEMWARDEN_EMBED_DTYPE=q8 goes to ~246MB at a small measured
+        // recall cost (~7pts R@10 on the benchmark); =fp32 restores the old
+        // default. The benchmark runs this same default — rerun it after
+        // changing this.
+        const dtype = process.env.MEMWARDEN_EMBED_DTYPE?.trim() || "fp16";
+        const extractor = await pipeline("feature-extraction", this.model, {
+          dtype,
+        });
         this.extractor = extractor;
         return extractor;
       })();

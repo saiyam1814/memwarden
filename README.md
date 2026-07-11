@@ -447,6 +447,7 @@ test/            379 tests: kernel, store parity, oplog, quantizer, MCP, proxy, 
 | --- | --- | --- |
 | `MEMWARDEN_DATA_DIR` | `~/.memwarden` | where the brain lives |
 | `MEMWARDEN_EMBEDDING_PROVIDER` | `local` | `local` (on-device MiniLM) or `none` (keyword-only) |
+| `MEMWARDEN_EMBED_DTYPE` | `fp16` | model weights: `fp16` (~300MB daemon RSS, recall == fp32), `q8` (~246MB, ~7pts R@10 cost), `fp32` (~386MB) |
 | `MEMWARDEN_QUANT_VECTOR` | follows embeddings | force TurboQuant on/off |
 | `MEMWARDEN_QUANT_BITS` | `4` | `2` or `4` bits per dimension |
 | `MEMWARDEN_FORGET_TTL_DAYS` | `30` | retention window for the forget sweep |
