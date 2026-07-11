@@ -42,7 +42,7 @@ function mentions(normalized: string, word: string): boolean {
 
 function classify(toolName: string | undefined, hookType: string): ObservationType {
   if (hookType === "post_tool_failure") return "error";
-  if (hookType === "prompt_submit") return "conversation";
+  if (hookType === "prompt_submit" || hookType === "user_prompt") return "conversation";
   if (hookType === "subagent_stop" || hookType === "task_completed") return "subagent";
   if (hookType === "notification") return "notification";
   if (!toolName) return "other";
@@ -82,7 +82,36 @@ export function buildSyntheticCompression(raw: RawObservation): CompressedObserv
   const toolName = raw.toolName ?? raw.hookType;
   const inputText = asText(raw.toolInput);
   const outputText = asText(raw.toolOutput);
-  const narrative = [raw.userPrompt ?? "", inputText, outputText]
+
+  // A user prompt is first-class memory, not a tool trace: the title is the
+  // intent (the prompt's first non-empty line) and the narrative is the
+  // prompt itself — never a clipped tool_input/tool_output concatenation.
+  const prompt = typeof raw.userPrompt === "string" ? raw.userPrompt.trim() : "";
+  if (prompt.length > 0) {
+    const intent =
+      prompt.split("\n").find((l) => l.trim().length > 0)?.trim() ?? prompt;
+    const result: CompressedObservation = {
+      id: raw.id,
+      sessionId: raw.sessionId,
+      timestamp: raw.timestamp,
+      type: classify(toolName, raw.hookType),
+      title: clip(intent, 80),
+      facts: [],
+      narrative: clip(prompt, 600),
+      concepts: [],
+      files: [],
+      // Slightly above the tool-trace default: what the USER asked for is
+      // the best signal of session intent for later recall.
+      importance: 6,
+      confidence: 0.5,
+    };
+    if (raw.modality) result.modality = raw.modality;
+    if (raw.imageData) result.imageData = raw.imageData;
+    if (raw.agentId) result.agentId = raw.agentId;
+    return result;
+  }
+
+  const narrative = [inputText, outputText]
     .filter((s) => s.length > 0)
     .join(" | ");
 
