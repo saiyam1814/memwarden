@@ -161,11 +161,22 @@ shorter, still-valid chain. We say "tamper-evident" and mean exactly that.
 memory from the active store, search, recall, and every index, and prints a receipt citing the
 oplog entries that recorded the original write and the deletion, plus whole-chain verification.
 An unknown id reports failure honestly; there is no `{deleted: 0, success: true}` theater here.
-What forget does **not** do (and the receipt says so, `contentErased: false`): the original
-content remains inside the local append-only oplog — the same property that makes the history
-tamper-evident. Treat forget as "never surfaces again", not forensic erasure; oplog compaction
-with receipt-preserving erasure is on the roadmap, and until it ships the honest full-erasure
-path is `memwarden down --all --data` (deletes the whole brain).
+
+**Erasure without breaking the chain.** Oplog entries commit to the SHA-256 *of* their content
+(chain v2), not the content itself — so the content can be nulled in place and every hash still
+verifies. `memwarden forget <id> --erase` deletes the memory AND erases its content from the
+oplog; the receipt says `contentErased: true` and you can grep the database file yourself to
+confirm the bytes are gone (SQLite `secure_delete` is on, and the WAL is checkpointed).
+`memwarden compact [--dry-run]` erases every *already-forgotten* memory in one pass, migrates
+any pre-v2 history to the new chain (their old hashes covered the raw content, so `--erase`
+refuses them until you compact), anchors the old chain's head hash in a final `compact` record,
+and VACUUMs the file. Live memories are never touched — only records you deleted.
+
+The remaining honest limits: erasure cannot reach copies *outside* the store — filesystem
+snapshots, backups, `memwarden export` files you made earlier, or bytes an SSD's wear-leveling
+retired. And receipts issued before a compaction cite pre-compaction entry hashes; the compact
+record's `previousHeadHash` (plus each receipt's `chainHead`) is the anchor that says which
+chain they belong to. The nuke-it-all path remains `memwarden down --all --data`.
 
 ## Start here: audit the memory you already have
 
@@ -452,22 +463,23 @@ memory startup gets acquired or sunset, you keep your brain.
 ```
 src/kernel/      in-process runtime: function registry, trigger dispatch, pubsub, HTTP
 src/state/       StateKV, memory + libSQL stores, append-only hash-chained oplog
-src/functions/   observe / search (BM25 + TurboQuant vector + RRF) / doctor / conflicts / dejafix / context / forget
+src/functions/   observe / search (BM25 + TurboQuant vector + RRF) / doctor / conflicts / dejafix / context / forget+erase
 src/functions/verify.ts  Verified Recall: content-hash provenance -> verified / sourced_unverified / stale / unsourced
 src/functions/paths.ts   canonical project/cwd scoping (recall never silently misses)
 src/embedding/   on-device embedding provider (transformers.js, optional)
 src/mcp/         dependency-free MCP server (stdio JSON-RPC) + the recall prompt
 src/proxy/       OpenAI-compatible memory gateway (for model endpoints you control)
 src/daemon/      ensure (self-heal on use) + service (self-heal on crash/reboot)
-src/cli/         up / down / status / connect / doctor / audit / forget / exclude / dejafix / hooks / export / import
+src/cli/         up / down / status / connect / doctor / audit / forget / compact / exclude / dejafix / hooks / export / import
 src/cli/tools.ts per-tool MCP adapters: Claude Code, Codex, Cursor, Kiro, Antigravity, OpenCode, OpenClaw
 src/cli/host-hooks.ts  native lifecycle-hook adapters: Claude Code, Codex, Cursor, Gemini CLI, Kiro, OpenCode
 src/bundle/      portable Brain Bundle export & import
 benchmark/       reproducible recall benchmark
-test/            392 tests: kernel, store parity, oplog, quantizer, MCP, proxy, tool-wiring,
-                 Verified Recall, Déjà Fix, foreign-store audit, delete receipts, injection
-                 controls, conflict audit, HTTP security (auth/host/content-type),
-                 path scoping, self-heal, cross-tool reliability harness, e2e
+test/            427 tests: kernel, store parity, oplog, erase + compact, quantizer, MCP,
+                 proxy, tool-wiring, Verified Recall, Déjà Fix, foreign-store audit,
+                 delete receipts, injection controls, conflict audit, HTTP security
+                 (auth/host/content-type), path scoping, self-heal, cross-tool
+                 reliability harness, e2e
 ```
 
 ## Configuration

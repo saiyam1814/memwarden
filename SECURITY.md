@@ -23,11 +23,26 @@ What memwarden defends today:
 - **Tamper evidence**: SHA-256 hash-chained oplog. Tamper-evident, NOT
   tamper-proof: no signing, and tail-truncation is not detectable.
 
+- **Verifiable erasure**: oplog entries commit to the SHA-256 of their
+  content (chain v2), so `memwarden forget --erase` and `memwarden compact`
+  null deleted memories' content in place while the chain keeps verifying.
+  SQLite `secure_delete` is on and the WAL is checkpointed, so the bytes
+  leave the database file, not just the rows (compact also VACUUMs).
+
 Known limitations, stated on purpose:
 
-- `memwarden forget` removes content from the active store and every index,
-  but the original content remains in the local append-only oplog until
-  compaction/erasure ships (receipts say `contentErased: false`).
+- Plain `memwarden forget` (without `--erase`) removes content from the
+  active store and every index, but the original content remains in the
+  local append-only oplog (receipts say `contentErased: false`) until you
+  erase or compact.
+- Erasure cannot reach copies outside the store: filesystem snapshots and
+  backups, earlier `memwarden export` files, or physical remnants a drive's
+  wear-leveling/journaling kept. Chain history from before an erasure that
+  someone copied elsewhere still contains the content.
+- Pre-v2 oplog entries hash over the raw content, so in-place erasure
+  refuses them; `memwarden compact` migrates the whole chain to v2 (the old
+  head hash is anchored in the compaction record, and receipts carry the
+  `chainHead` they were issued against).
 - The database is not encrypted at rest; disk encryption is the OS's job for
   now.
 - The default `balanced` recall policy means "not detected stale", not

@@ -23,6 +23,8 @@ import { StoreLibsql } from "../src/state/store-libsql.js";
 import {
   GENESIS_PREV_HASH,
   hashOplogEntry,
+  hashOplogEntryV2,
+  hashPayload,
   verifyChain,
 } from "../src/state/oplog.js";
 import {
@@ -193,23 +195,25 @@ for (const { name, make } of factories) {
         await runMutations(s);
         const log = await s.readOplog();
         const target = log[1]!;
-        // Attacker edits the payload AND recomputes that entry's own hash so
-        // it is internally consistent, but cannot fix the NEXT entry's
-        // prev_hash without recomputing the rest of the chain. Detection
-        // therefore surfaces at the following entry.
+        // Attacker edits the payload AND recomputes that entry's own
+        // payload_hash + hash (entries are chain v2 now) so it is internally
+        // consistent, but cannot fix the NEXT entry's prev_hash without
+        // recomputing the rest of the chain. Detection therefore surfaces at
+        // the following entry.
         const forgedPayload = { v: 999 };
-        const forgedHash = hashOplogEntry({
+        const forgedPayloadHash = hashPayload(forgedPayload);
+        const forgedHash = hashOplogEntryV2({
           id: target.id,
           ts: target.ts,
           op: target.op,
           scope: target.scope,
           key: target.key,
-          payload: forgedPayload,
+          payload_hash: forgedPayloadHash,
           prev_hash: target.prev_hash,
         });
         const doctored: OplogEntry[] = log.map((e) =>
           e.id === target.id
-            ? { ...e, payload: forgedPayload, hash: forgedHash }
+            ? { ...e, payload: forgedPayload, payload_hash: forgedPayloadHash, hash: forgedHash }
             : { ...e },
         );
         // The entry after the forged one still carries the ORIGINAL prev_hash.

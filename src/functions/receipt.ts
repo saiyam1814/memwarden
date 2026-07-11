@@ -48,12 +48,21 @@ export interface DeleteReceipt {
   /** Whole-chain verification at receipt time. */
   chainIntact: boolean;
   /**
-   * Honest scope of the deletion: forget removes the record from the active
-   * store, search, recall, and every index — but the original content stays
-   * inside the local append-only oplog (that is what makes the chain
-   * tamper-evident). False until oplog compaction/erasure ships.
+   * Honest scope of the deletion. false: the record is gone from the active
+   * store, search, recall, and every index, but the original content still
+   * sits inside the local append-only oplog. true (forget --erase, or after
+   * `memwarden compact`): the observation's oplog payloads were nulled in
+   * place too — the chain still verifies because v2 entry hashes cover the
+   * payload's hash, not the payload.
    */
-  contentErased: false;
+  contentErased: boolean;
+  /**
+   * Chain head (id + hash) at receipt issuance, identifying WHICH chain the
+   * cited entries live in. `memwarden compact` re-chains every hash; receipts
+   * issued before a compaction validate against the PRE-compaction chain,
+   * whose head hash the compaction record anchors as `previousHeadHash`.
+   */
+  chainHead: { id: number; hash: string } | null;
   /** SHA-256 over the canonical receipt fields above — offline-checkable. */
   receiptHash: string;
 }
@@ -62,6 +71,12 @@ export interface ForgetResult {
   deleted: boolean;
   reason?: string;
   receipt?: DeleteReceipt;
+  /**
+   * Set when --erase was requested but in-place erasure was refused (v1
+   * oplog entries present). The forget itself still succeeded; run
+   * `memwarden compact` to erase.
+   */
+  eraseBlocked?: string;
 }
 
 function receiptHash(fields: Omit<DeleteReceipt, "receiptHash">): string {
@@ -75,14 +90,16 @@ function receiptHash(fields: Omit<DeleteReceipt, "receiptHash">): string {
     createEntry: fields.createEntry,
     chainIntact: fields.chainIntact,
     contentErased: fields.contentErased,
+    chainHead: fields.chainHead,
   });
   return createHash("sha256").update(canonical).digest("hex");
 }
 
 export function registerReceiptFunction(sdk: ISdk, kv: StateKV): void {
-  sdk.registerFunction(
-    "mem::forget",
-    async (data: { observationId?: string }): Promise<ForgetResult> => {
+  const forget = async (data: {
+    observationId?: string;
+    erase?: boolean;
+  }): Promise<ForgetResult> => {
       const obsId = (data?.observationId ?? "").trim();
       if (!obsId) return { deleted: false, reason: "observationId is required" };
 
@@ -120,6 +137,30 @@ export function registerReceiptFunction(sdk: ISdk, kv: StateKV): void {
         await deleteAccessLog(kv, obsId);
       });
 
+      // Optional in-place erasure: null this observation's oplog payloads.
+      // v2 entry hashes cover payload_hash, so the chain keeps verifying;
+      // the store refuses (erasing nothing) when legacy v1 rows are present.
+      let contentErased = false;
+      let eraseBlocked: string | undefined;
+      if (data?.erase === true) {
+        const erase = await sdk.trigger<
+          { scope: string; key: string },
+          { erased: number; refused?: string; v1Count?: number }
+        >({
+          function_id: "state::oplog-erase",
+          payload: { scope: KV.observations(found.sessionId), key: obsId },
+        });
+        if (erase.refused === "v1-entries") {
+          eraseBlocked = `oplog holds ${erase.v1Count ?? "some"} pre-v2 entr${
+            (erase.v1Count ?? 2) === 1 ? "y" : "ies"
+          } for this memory whose hash covers the raw content — run \`memwarden compact\` to migrate the chain and erase`;
+        } else if (erase.refused) {
+          eraseBlocked = `erase refused: ${erase.refused}`;
+        } else {
+          contentErased = true;
+        }
+      }
+
       // Build the receipt from the chain — scoped to this observation's own
       // KV scope so a same-named key in another scope can't be mis-cited.
       const { entries } = await sdk.trigger<
@@ -136,6 +177,10 @@ export function registerReceiptFunction(sdk: ISdk, kv: StateKV): void {
         Record<string, never>,
         { ok: boolean }
       >({ function_id: "state::verify", payload: {} });
+      const head = await sdk.trigger<
+        Record<string, never>,
+        { id: number; hash: string }
+      >({ function_id: "state::oplog-head", payload: {} });
 
       const base = {
         obsId,
@@ -144,15 +189,28 @@ export function registerReceiptFunction(sdk: ISdk, kv: StateKV): void {
         deleteEntry,
         createEntry,
         chainIntact: verdict.ok === true,
-        contentErased: false as const,
+        contentErased,
+        chainHead: head.hash ? { id: head.id, hash: head.hash } : null,
       };
       const receipt: DeleteReceipt = { ...base, receiptHash: receiptHash(base) };
       logger.info("memory forgotten with receipt", {
         obsId,
         oplogDeleteId: deleteEntry?.id,
         chainIntact: receipt.chainIntact,
+        contentErased,
       });
-      return { deleted: true, receipt };
-    },
+      return {
+        deleted: true,
+        receipt,
+        ...(eraseBlocked === undefined ? {} : { eraseBlocked }),
+      };
+  };
+
+  sdk.registerFunction("mem::forget", forget);
+  // mem::erase = forget + in-place oplog payload erasure, one receipt.
+  sdk.registerFunction(
+    "mem::erase",
+    (data: { observationId?: string }): Promise<ForgetResult> =>
+      forget({ ...(data ?? {}), erase: true }),
   );
 }
