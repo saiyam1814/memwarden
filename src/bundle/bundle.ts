@@ -11,6 +11,7 @@
 
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
+import { DEJAFIX_SCOPE } from "../functions/dejafix.js";
 import type {
   CompressedObservation,
   Memory,
@@ -28,6 +29,8 @@ export interface BrainBundle {
   sessions: Session[];
   memories: Memory[];
   observations: Record<string, CompressedObservation[]>; // sessionId -> obs
+  /** Déjà Fix capsules (error signature -> fix), portable like the rest. */
+  fixes?: Array<{ signature: string } & Record<string, unknown>>;
   quantBlob?: string;
 }
 
@@ -56,6 +59,9 @@ export async function exportBundle(kv: StateKV): Promise<BrainBundle> {
   const quantBlob = await kv
     .get<string>(KV.quantParams, QUANT_BLOB_KEY)
     .catch(() => null);
+  const fixes = await kv
+    .list<{ signature: string } & Record<string, unknown>>(DEJAFIX_SCOPE)
+    .catch(() => []);
 
   const bundle: BrainBundle = {
     kind: BRAIN_BUNDLE_KIND,
@@ -67,6 +73,7 @@ export async function exportBundle(kv: StateKV): Promise<BrainBundle> {
   if (typeof quantBlob === "string" && quantBlob.length > 0) {
     bundle.quantBlob = quantBlob;
   }
+  if (fixes.length > 0) bundle.fixes = fixes;
   return bundle;
 }
 
@@ -107,6 +114,11 @@ export async function importBundle(
   for (const sessionId of Object.keys(bundle.observations)) {
     for (const o of bundle.observations[sessionId] ?? []) {
       await kv.set(KV.observations(sessionId), o.id, o);
+    }
+  }
+  for (const f of bundle.fixes ?? []) {
+    if (f && typeof f.signature === "string" && f.signature) {
+      await kv.set(DEJAFIX_SCOPE, f.signature, f);
     }
   }
   if (bundle.quantBlob) {

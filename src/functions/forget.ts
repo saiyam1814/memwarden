@@ -26,8 +26,12 @@ function ttlMs(): number {
 }
 
 function importanceFloor(): number {
-  const raw = parseFloat(process.env.MEMWARDEN_FORGET_IMPORTANCE_FLOOR ?? "0.3");
-  return Number.isFinite(raw) ? raw : 0.3;
+  // Importance is on the observation's 1-10 scale (capture defaults to 5).
+  // The old default of 0.3 was below every possible value, so auto-forget
+  // never removed anything — retention theater. 3 means: old, never-accessed,
+  // below-average-importance records are actually swept.
+  const raw = parseFloat(process.env.MEMWARDEN_FORGET_IMPORTANCE_FLOOR ?? "3");
+  return Number.isFinite(raw) ? raw : 3;
 }
 
 export function registerForgetFunction(sdk: ISdk, kv: StateKV): void {

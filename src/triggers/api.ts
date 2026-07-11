@@ -384,6 +384,13 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
       const vec = getVectorIndex();
       const body: Record<string, unknown> = {
         memories: memories.length,
+        // The bulk of the store is per-session observations — without this,
+        // stats could honestly-but-misleadingly report "0 memories" on a
+        // store with thousands of captured observations.
+        observations: (sessions as Array<{ observationCount?: number }>).reduce(
+          (n, s) => n + (typeof s.observationCount === "number" ? s.observationCount : 0),
+          0,
+        ),
         sessions: sessions.length,
         vectors: vec?.size ?? 0,
         // Which engine actually serves vector search (VectorBackend label);

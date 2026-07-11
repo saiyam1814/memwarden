@@ -45,7 +45,7 @@ function obs(over: Partial<CompressedObservation>): CompressedObservation {
     narrative: "n",
     concepts: [],
     files: [],
-    importance: 0.1,
+    importance: 1,
     ...over,
   };
 }
@@ -67,7 +67,7 @@ describe("mem::auto-forget", () => {
   it("forgets old, unimportant, never-accessed observations", async () => {
     const old = obs({
       id: "old",
-      importance: 0.1,
+      importance: 1,
       timestamp: new Date(Date.now() - 60 * DAY).toISOString(),
     });
     await seed(old);
@@ -89,7 +89,7 @@ describe("mem::auto-forget", () => {
     await seed(
       obs({
         id: "important",
-        importance: 0.9,
+        importance: 9,
         timestamp: new Date(Date.now() - 60 * DAY).toISOString(),
       }),
     );
@@ -99,7 +99,7 @@ describe("mem::auto-forget", () => {
   it("keeps old low-importance observations that were accessed", async () => {
     const accessed = obs({
       id: "accessed",
-      importance: 0.1,
+      importance: 1,
       timestamp: new Date(Date.now() - 60 * DAY).toISOString(),
     });
     await seed(accessed);
@@ -108,7 +108,7 @@ describe("mem::auto-forget", () => {
   });
 
   it("never forgets on an unparseable timestamp", async () => {
-    await seed(obs({ id: "bad", importance: 0.1, timestamp: "not-a-date" }));
+    await seed(obs({ id: "bad", importance: 1, timestamp: "not-a-date" }));
     expect((await forget(Date.now())).forgotten).toBe(0);
   });
 });

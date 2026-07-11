@@ -920,6 +920,7 @@ function down(rest: string[]): void {
 
 interface StatsBody {
   memories?: number;
+  observations?: number;
   sessions?: number;
   vectors?: number;
   vectorBackend?: string | null;
@@ -1038,7 +1039,7 @@ async function status(rest: string[]): Promise<void> {
   );
   if (stats) {
     console.log(
-      `  memory    ${stats.memories ?? 0} memories, ${stats.sessions ?? 0} sessions, ${stats.vectors ?? 0} vectors`,
+      `  memory    ${stats.observations ?? 0} observations, ${stats.memories ?? 0} memories, ${stats.sessions ?? 0} sessions, ${stats.vectors ?? 0} vectors`,
     );
     console.log(
       stats.embedding
