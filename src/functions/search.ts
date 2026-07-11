@@ -28,6 +28,7 @@ import {
   getQuantSeed,
   getVectorBackend,
   getRecallPolicy,
+  isScopedVectorSearchEnabled,
 } from "./config.js";
 import { memoryToObservation } from "./memory-utils.js";
 import { canonicalizePath } from "./paths.js";
@@ -162,6 +163,90 @@ export async function vectorIndexAddGuarded(
   }
 }
 
+/** A doc whose vector is pending; embedded in batches by
+ * vectorIndexAddBatchGuarded instead of one embed() round-trip per doc. */
+export interface PendingVectorDoc {
+  id: string;
+  sessionId: string;
+  text: string;
+  context: { kind: "memory" | "observation" | "synthetic"; logId: string };
+}
+
+// Chunk size for batched embedding during rebuild. Large enough to amortize
+// the per-call model overhead, small enough that one chunk failing (and
+// falling back to per-doc embeds) stays cheap.
+export const EMBED_BATCH_SIZE = 64;
+
+/**
+ * Batched counterpart of vectorIndexAddGuarded: embeds `docs` in chunks of
+ * EMBED_BATCH_SIZE via the provider's embedBatch and adds each result to the
+ * vector index. Failure semantics mirror the per-doc path, per chunk: a
+ * failing embedBatch call (or a row-count mismatch) falls back to per-doc
+ * guarded adds for that chunk only, so one bad doc can never skip its 63
+ * healthy neighbors; a per-row dimension mismatch skips just that row.
+ * Returns the number of vectors actually added. With no index/provider
+ * configured this is a no-op returning 0, same as the per-doc path.
+ */
+export async function vectorIndexAddBatchGuarded(
+  docs: PendingVectorDoc[],
+): Promise<number> {
+  const vi = vectorIndex;
+  const ep = currentEmbeddingProvider;
+  if (!vi || !ep || docs.length === 0) return 0;
+  let added = 0;
+  for (let start = 0; start < docs.length; start += EMBED_BATCH_SIZE) {
+    const chunk = docs.slice(start, start + EMBED_BATCH_SIZE);
+    let embeddings: Float32Array[] | null = null;
+    try {
+      embeddings = await ep.embedBatch(chunk.map((d) => clipEmbedInput(d.text)));
+      if (embeddings.length !== chunk.length) {
+        logger.warn(
+          "vector-index batch add: row-count mismatch — falling back to per-doc embeds for this chunk",
+          { provider: ep.name, expected: chunk.length, received: embeddings.length },
+        );
+        embeddings = null;
+      }
+    } catch (err) {
+      logger.warn(
+        "vector-index batch add: embedBatch failed — falling back to per-doc embeds for this chunk",
+        {
+          provider: ep.name,
+          chunkSize: chunk.length,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      );
+      embeddings = null;
+    }
+    if (!embeddings) {
+      // Per-doc fallback preserves the exact old semantics: each doc soft-
+      // fails independently, a downed embedder never breaks the rebuild.
+      for (const d of chunk) {
+        if (await vectorIndexAddGuarded(d.id, d.sessionId, d.text, d.context)) {
+          added++;
+        }
+      }
+      continue;
+    }
+    for (let i = 0; i < chunk.length; i++) {
+      const d = chunk[i]!;
+      const embedding = embeddings[i]!;
+      if (embedding.length !== ep.dimensions) {
+        logger.warn("vector-index add: dimension mismatch — skipping", {
+          kind: d.context.kind,
+          id: d.context.logId,
+          provider: ep.name,
+          expected: ep.dimensions,
+          received: embedding.length,
+        });
+        continue;
+      }
+      vi.add(d.id, d.sessionId, embedding);
+      added++;
+    }
+  }
+  return added;
+}
+
 // Rebuilds the BM25 index from KV. Walks the memories scope (so
 // mem::remember entries survive a restart) and every session's
 // observations. The vector index is cleared in lockstep so BM25 and vector
@@ -182,6 +267,10 @@ export async function rebuildIndex(
   // Ids seen in KV during this walk; used to evict ghosts from a restored
   // vector index. Only tracked in preserve mode.
   const liveIds = preserveVectors ? new Set<string>() : null;
+  // Docs whose vectors are missing. Collected during the KV walk and embedded
+  // in chunks afterwards (one embedBatch call per EMBED_BATCH_SIZE docs)
+  // instead of one embed() round-trip per doc — the cold-rebuild hot spot.
+  const pending: PendingVectorDoc[] = [];
 
   let count = 0;
 
@@ -195,12 +284,12 @@ export async function rebuildIndex(
       idx.add(memoryToObservation(memory));
       liveIds?.add(memory.id);
       if (!preserveVectors || !vectorIndex?.has(memory.id)) {
-        await vectorIndexAddGuarded(
-          memory.id,
-          memory.sessionIds?.[0] ?? "memory",
-          memory.title + " " + memory.content,
-          { kind: "memory", logId: memory.id },
-        );
+        pending.push({
+          id: memory.id,
+          sessionId: memory.sessionIds?.[0] ?? "memory",
+          text: memory.title + " " + memory.content,
+          context: { kind: "memory", logId: memory.id },
+        });
       }
       count++;
     }
@@ -211,48 +300,48 @@ export async function rebuildIndex(
   }
 
   const sessions = await kv.list<Session>(KV.sessions);
-  if (!sessions.length) {
-    evictGhostVectors(liveIds);
-    return count;
-  }
-
-  const obsPerSession: CompressedObservation[][] = [];
-  const failedSessions: string[] = [];
-  for (let batch = 0; batch < sessions.length; batch += 10) {
-    const chunk = sessions.slice(batch, batch + 10);
-    const results = await Promise.all(
-      chunk.map(async (s) => {
-        try {
-          return await kv.list<CompressedObservation>(KV.observations(s.id));
-        } catch {
-          failedSessions.push(s.id);
-          return [] as CompressedObservation[];
+  if (sessions.length) {
+    const obsPerSession: CompressedObservation[][] = [];
+    const failedSessions: string[] = [];
+    for (let batch = 0; batch < sessions.length; batch += 10) {
+      const chunk = sessions.slice(batch, batch + 10);
+      const results = await Promise.all(
+        chunk.map(async (s) => {
+          try {
+            return await kv.list<CompressedObservation>(KV.observations(s.id));
+          } catch {
+            failedSessions.push(s.id);
+            return [] as CompressedObservation[];
+          }
+        }),
+      );
+      obsPerSession.push(...results);
+    }
+    if (failedSessions.length > 0) {
+      logger.warn("rebuildIndex: failed to load observations for sessions", {
+        failedSessions,
+      });
+    }
+    for (const observations of obsPerSession) {
+      for (const obs of observations) {
+        if (obs.title && obs.narrative) {
+          idx.add(obs);
+          liveIds?.add(obs.id);
+          if (!preserveVectors || !vectorIndex?.has(obs.id)) {
+            pending.push({
+              id: obs.id,
+              sessionId: obs.sessionId,
+              text: obs.title + " " + obs.narrative,
+              context: { kind: "observation", logId: obs.id },
+            });
+          }
+          count++;
         }
-      }),
-    );
-    obsPerSession.push(...results);
-  }
-  if (failedSessions.length > 0) {
-    logger.warn("rebuildIndex: failed to load observations for sessions", {
-      failedSessions,
-    });
-  }
-  for (const observations of obsPerSession) {
-    for (const obs of observations) {
-      if (obs.title && obs.narrative) {
-        idx.add(obs);
-        liveIds?.add(obs.id);
-        if (!preserveVectors || !vectorIndex?.has(obs.id)) {
-          await vectorIndexAddGuarded(obs.id, obs.sessionId, obs.title + " " + obs.narrative, {
-            kind: "observation",
-            logId: obs.id,
-          });
-        }
-        count++;
       }
     }
   }
 
+  await vectorIndexAddBatchGuarded(pending);
   evictGhostVectors(liveIds);
   return count;
 }
@@ -301,6 +390,57 @@ function fuseRrf(a: Ranked[], b: Ranked[], limit: number): Ranked[] {
     .map(([obsId, v]) => ({ obsId, sessionId: v.sessionId, score: v.score }))
     .sort((x, y) => y.score - x.score)
     .slice(0, limit);
+}
+
+/**
+ * Builds the obsId allowlist for a scoped vector search, mirroring the
+ * post-filter's session predicate EXACTLY: a session is in scope when each
+ * active path filter matches its canonical stored path OR its stable
+ * projectKey (the same worktree/moved-checkout widening the post-filter
+ * applies). Ids indexed under a sessionId with no live KV session —
+ * memories and synthetic entries — are ALWAYS included: the post-filter
+ * applies its own finer memory rules to those, and the allowlist must
+ * never be narrower than the post-filter. The allowlist is an
+ * optimization; the post-filter stays the correctness backstop.
+ *
+ * Also returns the session list so the caller can seed its per-candidate
+ * session cache instead of re-reading each session from KV.
+ */
+export async function buildScopedAllowedIds(
+  kv: StateKV,
+  idx: SearchIndex,
+  scope: {
+    projectFilter?: string | undefined;
+    cwdFilter?: string | undefined;
+    projectFilterKey: string | null;
+    cwdFilterKey: string | null;
+  },
+): Promise<{ allowed: Set<string>; sessions: Session[] }> {
+  const sessions = await kv.list<Session>(KV.sessions);
+  const liveById = new Map(sessions.map((s) => [s.id, s]));
+  const inScope = (s: Session): boolean => {
+    if (
+      scope.projectFilter &&
+      !(s.projectKey !== undefined && s.projectKey === scope.projectFilterKey) &&
+      canonicalizePath(s.project) !== scope.projectFilter
+    )
+      return false;
+    if (
+      scope.cwdFilter &&
+      !(s.projectKey !== undefined && s.projectKey === scope.cwdFilterKey) &&
+      canonicalizePath(s.cwd) !== scope.cwdFilter
+    )
+      return false;
+    return true;
+  };
+  const allowed = new Set<string>();
+  for (const sessionId of idx.indexedSessionIds()) {
+    const live = liveById.get(sessionId);
+    if (live && !inScope(live)) continue;
+    const ids = idx.idsForSession(sessionId);
+    if (ids) for (const id of ids) allowed.add(id);
+  }
+  return { allowed, sessions };
 }
 
 export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
@@ -425,13 +565,44 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       // memory) resolve. Provider-less mode stays pure BM25. A failing
       // embed falls back to BM25 rather than breaking search.
       let results = bm25Results;
+      // Sessions preloaded by the scoped allowlist build (below); seeds the
+      // per-candidate session cache so the post-filter doesn't re-read them.
+      let preloadedSessions: Session[] | null = null;
       const vIdx = getVectorIndex();
       const ep = currentEmbeddingProvider;
       if (vIdx && ep && vIdx.size > 0) {
         try {
           const qVec = await ep.embed(clipEmbedInput(query));
           if (qVec.length === ep.dimensions) {
-            results = fuseRrf(bm25Results, vIdx.search(qVec, fetchLimit), fetchLimit);
+            // Scope-aware vector stream: with a project/cwd filter active,
+            // search WITHIN the allowlist of in-scope ids so the top
+            // fetchLimit is filled with valid candidates, instead of a
+            // global top-k that mostly gets post-filtered away. Purely an
+            // optimization: the scope post-filter below still runs on every
+            // candidate (defense in depth), so a too-wide allowlist can
+            // never leak an out-of-scope result. Falls back to the global
+            // scan when disabled or the backend lacks searchAllowed.
+            let vectorHits: Ranked[];
+            if (
+              filtering &&
+              isScopedVectorSearchEnabled() &&
+              typeof vIdx.searchAllowed === "function"
+            ) {
+              const scoped = await buildScopedAllowedIds(kv, idx, {
+                projectFilter,
+                cwdFilter,
+                projectFilterKey,
+                cwdFilterKey,
+              });
+              preloadedSessions = scoped.sessions;
+              vectorHits =
+                scoped.allowed.size > 0
+                  ? vIdx.searchAllowed(qVec, fetchLimit, scoped.allowed)
+                  : [];
+            } else {
+              vectorHits = vIdx.search(qVec, fetchLimit);
+            }
+            results = fuseRrf(bm25Results, vectorHits, fetchLimit);
           }
         } catch (err) {
           logger.warn("search: vector stream failed — BM25 only", {
@@ -441,8 +612,12 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       }
       metrics.recordSearch(performance.now() - searchStartedAt);
 
-      // Resolve session -> project/cwd once per sessionId we touch.
+      // Resolve session -> project/cwd once per sessionId we touch. Seeded
+      // from the allowlist build when it ran (same KV data, one list read).
       const sessionCache = new Map<string, Session | null>();
+      if (preloadedSessions) {
+        for (const s of preloadedSessions) sessionCache.set(s.id, s);
+      }
       const loadSession = async (
         sessionId: string,
       ): Promise<Session | null> => {

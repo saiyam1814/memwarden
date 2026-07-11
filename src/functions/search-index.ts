@@ -30,6 +30,10 @@ export class SearchIndex {
   private docs = new Map<string, IndexEntry>(); // obsId -> entry
   private postings = new Map<string, Set<string>>(); // term -> obsIds
   private termFreqs = new Map<string, Map<string, number>>(); // obsId -> term -> tf
+  // sessionId -> obsIds, maintained in lockstep with `docs`. Lets scoped
+  // search assemble a per-session allowlist in O(matching sessions) instead
+  // of scanning every indexed doc. Derived state only — no KV schema.
+  private bySession = new Map<string, Set<string>>();
   private totalLength = 0;
   private sortedTermsCache: string[] | null = null;
 
@@ -37,6 +41,16 @@ export class SearchIndex {
     const terms = this.extractTerms(obs);
     const tf = new Map<string, number>();
     for (const term of terms) tf.set(term, (tf.get(term) ?? 0) + 1);
+
+    // Re-add under a different sessionId must not leave the id in the old
+    // session's bucket.
+    const prev = this.docs.get(obs.id);
+    if (prev && prev.sessionId !== obs.sessionId) {
+      this.dropFromSession(prev.sessionId, obs.id);
+    }
+    let bucket = this.bySession.get(obs.sessionId);
+    if (!bucket) this.bySession.set(obs.sessionId, (bucket = new Set()));
+    bucket.add(obs.id);
 
     this.docs.set(obs.id, {
       obsId: obs.id,
@@ -72,8 +86,27 @@ export class SearchIndex {
       this.termFreqs.delete(id);
     }
     this.totalLength = Math.max(0, this.totalLength - entry.termCount);
+    this.dropFromSession(entry.sessionId, id);
     this.docs.delete(id);
     this.sortedTermsCache = null;
+  }
+
+  private dropFromSession(sessionId: string, obsId: string): void {
+    const bucket = this.bySession.get(sessionId);
+    if (!bucket) return;
+    bucket.delete(obsId);
+    if (bucket.size === 0) this.bySession.delete(sessionId);
+  }
+
+  /** ObsIds indexed under a sessionId (undefined when none). Live view — do
+   * not mutate. */
+  idsForSession(sessionId: string): ReadonlySet<string> | undefined {
+    return this.bySession.get(sessionId);
+  }
+
+  /** Every sessionId with at least one indexed doc. */
+  indexedSessionIds(): string[] {
+    return [...this.bySession.keys()];
   }
 
   get size(): number {
@@ -150,6 +183,7 @@ export class SearchIndex {
     this.docs.clear();
     this.postings.clear();
     this.termFreqs.clear();
+    this.bySession.clear();
     this.totalLength = 0;
     this.sortedTermsCache = null;
   }
@@ -159,7 +193,18 @@ export class SearchIndex {
     this.postings = new Map([...other.postings].map(([k, v]) => [k, new Set(v)]));
     this.termFreqs = new Map([...other.termFreqs].map(([k, v]) => [k, new Map(v)]));
     this.totalLength = other.totalLength;
+    this.rebuildSessionMap();
     this.sortedTermsCache = null;
+  }
+
+  /** Rederives bySession from docs (restore/deserialize paths). */
+  private rebuildSessionMap(): void {
+    this.bySession = new Map();
+    for (const [obsId, entry] of this.docs) {
+      let bucket = this.bySession.get(entry.sessionId);
+      if (!bucket) this.bySession.set(entry.sessionId, (bucket = new Set()));
+      bucket.add(obsId);
+    }
   }
 
   serialize(): string {
@@ -191,6 +236,7 @@ export class SearchIndex {
       for (const [id, counts] of data.docTerms) idx.termFreqs.set(id, new Map(counts));
       const len = Number(data.totalDocLength);
       idx.totalLength = Number.isFinite(len) && len >= 0 ? Math.floor(len) : 0;
+      idx.rebuildSessionMap();
     } catch {
       return new SearchIndex();
     }

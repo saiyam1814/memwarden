@@ -43,6 +43,13 @@ allowlist, allowlist id not in the index) are guarded at the FFI boundary:
 unknown ids are filtered out and an effectively empty allowlist returns an
 empty result — JS callers cannot crash the process through the mask.
 
+The allowlist is wired into production search: when `mem::search` carries a
+project/cwd filter, it builds the in-scope obsId set and calls
+`TurbovecBackend.searchAllowed`, which translates it to this native u64 mask,
+so the scope restriction runs inside the SIMD scan instead of post-filtering
+a global top-k (see `benchmark/backends.ts`, filtered-search scenario and
+GATE 4).
+
 ## Building from source
 
 Requires a Rust toolchain (1.70+) and Node 20+.

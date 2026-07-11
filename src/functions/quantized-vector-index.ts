@@ -184,7 +184,34 @@ export class QuantizedVectorIndex {
     query: Float32Array,
     limit = 20,
   ): Array<{ obsId: string; sessionId: string; score: number }> {
-    if (query.length !== this.params.dims || this.vectors.size === 0) {
+    return this.searchImpl(query, limit, null);
+  }
+
+  /**
+   * See VectorBackend.searchAllowed: filter-during-scan, so the top `limit`
+   * (and the rescore pool) comes from the allowed population instead of a
+   * post-filtered global top-k. Same scoring and ordering as search()
+   * restricted to the set.
+   */
+  searchAllowed(
+    query: Float32Array,
+    limit: number,
+    allowedObsIds: ReadonlySet<string> | readonly string[],
+  ): Array<{ obsId: string; sessionId: string; score: number }> {
+    const allowed =
+      allowedObsIds instanceof Set
+        ? (allowedObsIds as ReadonlySet<string>)
+        : new Set(allowedObsIds);
+    if (allowed.size === 0) return [];
+    return this.searchImpl(query, limit, allowed);
+  }
+
+  private searchImpl(
+    query: Float32Array,
+    limit: number,
+    allowed: ReadonlySet<string> | null,
+  ): Array<{ obsId: string; sessionId: string; score: number }> {
+    if (query.length !== this.params.dims || this.vectors.size === 0 || limit < 1) {
       return [];
     }
     const D = this.params.paddedDims;
@@ -209,6 +236,7 @@ export class QuantizedVectorIndex {
       [];
     let minScore = -Infinity;
     for (const [obsId, entry] of this.vectors) {
+      if (allowed && !allowed.has(obsId)) continue;
       const score =
         entry.norm === 0
           ? 0

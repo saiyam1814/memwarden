@@ -373,6 +373,13 @@ Measured at 10,000 × 384-dim vectors (`npm run benchmark:backends`):
 | typescript/turboquant-4bit | 100% | 18.90 / 19.53 ms | 260 |
 | **turbovec/native-4bit** | **100%** | **0.15 / 0.20 ms** | **196** |
 
+Filtered search is scope-aware, not post-filtered: with a project/cwd filter active, the
+vector stream searches inside an allowlist of in-scope ids (all three backends), which at
+10,000 vectors across 20 projects fills every top-10 slot with in-scope results at p50
+1.0–1.5 ms on the TypeScript backends versus 15–22 ms for the old global-then-postfilter
+scan, which left roughly half the slots unfilled (the scope post-filter still runs on every
+candidate as the correctness backstop).
+
 ~125× faster search with zero recall drop. Honest defaults: the native backend is **opt-in**
 (`MEMWARDEN_VECTOR_BACKEND=turbovec`) until prebuilt binaries pass CI on every platform, and
 `memwarden status` always names the backend actually serving — a native backend that failed

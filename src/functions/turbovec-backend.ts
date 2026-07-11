@@ -207,10 +207,16 @@ export class TurbovecBackend implements VectorBackend {
 
   /**
    * Allowlist-restricted search: only the given obsIds may be returned.
-   * Used by callers that pre-scope candidates (and by the benchmark gate).
+   * The obsId allowlist is translated to the native u64 allowlist, so the
+   * restriction runs inside the native scan. Wired by mem::search when a
+   * project/cwd scope is active (and exercised by the benchmark gate).
    * Unknown obsIds are ignored; an effectively empty allowlist returns [].
    */
-  searchAllowed(query: Float32Array, limit: number, allowedObsIds: string[]): VectorBackendHit[] {
+  searchAllowed(
+    query: Float32Array,
+    limit: number,
+    allowedObsIds: ReadonlySet<string> | readonly string[],
+  ): VectorBackendHit[] {
     if (query.length !== this.dims || this.byObsId.size === 0 || limit < 1) {
       return [];
     }

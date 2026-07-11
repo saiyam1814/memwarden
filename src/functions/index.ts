@@ -41,9 +41,11 @@ export {
   setEmbeddingProvider,
   rebuildIndex,
   vectorIndexAddGuarded,
+  vectorIndexAddBatchGuarded,
   makeVectorIndex,
   makeConfiguredVectorIndex,
 } from "./search.js";
+export type { PendingVectorDoc } from "./search.js";
 export { QuantizedVectorIndex } from "./quantized-vector-index.js";
 export type { QuantParams } from "./quantized-vector-index.js";
 export type { VectorBackend, VectorBackendHit } from "./vector-backend.js";
