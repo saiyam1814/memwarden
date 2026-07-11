@@ -757,6 +757,168 @@ describe("mem::forget {erase} + mem::erase + /memwarden/compact end to end", () 
     expect(gone).toBeNull();
   });
 
+  it("erase CASCADES into derived records: firstPrompt, summary, handoff — active store AND oplog history (F3)", async () => {
+    const canary = "quetzal-rotation-cadence-canary";
+    const base = { sessionId: "sess-C", project: "proj-C", cwd: "/work/proj-C" };
+    const p = await sdk.trigger<unknown, { observationId: string }>({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "user_prompt",
+        ...base,
+        timestamp: "2026-07-11T10:00:00.000Z",
+        data: { prompt: `rotate the deploy key using ${canary} today` },
+      },
+    });
+    await sdk.trigger({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "post_tool_use",
+        ...base,
+        timestamp: "2026-07-11T10:05:00.000Z",
+        data: { tool_name: "Edit", tool_input: { file_path: "src/deploy.ts" }, tool_output: "ok" },
+      },
+    });
+    await sdk.trigger({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "session_end",
+        ...base,
+        timestamp: "2026-07-11T11:00:00.000Z",
+        data: { reason: "exit" },
+      },
+    });
+
+    // Sanity: the canary reached every derived record (the F3 leak).
+    const before = await kv.get<{ firstPrompt?: string; summary?: string }>(KV.sessions, "sess-C");
+    expect(before?.firstPrompt).toContain(canary);
+    expect(before?.summary).toContain(canary);
+    expect(JSON.stringify(await kv.get(KV.summaries, "sess-C"))).toContain(canary);
+
+    const r = await sdk.trigger<unknown, ForgetResult>({
+      function_id: "mem::erase",
+      payload: { observationId: p.observationId },
+    });
+    expect(r.deleted).toBe(true);
+    expect(r.receipt!.contentErased).toBe(true);
+
+    // The canary is GONE: active store, derived records, the whole oplog,
+    // and the receipt itself.
+    const everything =
+      JSON.stringify(await kv.list(KV.sessions)) +
+      JSON.stringify(await kv.list(KV.observations("sess-C"))) +
+      JSON.stringify(await kv.list(KV.summaries)) +
+      JSON.stringify(await store.readOplog()) +
+      JSON.stringify(r);
+    expect(everything).not.toContain(canary);
+
+    // …and the derived records were RE-DERIVED (as if the observation never
+    // existed), not destroyed.
+    const after = await kv.get<{
+      status?: string;
+      summary?: string;
+      firstPrompt?: string;
+      observationCount?: number;
+    }>(KV.sessions, "sess-C");
+    expect(after?.status).toBe("completed");
+    expect(after?.summary).toContain("Goal: (no prompt captured)");
+    expect(after?.firstPrompt).toBeUndefined();
+    expect(after?.observationCount).toBe(2); // edit + handoff remain
+    const summary = await kv.get<{ narrative: string; filesModified: string[] }>(
+      KV.summaries,
+      "sess-C",
+    );
+    expect(summary?.filesModified).toContain("src/deploy.ts");
+    // The chain still verifies (every cascade erasure is authorized).
+    expect(await store.verifyOplog()).toEqual({ ok: true });
+  });
+
+  it("erase cascades into Déjà Fix capsules derived from the observation (F3)", async () => {
+    const canary = "zorble-guard-fix-canary";
+    const obsId = await observe(
+      `TypeError: deploy is not a function. Fixed by adding the ${canary} check.`,
+    );
+    const lookup = () =>
+      sdk.trigger<unknown, { fixes: unknown[] }>({
+        function_id: "mem::dejafix_lookup",
+        payload: { error_text: "TypeError: deploy is not a function", cwd: "/work/proj-E" },
+      });
+    expect((await lookup()).fixes.length).toBe(1);
+
+    const r = await sdk.trigger<unknown, ForgetResult>({
+      function_id: "mem::erase",
+      payload: { observationId: obsId },
+    });
+    expect(r.deleted).toBe(true);
+
+    expect((await lookup()).fixes.length).toBe(0);
+    const everything =
+      JSON.stringify(await kv.list("mem:dejafix")) +
+      JSON.stringify(await store.readOplog());
+    expect(everything).not.toContain(canary);
+    expect(await store.verifyOplog()).toEqual({ ok: true });
+  });
+
+  it("erasing the HANDOFF observation itself scrubs Session.summary and the stored summary (F3)", async () => {
+    const base = { sessionId: "sess-H", project: "proj-H", cwd: "/work/proj-H" };
+    await sdk.trigger({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "user_prompt",
+        ...base,
+        timestamp: "2026-07-11T10:00:00.000Z",
+        data: { prompt: "wire the flag" },
+      },
+    });
+    const end = await sdk.trigger<unknown, { observationId: string }>({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "session_end",
+        ...base,
+        timestamp: "2026-07-11T11:00:00.000Z",
+        data: { reason: "exit" },
+      },
+    });
+
+    const r = await sdk.trigger<unknown, ForgetResult>({
+      function_id: "mem::erase",
+      payload: { observationId: end.observationId },
+    });
+    expect(r.deleted).toBe(true);
+
+    const session = await kv.get<{ summary?: string; firstPrompt?: string }>(
+      KV.sessions,
+      "sess-H",
+    );
+    expect(session?.summary).toBeUndefined();
+    expect(await kv.get(KV.summaries, "sess-H")).toBeNull();
+    // The prompt observation itself is untouched (only the handoff was erased).
+    expect(session?.firstPrompt).toContain("wire the flag");
+    // No oplog payload for the erased handoff remains.
+    const handoffRows = (await store.readOplog()).filter((e) => e.key === end.observationId);
+    expect(handoffRows.every((e) => e.payload === null)).toBe(true);
+    expect(await store.verifyOplog()).toEqual({ ok: true });
+  });
+
+  it("an erase receipt redacts the title (never re-discloses erased content)", async () => {
+    const canary = "title-canary-phrase";
+    const base = { sessionId: "sess-T", project: "proj-T", cwd: "/work/proj-T" };
+    const p = await sdk.trigger<unknown, { observationId: string }>({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "user_prompt",
+        ...base,
+        timestamp: new Date().toISOString(),
+        data: { prompt: `${canary} is the whole prompt` },
+      },
+    });
+    const r = await sdk.trigger<unknown, ForgetResult>({
+      function_id: "mem::erase",
+      payload: { observationId: p.observationId },
+    });
+    expect(r.receipt!.title).toBe("(erased)");
+    expect(JSON.stringify(r)).not.toContain(canary);
+  });
+
   it("HTTP: forget passes erase through; compact route works incl. dry_run", async () => {
     const { registerApiTriggers } = await import("../src/triggers/api.js");
     registerApiTriggers(sdk, kv);
