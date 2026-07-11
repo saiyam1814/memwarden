@@ -141,6 +141,23 @@ describe("MCP tool round-trips against the live daemon", () => {
     expect(statsObj).toHaveProperty("compression");
   });
 
+  it("memory_remember without a project lands in THIS project, not a literal 'mcp' scope", async () => {
+    // Regression: remember({text}) used to store project/cwd = "mcp", so a
+    // resume from the real repository could never find it.
+    await call("tools/call", {
+      name: "memory_remember",
+      arguments: { text: "decided to gate releases on the conformance suite" },
+    });
+    const resumed = await call("tools/call", {
+      name: "memory_resume",
+      arguments: { query: "what did we decide about releases" }, // no cwd: defaults to serverCwd
+    });
+    const text = (
+      resumed!.result as { content: Array<{ text: string }> }
+    ).content[0]!.text;
+    expect(text.toLowerCase()).toContain("conformance");
+  });
+
   it("memory_resume recalls a prior session scoped to its working directory", async () => {
     // Simulate "Claude" capturing work in project alpha via the observe path.
     const cwdAlpha = "/work/alpha";

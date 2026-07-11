@@ -159,16 +159,23 @@ export function createMcpServer(opts: McpServerOptions) {
         properties: {
           text: { type: "string", description: "The content to remember" },
           sessionId: { type: "string", description: "Optional session id" },
-          project: { type: "string", description: "Optional project label" },
+          project: {
+            type: "string",
+            description:
+              "Optional project directory. Defaults to where this server was launched (the current project).",
+          },
         },
         required: ["text"],
       },
+      // Scope to the server's launch directory by default — a memory saved
+      // under a literal "mcp" project would never be found by memory_resume
+      // running from the real repository.
       call: (a) =>
         api("POST", "/memwarden/observe", {
           hookType: "post_tool_use",
           sessionId: str(a["sessionId"], "mcp"),
-          project: str(a["project"], "mcp"),
-          cwd: str(a["project"], "mcp"),
+          project: str(a["project"], serverCwd),
+          cwd: str(a["project"], serverCwd),
           timestamp: new Date().toISOString(),
           data: {
             tool_name: "memory_remember",
@@ -180,19 +187,29 @@ export function createMcpServer(opts: McpServerOptions) {
     {
       name: "memory_search",
       description:
-        "Search memories by meaning and keywords (TurboQuant vector + BM25 hybrid). Returns ranked matches.",
+        "Search memories by meaning and keywords (TurboQuant vector + BM25 hybrid). Returns ranked matches. " +
+        "Scoped to the current project unless all_projects is true.",
       inputSchema: {
         type: "object",
         properties: {
           query: { type: "string", description: "What to look for" },
           limit: { type: "number", description: "Max results (default 10)" },
+          all_projects: {
+            type: "boolean",
+            description:
+              "Search across every project instead of just this one (deliberate cross-repo lookup).",
+          },
         },
         required: ["query"],
       },
+      // Project-scoped by default: an unscoped search silently mixes other
+      // repositories' memories into results. all_projects stays available
+      // as the explicit escape hatch for deliberate cross-repo lookups.
       call: (a) =>
         api("POST", "/memwarden/search", {
           query: str(a["query"]),
           limit: typeof a["limit"] === "number" ? a["limit"] : 10,
+          ...(a["all_projects"] === true ? {} : { cwd: serverCwd }),
         }),
     },
     {
