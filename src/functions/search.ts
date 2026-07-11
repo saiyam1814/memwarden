@@ -39,6 +39,16 @@ import { metrics } from "../observability/metrics.js";
 
 let index: SearchIndex | null = null;
 let vectorIndex: VectorIndexLike | null = null;
+
+// Whether this process has done its cold KV->index rebuild yet. See the
+// comment at the rebuild site: gating rebuild on index size alone hides
+// pre-restart memories when an observe lands before the first search.
+let coldRebuildDone = false;
+
+/** Test-only: simulate a fresh process (production restarts reset this). */
+export function __resetColdRebuildForTests(): void {
+  coldRebuildDone = false;
+}
 let currentEmbeddingProvider: EmbeddingProvider | null = null;
 
 export function getSearchIndex(): SearchIndex {
@@ -366,7 +376,14 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         tokenBudget = data.token_budget;
       }
 
-      if (idx.size === 0) {
+      // Cold rebuild must be once-per-process, NOT "when the index is empty":
+      // an observation that arrives after restart but before the first search
+      // makes the index non-empty, and gating on size would then hide every
+      // pre-restart memory until the next clean restart. rebuildIndex clears
+      // and re-walks KV, so running it over early arrivals is idempotent.
+      // (The size check stays as an OR for in-process restarts in tests that
+      // clear the index directly.)
+      if (!coldRebuildDone || idx.size === 0) {
         // Restore persisted quantized codes first (no-op unless
         // MEMWARDEN_QUANT_VECTOR is on and a valid blob exists), then
         // rebuild BM25. With a successful restore the vector side runs in
@@ -378,6 +395,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           preserveVectorIndex: restoredVectors,
         });
         const persisted = await persistVectorIndex(kv);
+        coldRebuildDone = true;
         logger.info("Search index rebuilt", {
           entries: count,
           restoredVectors,
