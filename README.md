@@ -513,7 +513,8 @@ test/            427 tests: kernel, store parity, oplog, erase + compact, quanti
 | `MEMWARDEN_EMBED_DTYPE` | `fp16` | model weights: `fp16` (~300MB daemon RSS, recall == fp32), `q8` (~246MB, ~7pts R@10 cost), `fp32` (~386MB) |
 | `MEMWARDEN_QUANT_VECTOR` | follows embeddings | force TurboQuant on/off |
 | `MEMWARDEN_QUANT_BITS` | `4` | `2` or `4` bits per dimension |
-| `MEMWARDEN_FORGET_TTL_DAYS` | `30` | retention window for the forget sweep |
+| `MEMWARDEN_FORGET_TTL_DAYS` | `30` | retention window for the forget sweep: ordinary observations older than this that were never accessed are swept |
+| `MEMWARDEN_FORGET_IMPORTANCE_FLOOR` | `5` | observations at or below this importance are sweepable once past the TTL; explicitly-important records (>5, e.g. user prompts) and anything ever accessed are always kept |
 | `MEMWARDEN_SECRET` | unset | bearer token for the REST API and the proxy (clients send it as their API key) |
 | `MEMWARDEN_INJECT` | on | `off` disables ALL auto-injection (SessionStart, Déjà Fix, proxy); `/recall` and MCP still work |
 | `MEMWARDEN_RECALL_POLICY` | `balanced` | `verified-only` auto-injects ONLY hash-verified-current memory (strict ASI06 stance); `balanced` drops detected-stale and keeps the rest, labeled |
