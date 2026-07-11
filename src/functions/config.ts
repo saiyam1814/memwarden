@@ -232,6 +232,20 @@ export function getVectorBackend(): "turbovec" | "typescript" {
   return raw === "turbovec" ? "turbovec" : "typescript";
 }
 
+/**
+ * Scope-aware vector search (default ON): when mem::search carries a
+ * project/cwd filter, the vector stream runs an allowlist search over the
+ * in-scope docs instead of a global top-k that mostly gets post-filtered
+ * away. The scope post-filter ALWAYS stays on as the correctness backstop,
+ * so MEMWARDEN_SCOPED_VECTOR_SEARCH=off only changes performance
+ * characteristics — it is the operational kill switch and the old-path
+ * baseline the parity tests compare against.
+ */
+export function isScopedVectorSearchEnabled(): boolean {
+  const raw = (env("MEMWARDEN_SCOPED_VECTOR_SEARCH") ?? "").trim().toLowerCase();
+  return raw !== "off" && raw !== "false" && raw !== "0";
+}
+
 // --- memory proxy (the universal cross-tool layer) -----------------
 //
 // The OpenAI-compatible gateway. Any tool that lets you point at a custom

@@ -86,6 +86,29 @@ export class VectorIndex {
     return limit < scored.length ? scored.slice(0, limit) : scored;
   }
 
+  /**
+   * See VectorBackend.searchAllowed: filter-during-scan, so the top `limit`
+   * comes from the allowed population instead of a post-filtered global
+   * top-k. Same scoring and ordering as search() restricted to the set.
+   */
+  searchAllowed(
+    query: Float32Array,
+    limit: number,
+    allowedObsIds: ReadonlySet<string> | readonly string[],
+  ): VectorHit[] {
+    if (limit < 1) return [];
+    const allowed =
+      allowedObsIds instanceof Set ? allowedObsIds : new Set(allowedObsIds);
+    if (allowed.size === 0) return [];
+    const scored: VectorHit[] = [];
+    for (const [obsId, entry] of this.vectors) {
+      if (!allowed.has(obsId)) continue;
+      scored.push({ obsId, sessionId: entry.sessionId, score: cosine(query, entry.embedding) });
+    }
+    scored.sort((a, b) => b.score - a.score);
+    return limit < scored.length ? scored.slice(0, limit) : scored;
+  }
+
   // Reports any stored vectors whose dimension differs from `expected`, plus
   // the distinct dimensions seen. The persistence guard refuses to load an
   // index with mismatches; the only clean state is no mismatches and a single

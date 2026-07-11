@@ -33,6 +33,20 @@ export interface VectorBackend {
   /** Snapshot of the stored obsIds; used for restore reconciliation. */
   ids(): string[];
   search(query: Float32Array, limit?: number): VectorBackendHit[];
+  /**
+   * Allowlist-restricted search: only the given obsIds may be returned, and
+   * the top `limit` is taken from WITHIN the allowed population — so a
+   * scoped caller gets `limit` in-scope hits instead of over-fetching a
+   * global top-k and post-filtering most of it away. Unknown ids are
+   * ignored; an effectively empty allowlist returns []. OPTIONAL and purely
+   * an optimization: callers must keep their own scope post-filter as the
+   * correctness backstop, and fall back to search() when absent.
+   */
+  searchAllowed?(
+    query: Float32Array,
+    limit: number,
+    allowedObsIds: ReadonlySet<string> | readonly string[],
+  ): VectorBackendHit[];
   readonly size: number;
   clear(): void;
   validateDimensions(expected: number): {

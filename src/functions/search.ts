@@ -28,6 +28,7 @@ import {
   getQuantSeed,
   getVectorBackend,
   getRecallPolicy,
+  isScopedVectorSearchEnabled,
 } from "./config.js";
 import { memoryToObservation } from "./memory-utils.js";
 import { canonicalizePath } from "./paths.js";
@@ -391,6 +392,57 @@ function fuseRrf(a: Ranked[], b: Ranked[], limit: number): Ranked[] {
     .slice(0, limit);
 }
 
+/**
+ * Builds the obsId allowlist for a scoped vector search, mirroring the
+ * post-filter's session predicate EXACTLY: a session is in scope when each
+ * active path filter matches its canonical stored path OR its stable
+ * projectKey (the same worktree/moved-checkout widening the post-filter
+ * applies). Ids indexed under a sessionId with no live KV session —
+ * memories and synthetic entries — are ALWAYS included: the post-filter
+ * applies its own finer memory rules to those, and the allowlist must
+ * never be narrower than the post-filter. The allowlist is an
+ * optimization; the post-filter stays the correctness backstop.
+ *
+ * Also returns the session list so the caller can seed its per-candidate
+ * session cache instead of re-reading each session from KV.
+ */
+export async function buildScopedAllowedIds(
+  kv: StateKV,
+  idx: SearchIndex,
+  scope: {
+    projectFilter?: string | undefined;
+    cwdFilter?: string | undefined;
+    projectFilterKey: string | null;
+    cwdFilterKey: string | null;
+  },
+): Promise<{ allowed: Set<string>; sessions: Session[] }> {
+  const sessions = await kv.list<Session>(KV.sessions);
+  const liveById = new Map(sessions.map((s) => [s.id, s]));
+  const inScope = (s: Session): boolean => {
+    if (
+      scope.projectFilter &&
+      !(s.projectKey !== undefined && s.projectKey === scope.projectFilterKey) &&
+      canonicalizePath(s.project) !== scope.projectFilter
+    )
+      return false;
+    if (
+      scope.cwdFilter &&
+      !(s.projectKey !== undefined && s.projectKey === scope.cwdFilterKey) &&
+      canonicalizePath(s.cwd) !== scope.cwdFilter
+    )
+      return false;
+    return true;
+  };
+  const allowed = new Set<string>();
+  for (const sessionId of idx.indexedSessionIds()) {
+    const live = liveById.get(sessionId);
+    if (live && !inScope(live)) continue;
+    const ids = idx.idsForSession(sessionId);
+    if (ids) for (const id of ids) allowed.add(id);
+  }
+  return { allowed, sessions };
+}
+
 export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction(
     "mem::search",
@@ -513,13 +565,44 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       // memory) resolve. Provider-less mode stays pure BM25. A failing
       // embed falls back to BM25 rather than breaking search.
       let results = bm25Results;
+      // Sessions preloaded by the scoped allowlist build (below); seeds the
+      // per-candidate session cache so the post-filter doesn't re-read them.
+      let preloadedSessions: Session[] | null = null;
       const vIdx = getVectorIndex();
       const ep = currentEmbeddingProvider;
       if (vIdx && ep && vIdx.size > 0) {
         try {
           const qVec = await ep.embed(clipEmbedInput(query));
           if (qVec.length === ep.dimensions) {
-            results = fuseRrf(bm25Results, vIdx.search(qVec, fetchLimit), fetchLimit);
+            // Scope-aware vector stream: with a project/cwd filter active,
+            // search WITHIN the allowlist of in-scope ids so the top
+            // fetchLimit is filled with valid candidates, instead of a
+            // global top-k that mostly gets post-filtered away. Purely an
+            // optimization: the scope post-filter below still runs on every
+            // candidate (defense in depth), so a too-wide allowlist can
+            // never leak an out-of-scope result. Falls back to the global
+            // scan when disabled or the backend lacks searchAllowed.
+            let vectorHits: Ranked[];
+            if (
+              filtering &&
+              isScopedVectorSearchEnabled() &&
+              typeof vIdx.searchAllowed === "function"
+            ) {
+              const scoped = await buildScopedAllowedIds(kv, idx, {
+                projectFilter,
+                cwdFilter,
+                projectFilterKey,
+                cwdFilterKey,
+              });
+              preloadedSessions = scoped.sessions;
+              vectorHits =
+                scoped.allowed.size > 0
+                  ? vIdx.searchAllowed(qVec, fetchLimit, scoped.allowed)
+                  : [];
+            } else {
+              vectorHits = vIdx.search(qVec, fetchLimit);
+            }
+            results = fuseRrf(bm25Results, vectorHits, fetchLimit);
           }
         } catch (err) {
           logger.warn("search: vector stream failed — BM25 only", {
@@ -529,8 +612,12 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       }
       metrics.recordSearch(performance.now() - searchStartedAt);
 
-      // Resolve session -> project/cwd once per sessionId we touch.
+      // Resolve session -> project/cwd once per sessionId we touch. Seeded
+      // from the allowlist build when it ran (same KV data, one list read).
       const sessionCache = new Map<string, Session | null>();
+      if (preloadedSessions) {
+        for (const s of preloadedSessions) sessionCache.set(s.id, s);
+      }
       const loadSession = async (
         sessionId: string,
       ): Promise<Session | null> => {
