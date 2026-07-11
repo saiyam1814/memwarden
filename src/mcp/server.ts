@@ -16,9 +16,26 @@
 // returns the matching context as a message the client injects into the
 // conversation — on-demand recall from within any MCP-aware tool.
 
+import { createHash } from "node:crypto";
+import { canonicalizePath } from "../functions/paths.js";
+
 const PROTOCOL_VERSION = "2024-11-05";
 const SERVER_NAME = "memwarden";
 const SERVER_VERSION = "0.1.0";
+
+// Fallback sessionId for memory_remember calls that name none. It must be
+// derived from project identity: a session's project metadata is fixed at
+// creation, so a shared literal "mcp" session created under project A would
+// make every later default remember from project B searchable under A and
+// invisible to B. Hashing the canonical project path gives each project its
+// own long-lived MCP session without touching the observe path.
+export function projectScopedSessionId(prefix: string, project: string): string {
+  const hash = createHash("sha256")
+    .update(canonicalizePath(project))
+    .digest("hex")
+    .slice(0, 12);
+  return `${prefix}-${hash}`;
+}
 
 export interface McpServerOptions {
   baseUrl: string; // e.g. http://localhost:3111
@@ -169,20 +186,24 @@ export function createMcpServer(opts: McpServerOptions) {
       },
       // Scope to the server's launch directory by default — a memory saved
       // under a literal "mcp" project would never be found by memory_resume
-      // running from the real repository.
-      call: (a) =>
-        api("POST", "/memwarden/observe", {
+      // running from the real repository. The fallback sessionId is scoped
+      // to the same project (see projectScopedSessionId) so remembers from
+      // two projects never share one session.
+      call: (a) => {
+        const project = str(a["project"], serverCwd);
+        return api("POST", "/memwarden/observe", {
           hookType: "post_tool_use",
-          sessionId: str(a["sessionId"], "mcp"),
-          project: str(a["project"], serverCwd),
-          cwd: str(a["project"], serverCwd),
+          sessionId: str(a["sessionId"], projectScopedSessionId("mcp", project)),
+          project,
+          cwd: project,
           timestamp: new Date().toISOString(),
           data: {
             tool_name: "memory_remember",
             tool_input: { text: str(a["text"]) },
             tool_output: str(a["text"]),
           },
-        }),
+        });
+      },
     },
     {
       name: "memory_search",

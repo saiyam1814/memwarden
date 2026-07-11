@@ -158,6 +158,68 @@ describe("MCP tool round-trips against the live daemon", () => {
     expect(text.toLowerCase()).toContain("conformance");
   });
 
+  it("default-sessionId remembers from two projects land in sessions scoped to each project", async () => {
+    // Regression (F2): remember({text}) with no sessionId used the literal
+    // "mcp" session. A session's project metadata is fixed at creation, so a
+    // "mcp" session created under project A made every later default
+    // remember from project B searchable under A and invisible to B.
+    const addr = http.server.address();
+    const port = typeof addr === "object" && addr ? addr.port : 0;
+    const base = `http://127.0.0.1:${port}`;
+    const alpha = createMcpServer({ baseUrl: base, cwd: "/work/alpha-scope" });
+    const beta = createMcpServer({ baseUrl: base, cwd: "/work/beta-scope" });
+
+    // Neither remember names a sessionId or project: both use the defaults.
+    await alpha.dispatch({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: {
+        name: "memory_remember",
+        arguments: { text: "alpha decided to use IAM tokens for auth" },
+      },
+    });
+    await beta.dispatch({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: {
+        name: "memory_remember",
+        arguments: { text: "beta billing runs entirely on stripe webhooks" },
+      },
+    });
+
+    // Resume from beta must surface beta's memory.
+    const resumed = await beta.dispatch({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: {
+        name: "memory_resume",
+        arguments: { query: "billing webhooks" },
+      },
+    });
+    const resumeText = (
+      resumed!.result as { content: Array<{ text: string }> }
+    ).content[0]!.text;
+    expect(resumeText.toLowerCase()).toContain("stripe");
+
+    // And alpha's project-scoped search must NOT see beta's memory.
+    const searched = await alpha.dispatch({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "tools/call",
+      params: {
+        name: "memory_search",
+        arguments: { query: "billing stripe webhooks" },
+      },
+    });
+    const searchText = (
+      searched!.result as { content: Array<{ text: string }> }
+    ).content[0]!.text;
+    expect(searchText.toLowerCase()).not.toContain("stripe");
+  });
+
   it("memory_resume recalls a prior session scoped to its working directory", async () => {
     // Simulate "Claude" capturing work in project alpha via the observe path.
     const cwdAlpha = "/work/alpha";

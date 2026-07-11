@@ -29,7 +29,9 @@ import {
   type ServerResponse,
 } from "node:http";
 import { request as httpsRequest } from "node:https";
+import { createHash } from "node:crypto";
 import { URL } from "node:url";
+import { canonicalizePath } from "../functions/paths.js";
 import { isLoopbackHost } from "../kernel/http.js";
 import { timingSafeCompare } from "../triggers/auth.js";
 import {
@@ -88,9 +90,17 @@ const HOP_BY_HOP = new Set([
 
 export function startProxyServer(opts: ProxyOptions): RunningProxy {
   const host = opts.host ?? "127.0.0.1";
-  // One session per proxy process. Turns from different conversations share
-  // it; the daemon's dedup keys on the prompt so distinct prompts still land.
-  const ctx: Ctx = { ...opts, sessionId: `proxy-${opts.port}` };
+  // One session per proxy process, scoped to the project it serves. Turns
+  // from different conversations share it; the daemon's dedup keys on the
+  // prompt so distinct prompts still land. The project hash matters: a
+  // session's project metadata is fixed at creation, so a bare
+  // `proxy-<port>` session created while serving project A would swallow a
+  // later proxy's project-B captures and make them unsearchable from B.
+  const projectHash = createHash("sha256")
+    .update(canonicalizePath(opts.project))
+    .digest("hex")
+    .slice(0, 12);
+  const ctx: Ctx = { ...opts, sessionId: `proxy-${opts.port}-${projectHash}` };
 
   const server = createServer((req, res) => {
     handle(req, res, ctx).catch((err) => {

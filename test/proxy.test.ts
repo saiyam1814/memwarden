@@ -55,16 +55,19 @@ afterEach(async () => {
 interface Harness {
   proxyPort: number;
   upstreamSystems: () => string[];
+  upstreamMessages: () => Array<{ role: string; content: string }>;
   upstreamAuth: () => string | undefined;
-  observed: Array<{ prompt: string; output: string }>;
+  observed: Array<{ sessionId: string; prompt: string; output: string }>;
 }
 
 async function harness(
-  opts: { stream?: boolean; secret?: string } = {},
+  opts: { stream?: boolean; secret?: string; project?: string } = {},
 ): Promise<Harness> {
   let upstreamSystems: string[] = [];
+  let upstreamMessages: Array<{ role: string; content: string }> = [];
   let upstreamAuth: string | undefined;
-  const observed: Array<{ prompt: string; output: string }> = [];
+  const observed: Array<{ sessionId: string; prompt: string; output: string }> =
+    [];
 
   const daemon = await listen(async (req, res) => {
     const body = await readBody(req);
@@ -75,9 +78,11 @@ async function harness(
     }
     if (req.url === "/memwarden/observe") {
       const p = JSON.parse(body) as {
+        sessionId?: string;
         data?: { tool_input?: { prompt?: string }; tool_output?: string };
       };
       observed.push({
+        sessionId: p.sessionId ?? "",
         prompt: p.data?.tool_input?.prompt ?? "",
         output: p.data?.tool_output ?? "",
       });
@@ -96,6 +101,7 @@ async function harness(
     const payload = JSON.parse(body) as {
       messages?: Array<{ role: string; content: string }>;
     };
+    upstreamMessages = payload.messages ?? [];
     upstreamSystems = (payload.messages ?? [])
       .filter((m) => m.role === "system")
       .map((m) => m.content);
@@ -116,12 +122,13 @@ async function harness(
   });
   cleanups.push(upstream.close);
 
+  const project = opts.project ?? "/repo";
   const proxy: RunningProxy = startProxyServer({
     port: 0,
     upstreamUrl: `http://127.0.0.1:${upstream.port}/v1`,
     daemonUrl: `http://127.0.0.1:${daemon.port}`,
-    project: "/repo",
-    cwd: "/repo",
+    project,
+    cwd: project,
     ...(opts.secret ? { secret: opts.secret } : {}),
   });
   await once(proxy.server, "listening");
@@ -131,6 +138,7 @@ async function harness(
   return {
     proxyPort,
     upstreamSystems: () => upstreamSystems,
+    upstreamMessages: () => upstreamMessages,
     upstreamAuth: () => upstreamAuth,
     observed,
   };
@@ -204,6 +212,25 @@ describe("memory proxy", () => {
     expect(systems.length).toBe(2);
     expect(systems[0]).toContain("You are a helpful assistant.");
     expect(systems[1]).toContain("IAM bearer tokens");
+  });
+
+  it("scopes the capture session to the project (no cross-project session reuse)", async () => {
+    // Regression (F2): every proxy used one `proxy-<port>` session. A
+    // session's project metadata is fixed at creation, so captures from a
+    // proxy serving project B could land in a session created under project
+    // A and become unsearchable from B.
+    const hA = await harness({ project: "/repo/alpha" });
+    const hB = await harness({ project: "/repo/beta" });
+    await chat(hA.proxyPort, false);
+    await chat(hB.proxyPort, false);
+    expect(await waitFor(() => hA.observed.length > 0)).toBe(true);
+    expect(await waitFor(() => hB.observed.length > 0)).toBe(true);
+    const sidA = hA.observed[0]!.sessionId;
+    const sidB = hB.observed[0]!.sessionId;
+    expect(sidA.startsWith("proxy-")).toBe(true);
+    expect(sidB.startsWith("proxy-")).toBe(true);
+    // Different projects must never share a fallback session.
+    expect(sidA).not.toBe(sidB);
   });
 
   it("survives a client that disconnects mid-stream (no crash, next request works)", async () => {
