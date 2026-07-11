@@ -743,6 +743,105 @@ async function up(rest: string[]): Promise<void> {
   );
 }
 
+// --- `memwarden status` -------------------------------------------
+//
+// Detected -> Configured -> Live, per tool. "Configured" is read straight
+// from the config files on disk (MCP entry present, hook command present);
+// "Live" is the daemon's per-host heartbeat — a hook that actually ran and
+// reached the daemon. Wired-but-never-live is the interesting failure this
+// surfaces (e.g. Codex hooks written but not yet trust-pinned).
+
+function relativeTime(iso: string): string {
+  const ms = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(ms) || ms < 5_000) return "just now";
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+function mcpWired(path: string): boolean {
+  if (!existsSync(path)) return false;
+  try {
+    return readFileSync(path, "utf8").includes("memwarden");
+  } catch {
+    return false;
+  }
+}
+
+async function status(): Promise<void> {
+  const home = homedir();
+  const alive = await daemonAlive(DAEMON_URL);
+  console.log(`\nmemwarden status\n`);
+  console.log(
+    `  daemon    ${alive ? `✓ ${DAEMON_URL}` : `✗ not reachable at ${DAEMON_URL} — run: memwarden up`}`,
+  );
+
+  // Last-seen-per-host heartbeats live in the daemon's KV store.
+  const lastSeen = new Map<string, string>();
+  if (alive) {
+    try {
+      const res = await fetch(`${DAEMON_URL}/memwarden/stats`, {
+        headers: authHeaders(),
+      });
+      if (res.ok) {
+        const body = (await res.json()) as {
+          hosts?: Array<{ host?: string; lastSeen?: string }>;
+        };
+        for (const h of body.hosts ?? []) {
+          if (h.host && h.lastSeen) lastSeen.set(h.host, h.lastSeen);
+        }
+      }
+    } catch {
+      // stats unavailable — the wired columns below still work
+    }
+  }
+
+  console.log("");
+  console.log(`  ${"tool".padEnd(13)} ${"detected".padEnd(9)} ${"mcp".padEnd(7)} ${"hooks".padEnd(12)} live`);
+  for (const t of TOOLS) {
+    const detected = t.detect(home);
+    const mcp = mcpWired(t.configPath(home)) ? "wired" : "—";
+    // Which hook adapter covers this tool: its own, or (for the ~/.gemini
+    // family) Gemini CLI's settings.json hooks.
+    const hookAdapter = hostHookById(t.id) ?? (t.id === "antigravity" ? hostHookById("gemini") : undefined);
+    const hooks = hookAdapter
+      ? hookAdapter.wired(home)
+        ? t.id === "antigravity"
+          ? "via gemini"
+          : "wired"
+        : "—"
+      : "AGENTS.md";
+    const heartbeatId = hookAdapter ? hookAdapter.id : t.id;
+    const seen = lastSeen.get(heartbeatId);
+    // Without a reachable daemon there is no heartbeat to consult — "never
+    // seen" would be a claim we can't back.
+    const live = seen
+      ? `live (${relativeTime(seen)})`
+      : hookAdapter && alive
+        ? "never seen"
+        : "—";
+    console.log(
+      `  ${t.label.padEnd(13)} ${(detected ? "yes" : "no").padEnd(9)} ${mcp.padEnd(7)} ${hooks.padEnd(12)} ${live}`,
+    );
+  }
+  // Gemini CLI has a hook adapter but no MCP adapter of its own (the
+  // antigravity row above covers the shared ~/.gemini MCP config).
+  const gemini = hostHookById("gemini")!;
+  const gSeen = lastSeen.get("gemini");
+  console.log(
+    `  ${"Gemini CLI".padEnd(13)} ${(gemini.detect(home) ? "yes" : "no").padEnd(9)} ${"—".padEnd(7)} ${(gemini.wired(home) ? "wired" : "—").padEnd(12)} ${gSeen ? `live (${relativeTime(gSeen)})` : alive ? "never seen" : "—"}`,
+  );
+  console.log(
+    `\n  wired = config on disk points at memwarden; live = a hook from that\n` +
+      `  host actually reached the daemon. Wired but never live usually means\n` +
+      `  the tool needs a restart (or, for Codex, /hooks trust-pinning).\n`,
+  );
+}
+
 function down(rest: string[]): void {
   const r = uninstallService();
   if (r.ok) {
@@ -784,6 +883,8 @@ async function main(): Promise<void> {
       return up(rest);
     case "down":
       return down(rest);
+    case "status":
+      return status();
     case "connect":
       return connect(rest);
     case "hook":
@@ -809,6 +910,7 @@ async function main(): Promise<void> {
         "usage:\n" +
           "  memwarden up [--all] [--agents-md] [--url URL] [--secret S]   # start daemon + wire every installed tool\n" +
           "  memwarden down [--all]                          # stop the daemon service; --all also unwires hooks + AGENTS.md\n" +
+          "  memwarden status                                # per-tool: detected / mcp / hooks wired / live heartbeat\n" +
           "  memwarden connect [claude-code|cursor|cline|windsurf] [--with-hooks] [--url URL] [--secret S]\n" +
           "  memwarden doctor [path] [--all-projects]        # audit this project (or the whole brain)\n" +
           "  memwarden audit <store> [--root repo] [--json] [--html [out.html]]  # audit a FOREIGN store (claude-mem db, CLAUDE.md, Mem0 json)\n" +

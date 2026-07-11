@@ -262,6 +262,44 @@ describe("E2E: boot -> observe -> search (BM25) -> context over the REST wire", 
     );
   });
 
+  it("records a per-host liveness heartbeat from observe and search `agent` fields", async () => {
+    // observe carrying agent=cursor -> heartbeat for cursor
+    const o = await postJson("/observe", observePayload({ agent: "cursor" }));
+    expect(o.status).toBe(201);
+
+    // search carrying agent=gemini -> heartbeat for gemini (search itself
+    // is unaffected by the field)
+    const s = await postJson("/search", { query: "authentication", agent: "gemini" });
+    expect(s.status).toBe(200);
+
+    const stats = await fetch(`${base}/stats`);
+    expect(stats.status).toBe(200);
+    const body = (await stats.json()) as {
+      hosts: Array<{ host: string; lastSeen: string }>;
+    };
+    const hosts = Object.fromEntries(body.hosts.map((h) => [h.host, h.lastSeen]));
+    expect(hosts["cursor"]).toBeDefined();
+    expect(hosts["gemini"]).toBeDefined();
+    // lastSeen is a fresh ISO timestamp
+    expect(Date.now() - Date.parse(hosts["cursor"]!)).toBeLessThan(60_000);
+  });
+
+  it("a heartbeat updates on repeat contact and never appears without an agent field", async () => {
+    await postJson("/observe", observePayload({ sessionId: "sess-noagent" }));
+    const stats1 = (await (await fetch(`${base}/stats`)).json()) as {
+      hosts: Array<{ host: string }>;
+    };
+    expect(stats1.hosts).toEqual([]);
+
+    await postJson("/observe", observePayload({ agent: "codex" }));
+    await postJson("/observe", observePayload({ agent: "codex" }));
+    const stats2 = (await (await fetch(`${base}/stats`)).json()) as {
+      hosts: Array<{ host: string }>;
+    };
+    // one row per host, not per contact
+    expect(stats2.hosts.filter((h) => h.host === "codex")).toHaveLength(1);
+  });
+
   it("full round trip: observe then search then context all succeed in one boot", async () => {
     // observe
     const o = await postJson("/observe", observePayload());

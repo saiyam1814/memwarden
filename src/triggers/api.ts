@@ -65,8 +65,30 @@ export function checkAuth(
   return null;
 }
 
+/** A host heartbeat row: which agent host last reached the daemon, when. */
+export interface HostHeartbeat {
+  host: string;
+  lastSeen: string;
+}
+
 export function registerApiTriggers(sdk: ISdk, secret?: string): void {
   const resolvedSecret = secret ?? getSecret();
+
+  // Liveness heartbeat: hook-driven observe/search calls carry an `agent`
+  // field naming their host; persist last-seen per host so `memwarden status`
+  // can show wired-vs-actually-flowing. Best-effort — a failed write never
+  // fails the request it rode in on.
+  async function recordHostHeartbeat(agent: unknown): Promise<void> {
+    if (typeof agent !== "string" || !agent.trim()) return;
+    const host = agent.trim().slice(0, 64);
+    const kv = new StateKV(sdk);
+    await kv
+      .set<HostHeartbeat>(KV.hostHeartbeats, host, {
+        host,
+        lastSeen: new Date().toISOString(),
+      })
+      .catch(() => undefined);
+  }
 
   // --- auth middleware ----------------------------------------------
   // Invoked by the kernel with { request: { headers } }; returns
@@ -133,6 +155,11 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
         timestamp,
         data: body["data"],
       };
+      // Hook-driven captures name their host; it flows to the observation's
+      // agentId (provenance) and the liveness heartbeat.
+      const agent = asNonEmptyString(body["agent"]);
+      if (agent) payload.agent = agent;
+      await recordHostHeartbeat(agent);
       const result = await sdk.trigger({
         function_id: "mem::observe",
         payload,
@@ -284,6 +311,10 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
         payload.token_budget = body["token_budget"] as number;
       if (body["safe_only"] === true) payload.safe_only = true;
 
+      // Session-start injection is a search; its `agent` field only feeds the
+      // liveness heartbeat (never the search itself).
+      await recordHostHeartbeat(body["agent"]);
+
       const result = await sdk.trigger({
         function_id: "mem::search",
         payload,
@@ -344,9 +375,10 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
     "api::stats",
     async (): Promise<Response> => {
       const kv = new StateKV(sdk);
-      const [memories, sessions] = await Promise.all([
+      const [memories, sessions, hosts] = await Promise.all([
         kv.list(KV.memories).catch(() => []),
         kv.list(KV.sessions).catch(() => []),
+        kv.list<HostHeartbeat>(KV.hostHeartbeats).catch(() => []),
       ]);
       const provider = getEmbeddingProvider();
       const vec = getVectorIndex();
@@ -354,6 +386,9 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
         memories: memories.length,
         sessions: sessions.length,
         vectors: vec?.size ?? 0,
+        // Which agent hosts have actually reached this daemon, and when —
+        // the "live" column of `memwarden status`.
+        hosts,
         embedding: provider
           ? { provider: provider.name, dimensions: provider.dimensions }
           : null,
