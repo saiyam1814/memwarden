@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [20, 22]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npx vitest run
+
+  fresh-install:
+    # The "green tests lied" guard: install the actual tarball into a clean
+    # dir and exercise the CLI the way a stranger would.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm pack
+      - run: |
+          mkdir /tmp/fresh && cd /tmp/fresh
+          npm init -y
+          npm install "$GITHUB_WORKSPACE"/memwarden-*.tgz --no-fund --no-audit
+          ./node_modules/.bin/memwarden status
+          ./node_modules/.bin/memwarden audit /nonexistent.db 2>&1 | grep -q ENOENT
