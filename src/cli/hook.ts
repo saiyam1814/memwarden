@@ -62,6 +62,8 @@ export interface CanonicalEvent {
   prompt?: string;
   /** Why the session ended (session-end events only). */
   reason?: string;
+  /** The assistant's final message — the session OUTCOME (stop events). */
+  assistantResponse?: string;
 }
 
 function str(v: unknown): string | undefined {
@@ -88,6 +90,13 @@ function str(v: unknown): string | undefined {
  *   Claude schema elsewhere — could not verify a published field reference).
  *   `reason` carries the end reason on Claude Code / Gemini / Cursor
  *   sessionEnd (verified); Codex Stop and Kiro stop carry no reason.
+ *   The assistant's FINAL MESSAGE — the session outcome — arrives as
+ *   `last_assistant_message` on Codex Stop (VERIFIED,
+ *   learn.chatgpt.com/docs/hooks) and `assistant_response` on Kiro stop
+ *   (VERIFIED, kiro.dev/docs/cli/hooks). Both keys are read for every
+ *   dialect-family host: Claude Code / Gemini / Cursor do not document one
+ *   on their end-of-session events (UNVERIFIABLE — treated as absent), so
+ *   reading the keys is a no-op there today and future-proof if they add it.
  *
  * Malformed JSON yields an empty event — a hook is never the thing that
  * breaks an agent's turn.
@@ -107,6 +116,7 @@ export function parseHostEvent(raw: string, host: HookHost): CanonicalEvent {
     const toolName = str(obj["toolName"]);
     const prompt = str(obj["prompt"]);
     const reason = str(obj["reason"]);
+    const assistant = str(obj["assistantResponse"]);
     if (sessionId) evt.sessionId = sessionId;
     if (cwd) evt.cwd = cwd;
     if (toolName) evt.toolName = toolName;
@@ -114,6 +124,7 @@ export function parseHostEvent(raw: string, host: HookHost): CanonicalEvent {
     if ("toolOutput" in obj) evt.toolOutput = obj["toolOutput"];
     if (prompt) evt.prompt = prompt;
     if (reason) evt.reason = reason;
+    if (assistant) evt.assistantResponse = assistant;
     return evt;
   }
   const evt: CanonicalEvent = {};
@@ -137,6 +148,11 @@ export function parseHostEvent(raw: string, host: HookHost): CanonicalEvent {
   if (prompt) evt.prompt = prompt;
   const reason = str(obj["reason"]);
   if (reason) evt.reason = reason;
+  // Session outcome: Codex Stop uses last_assistant_message, Kiro stop uses
+  // assistant_response (both verified — see the doc comment above).
+  const assistant =
+    str(obj["last_assistant_message"]) ?? str(obj["assistant_response"]);
+  if (assistant) evt.assistantResponse = assistant;
   return evt;
 }
 
@@ -394,9 +410,12 @@ export async function handlePrompt(raw: string, deps: HookDeps): Promise<string>
 
 /**
  * SessionEnd (Codex/Kiro: Stop, OpenCode: session.idle): tell the daemon the
- * session is over so mem::observe synthesizes the handoff summary. No host
- * consumes output from its end-of-session hook, so this always prints
- * nothing; failures are swallowed (a downed daemon just means no handoff).
+ * session is over so mem::observe synthesizes the handoff summary. When the
+ * host supplies the assistant's final message (Codex last_assistant_message,
+ * Kiro assistant_response), it rides along as the session OUTCOME — the
+ * handoff's "how did it end" half. No host consumes output from its
+ * end-of-session hook, so this always prints nothing; failures are swallowed
+ * (a downed daemon just means no handoff).
  */
 export async function handleSessionEnd(raw: string, deps: HookDeps): Promise<string> {
   const host = hostOf(deps);
@@ -417,7 +436,13 @@ export async function handleSessionEnd(raw: string, deps: HookDeps): Promise<str
         cwd,
         timestamp: now,
         agent: host,
-        data: { reason: evt.reason ?? "unknown" },
+        data: {
+          reason: evt.reason ?? "unknown",
+          // Same client-side cap as prompts: the stop hook must stay cheap.
+          ...(evt.assistantResponse
+            ? { assistant_response: evt.assistantResponse.slice(0, MAX_PROMPT_POST_CHARS) }
+            : {}),
+        },
       }),
     });
   } catch {
