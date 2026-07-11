@@ -93,11 +93,16 @@ export function makeVectorIndex(dims: number): VectorIndexLike {
  * for it.
  */
 export async function makeConfiguredVectorIndex(dims: number): Promise<VectorIndexLike> {
-  if (getVectorBackend() === "turbovec") {
+  const configured = getVectorBackend();
+  if (configured === "turbovec" || configured === "auto") {
     const { createTurbovecBackend } = await import("./turbovec-backend.js");
-    const backend = await createTurbovecBackend(dims, getQuantBits());
+    const backend = await createTurbovecBackend(dims, getQuantBits(), {
+      // auto probes quietly: absence of the optional package is the normal
+      // case, not a warning. An EXPLICIT turbovec request that fails still
+      // logs loudly (createTurbovecBackend handles both).
+      quiet: configured === "auto",
+    });
     if (backend) return backend;
-    // createTurbovecBackend already logged the concrete reason.
   }
   return makeVectorIndex(dims);
 }

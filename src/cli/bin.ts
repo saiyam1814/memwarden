@@ -784,6 +784,24 @@ async function up(rest: string[]): Promise<void> {
               `              lexical-only (BM25). Retry later with: memwarden up`,
       );
     }
+
+    // 0.6. native search engine — optional, quiet, honest. When the
+    //      prebuilt @memwarden/turbovec loads, the daemon auto-selects it
+    //      (~0.15ms search); otherwise the TypeScript engine serves and
+    //      `memwarden status` says so. Never fatal, never noisy.
+    const { turbovecInstalled, installTurbovecRuntime } = await import(
+      "../embedding/runtime.js"
+    );
+    if (turbovecInstalled(dataDir)) {
+      console.log("  engine    ✓ native search engine present (turbovec)");
+    } else {
+      const eng = installTurbovecRuntime(dataDir);
+      console.log(
+        eng.ok
+          ? "  engine    ✓ native search engine installed (turbovec, ~0.15ms search)"
+          : `  engine    - TypeScript search engine (native engine ${eng.message})`,
+      );
+    }
   }
 
   // 1. daemon — install a self-healing OS service (starts at login, restarts

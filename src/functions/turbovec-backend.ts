@@ -376,16 +376,22 @@ export class TurbovecBackend implements VectorBackend {
 export async function createTurbovecBackend(
   dims: number,
   bits: number,
-  opts?: { nativeModule?: NativeTurbovecModule | null },
+  opts?: { nativeModule?: NativeTurbovecModule | null; quiet?: boolean },
 ): Promise<TurbovecBackend | null> {
   const mod =
     opts && "nativeModule" in opts ? opts.nativeModule : await loadNativeTurbovec();
   if (!mod) {
-    logger.warn(
-      "turbovec backend requested but '@memwarden/turbovec' is not installed " +
-        "(tried the bare specifier and <dataDir>/runtime/node_modules) — " +
-        "falling back to the TypeScript backend",
-    );
+    if (opts?.quiet) {
+      // auto mode: absence of the optional native package is the normal
+      // case, not a problem worth a warning.
+      logger.info("vector backend auto: native turbovec not installed — using typescript");
+    } else {
+      logger.warn(
+        "turbovec backend requested but '@memwarden/turbovec' is not installed " +
+          "(tried the bare specifier and <dataDir>/runtime/node_modules) — " +
+          "falling back to the TypeScript backend",
+      );
+    }
     return null;
   }
   try {

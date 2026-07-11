@@ -227,9 +227,16 @@ export function getQuantSeed(): string {
  * TypeScript backend (see search.ts makeConfiguredVectorIndex) — but an
  * unproven native path must never be the silent default.
  */
-export function getVectorBackend(): "turbovec" | "typescript" {
+export function getVectorBackend(): "turbovec" | "typescript" | "auto" {
   const raw = (env("MEMWARDEN_VECTOR_BACKEND") ?? "").trim().toLowerCase();
-  return raw === "turbovec" ? "turbovec" : "typescript";
+  if (raw === "turbovec") return "turbovec";
+  if (raw === "typescript") return "typescript";
+  // auto (default): use the native turbovec engine when the optional
+  // '@memwarden/turbovec' package actually loads on this machine, else the
+  // TypeScript index. Safe because loading only succeeds for a binary that
+  // passed its per-platform CI gate before publish, and the backend label
+  // (status / stats) always names whichever engine is really serving.
+  return "auto";
 }
 
 /**
