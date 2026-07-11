@@ -151,6 +151,83 @@ function measure(
   };
 }
 
+// --- filtered search: allowlist path vs global-then-postfilter ----------
+//
+// The production shape: 10K vectors spread across N_PROJECTS synthetic
+// projects, a query scoped to ONE project (~N/N_PROJECTS in scope). The old
+// path over-fetches a global top-k and post-filters it; the new path (wired
+// in mem::search) hands the backend the in-scope allowlist and fills k from
+// within it. Correctness bar for both: ZERO out-of-scope results.
+
+const N_PROJECTS = 20;
+
+interface FilteredReport {
+  label: string;
+  oldP50: number;
+  oldP95: number;
+  newP50: number;
+  newP95: number;
+  oldOutOfScope: number;
+  newOutOfScope: number;
+  oldHits: number;
+  newHits: number;
+}
+
+function measureFiltered(
+  backend: VectorBackend,
+  queries: Float32Array[],
+): FilteredReport | null {
+  if (typeof backend.searchAllowed !== "function") return null;
+  // Project assignment is by id: obs-i belongs to project i % N_PROJECTS.
+  const project = 7; // arbitrary fixed target project
+  const inScope = (id: string): boolean =>
+    parseInt(id.slice(4), 10) % N_PROJECTS === project;
+  const allowed = new Set<string>();
+  for (const id of backend.ids()) if (inScope(id)) allowed.add(id);
+
+  // Old path: global over-fetch (the mem::search filtering factor, k*10)
+  // then post-filter down to k.
+  const oldTimes: number[] = [];
+  let oldOutOfScope = 0;
+  let oldHits = 0;
+  for (const q of queries) {
+    const t = performance.now();
+    const hits = backend
+      .search(q, K * 10)
+      .filter((h) => inScope(h.obsId))
+      .slice(0, K);
+    oldTimes.push(performance.now() - t);
+    oldHits += hits.length;
+    for (const h of hits) if (!inScope(h.obsId)) oldOutOfScope++;
+  }
+
+  // New path: allowlist search fills k from within the scope.
+  const newTimes: number[] = [];
+  let newOutOfScope = 0;
+  let newHits = 0;
+  for (const q of queries) {
+    const t = performance.now();
+    const hits = backend.searchAllowed(q, K, allowed);
+    newTimes.push(performance.now() - t);
+    newHits += hits.length;
+    for (const h of hits) if (!allowed.has(h.obsId)) newOutOfScope++;
+  }
+
+  oldTimes.sort((a, b) => a - b);
+  newTimes.sort((a, b) => a - b);
+  return {
+    label: backend.backendLabel,
+    oldP50: percentile(oldTimes, 50),
+    oldP95: percentile(oldTimes, 95),
+    newP50: percentile(newTimes, 50),
+    newP95: percentile(newTimes, 95),
+    oldOutOfScope,
+    newOutOfScope,
+    oldHits,
+    newHits,
+  };
+}
+
 /** Same searchable id set after remove + serialize/restore round trip. */
 function lifecycleCheck(
   make: () => VectorBackend,
@@ -238,8 +315,10 @@ async function main(): Promise<void> {
   let turboReport: BackendReport | null = null;
   let allowlistGate: { ok: boolean; detail: string } | null = null;
   let turboLifecycle: { ok: boolean; detail: string } | null = null;
+  let turboBackend: TurbovecBackend | null = null;
   if (native) {
     const turbo = new TurbovecBackend(native, DIMS, 4);
+    turboBackend = turbo;
     // turbovec bytes/vector: 4-bit codes over true dims + f32 scale.
     const turboBytes = Math.ceil((DIMS * 4) / 8) + 4;
     turboReport = measure(turbo, vectors, queries, truthTop1, truthTop10, turboBytes);
@@ -300,6 +379,33 @@ async function main(): Promise<void> {
     );
   }
 
+  // --- filtered search --------------------------------------------------
+
+  console.log(
+    `\n  filtered search — ${N} vectors across ${N_PROJECTS} projects, query scoped to one ` +
+      `(~${Math.round(N / N_PROJECTS)} in scope), k=${K}:`,
+  );
+  const filteredReports: FilteredReport[] = [];
+  // These instances already hold the 10K vectors from measure() above.
+  const filteredBackends: VectorBackend[] = [full, quant];
+  if (turboBackend) filteredBackends.push(turboBackend);
+  for (const backend of filteredBackends) {
+    const r = measureFiltered(backend, queries);
+    if (r) filteredReports.push(r);
+  }
+  for (const r of filteredReports) {
+    console.log(
+      `  ${r.label.padEnd(28)} old global+postfilter p50 ${r.oldP50.toFixed(2)}ms p95 ${r.oldP95.toFixed(2)}ms ` +
+        `(${r.oldHits}/${N_QUERIES * K} hits filled)   ` +
+        `new allowlist p50 ${r.newP50.toFixed(2)}ms p95 ${r.newP95.toFixed(2)}ms ` +
+        `(${r.newHits}/${N_QUERIES * K} hits filled)   ` +
+        `out-of-scope old/new: ${r.oldOutOfScope}/${r.newOutOfScope}`,
+    );
+  }
+  const filteredCorrect = filteredReports.every(
+    (r) => r.oldOutOfScope === 0 && r.newOutOfScope === 0,
+  );
+
   // --- gates ------------------------------------------------------------
 
   console.log("\n  promotion gate (native default eligibility):");
@@ -322,6 +428,12 @@ async function main(): Promise<void> {
     });
   }
   checks.push({ name: "GATE 3 (fallback) TS quant add/remove/save/load id-set parity", ...quantLifecycle });
+  checks.push({
+    name: "GATE 4 filtered search: zero out-of-scope results (old + new path, every backend)",
+    ok: filteredCorrect && filteredReports.length > 0,
+    detail: `${filteredReports.length} backends checked, ` +
+      `${filteredReports.reduce((s, r) => s + r.oldOutOfScope + r.newOutOfScope, 0)} violations`,
+  });
 
   let allOk = true;
   for (const c of checks) {
