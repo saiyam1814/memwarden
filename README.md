@@ -162,11 +162,28 @@ memory from the active store, search, recall, and every index, and prints a rece
 oplog entries that recorded the original write and the deletion, plus whole-chain verification.
 An unknown id reports failure honestly; there is no `{deleted: 0, success: true}` theater here.
 
-**Erasure without breaking the chain.** Oplog entries commit to the SHA-256 *of* their content
-(chain v2), not the content itself — so the content can be nulled in place and every hash still
-verifies. `memwarden forget <id> --erase` deletes the memory AND erases its content from the
-oplog; the receipt says `contentErased: true` and you can grep the database file yourself to
+**Erasure without breaking the chain — and only *authorized* erasure.** Oplog entries commit to
+the SHA-256 *of* their content (chain v2), not the content itself — so the content can be nulled
+in place and every hash still verifies. Every erasure is itself chain-recorded: the store appends
+an `erase` entry listing exactly which entry ids (and their content hashes) were nulled, and
+verification **rejects any nulled payload that no later `erase`/`compact` record vouches for** —
+someone with database access who silently nulls a payload breaks the chain instead of hiding
+behind it. (Chains erased by memwarden versions before this rule fail verification for the same
+reason; a one-time `memwarden compact` re-anchors them — its record authorizes every erased id.)
+`memwarden forget <id> --erase` deletes the memory AND erases its content from the
+oplog; the receipt says `contentErased: true` (with the title redacted — an erase receipt never
+re-discloses what it erased) and you can grep the database file yourself to
 confirm the bytes are gone (SQLite `secure_delete` is on, and the WAL is checkpointed).
+
+**Erase cascades into derived records.** An observation's content also flows into records
+*derived* from it: the session's `firstPrompt`, the session-end handoff (`Session.summary`, the
+stored summary, the searchable handoff observation), and Déjà Fix capsules recorded from it.
+`--erase` re-derives all of those from the remaining observations — as if the erased one never
+existed — and byte-erases their stale history too (each rewrite is chain-authorized, so
+verification still passes). Precisely scoped: the cascade covers those session-derived records
+and Déjà Fix capsules; it does **not** rewrite *other independent observations* that happen to
+quote the same text (they are their own memories — forget them by id), and on a pre-v2 chain
+every in-place erasure is refused until `memwarden compact` migrates it.
 `memwarden compact [--dry-run]` erases every *already-forgotten* memory in one pass, migrates
 any pre-v2 history to the new chain (their old hashes covered the raw content, so `--erase`
 refuses them until you compact), anchors the old chain's head hash in a final `compact` record,

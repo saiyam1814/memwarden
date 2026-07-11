@@ -32,7 +32,7 @@ import { buildSessionHandoff, MAX_STORED_PROMPT_CHARS } from "./handoff.js";
 import { extractProvenance } from "./provenance.js";
 import { hashFiles } from "./verify.js";
 import { recordFix, looksLikeResolvedFix } from "./dejafix.js";
-import { getSearchIndex, vectorIndexAddGuarded } from "./search.js";
+import { getSearchIndex, vectorIndexAddGuarded, vectorIndexRemove } from "./search.js";
 import { logger } from "./logger.js";
 import { metrics } from "../observability/metrics.js";
 
@@ -97,8 +97,17 @@ export function registerObserveFunction(
       // Prompt events carry no tool_input; hash the prompt text instead so
       // two DIFFERENT prompts in the same session never collide (only an
       // identical retried prompt inside the TTL window dedups).
+      // session_end is special: per-turn Stop hosts (Codex, Kiro) end EVERY
+      // turn, and each stop should refresh the handoff — so its dedup input
+      // includes the full data (assistant_response and all) AND the event
+      // timestamp. Only a true duplicate delivery (same timestamp, same
+      // data) dedups; a new turn's stop never gets swallowed.
       const dedupInput =
-        d["tool_input"] !== undefined ? d["tool_input"] : d["prompt"];
+        d["tool_input"] !== undefined
+          ? d["tool_input"]
+          : payload.hookType === "session_end"
+            ? { data: d, ts: payload.timestamp }
+            : d["prompt"];
       dedupHash = dedupMap.computeHash(payload.sessionId, toolName, dedupInput);
       if (dedupMap.isDuplicate(dedupHash)) {
         return { deduplicated: true, sessionId: payload.sessionId };
@@ -152,6 +161,18 @@ export function registerObserveFunction(
         // cap length so a pasted novella cannot bloat the store.
         if (typeof d["prompt"] === "string") {
           raw.userPrompt = d["prompt"].slice(0, MAX_STORED_PROMPT_CHARS);
+        }
+      }
+      if (payload.hookType === "session_end" || payload.hookType === "stop") {
+        // The assistant's final message — the session OUTCOME. Hook clients
+        // send it as assistant_response (mapped from Codex
+        // last_assistant_message / Kiro assistant_response); same privacy
+        // strip + cap as prompts.
+        if (typeof d["assistant_response"] === "string") {
+          raw.assistantResponse = d["assistant_response"].slice(
+            0,
+            MAX_STORED_PROMPT_CHARS,
+          );
         }
       }
 
@@ -296,10 +317,23 @@ export function registerObserveFunction(
         const stored = await kv.list<CompressedObservation>(
           KV.observations(payload.sessionId),
         );
-        const prior = stored.filter((o) => o && o.id !== obsId);
+        // Per-turn Stop hosts (Codex, Kiro) end EVERY turn: each stop must
+        // REFRESH the session's handoff, not accumulate one per turn. Reuse
+        // the existing handoff observation's slot when there is one.
+        const existingHandoff = stored.find(
+          (o) =>
+            o &&
+            o.type === "task" &&
+            Array.isArray(o.concepts) &&
+            o.concepts.includes("session-summary"),
+        );
+        const handoffId = existingHandoff?.id ?? obsId;
+        const prior = stored.filter(
+          (o) => o && o.id !== obsId && o.id !== handoffId,
+        );
         const sess = await kv.get<Session>(KV.sessions, payload.sessionId);
         const handoff = buildSessionHandoff({
-          obsId,
+          obsId: handoffId,
           sessionId: payload.sessionId,
           timestamp: payload.timestamp,
           project:
@@ -309,16 +343,27 @@ export function registerObserveFunction(
               : undefined),
           firstPrompt: sess?.firstPrompt,
           agentId: raw.agentId,
+          // The OUTCOME: the assistant's final message, when the stop event
+          // carried one — so the handoff says how the session ended, not
+          // just what happened along the way.
+          assistantResponse: raw.assistantResponse,
           observations: prior,
         });
 
-        await kv.set(KV.observations(payload.sessionId), obsId, handoff.observation);
+        if (existingHandoff) {
+          // Refresh in place: drop the just-persisted raw session_end row
+          // (subsumed by the refreshed handoff) and re-index the same id.
+          await kv.delete(KV.observations(payload.sessionId), obsId);
+          getSearchIndex().remove(handoffId);
+          vectorIndexRemove(handoffId);
+        }
+        await kv.set(KV.observations(payload.sessionId), handoffId, handoff.observation);
         getSearchIndex().add(handoff.observation);
         await vectorIndexAddGuarded(
-          obsId,
+          handoffId,
           payload.sessionId,
           handoff.observation.title + " " + handoff.observation.narrative,
-          { kind: "synthetic", logId: obsId },
+          { kind: "synthetic", logId: handoffId },
         );
 
         if (sess) {
@@ -326,6 +371,9 @@ export function registerObserveFunction(
             { type: "set", path: "summary", value: handoff.summaryText },
             { type: "set", path: "status", value: "completed" },
             { type: "set", path: "endedAt", value: payload.timestamp },
+            // Keep the count honest across repeated stops (the refreshed
+            // handoff replaces the raw row instead of adding to it).
+            { type: "set", path: "observationCount", value: prior.length + 1 },
           ]);
           await kv.set(KV.summaries, payload.sessionId, handoff.sessionSummary);
         }
@@ -335,17 +383,18 @@ export function registerObserveFunction(
           payload: {
             stream_name: STREAM.name,
             group_id: STREAM.group(payload.sessionId),
-            item_id: obsId,
+            item_id: handoffId,
             data: { type: "compressed", observation: handoff.observation },
           },
         });
 
         logger.info("Session handoff captured", {
-          obsId,
+          obsId: handoffId,
           sessionId: payload.sessionId,
           observations: prior.length,
+          refreshed: Boolean(existingHandoff),
         });
-        return { observationId: obsId };
+        return { observationId: handoffId };
       }
 
       // Per-observation LLM compression is opt-in .

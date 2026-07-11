@@ -46,6 +46,10 @@ export interface HandoffInput {
   project?: string | undefined;
   firstPrompt?: string | undefined;
   agentId?: string | undefined;
+  /** The assistant's final message — the session's OUTCOME, when the host's
+   * stop event supplied one (Codex last_assistant_message, Kiro
+   * assistant_response). */
+  assistantResponse?: string | undefined;
   /** The session's stored observations, excluding the session_end row. */
   observations: ReadonlyArray<HandoffSourceObservation>;
 }
@@ -204,12 +208,19 @@ export function buildSessionHandoff(input: HandoffInput): Handoff {
     );
   const openThreads = dedupe([...openErrors, ...openAsks], 4);
 
+  // --- outcome: how the session actually ended ----------------------------
+  const outcome =
+    typeof input.assistantResponse === "string" && input.assistantResponse.trim()
+      ? clip(input.assistantResponse.replace(/\s+/g, " ").trim(), 400)
+      : undefined;
+
   // --- assemble -----------------------------------------------------------
   const lines: string[] = [
     `Session handoff${input.project ? ` — ${input.project}` : ""} (ended ${input.timestamp})`,
     `Goal: ${goal}`,
     `What happened: ${activity}`,
   ];
+  if (outcome) lines.push(`Outcome: ${outcome}`);
   if (decisions.length > 0) {
     lines.push("Decisions:");
     for (const d of decisions) lines.push(`- ${d}`);

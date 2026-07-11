@@ -34,12 +34,16 @@ export interface UpdateOp {
 export type StateEventType = "set" | "update" | "delete";
 
 /**
- * What an oplog row's `op` can be: any mutation, plus the synthetic
- * `compact` record that `compactOplog` appends to anchor the pre-compaction
- * head hash. `compact` never appears in mutation events — it is not a KV
- * mutation.
+ * What an oplog row's `op` can be: any mutation, plus two synthetic records
+ * that are chain bookkeeping rather than KV mutations (neither ever appears
+ * in mutation events):
+ *   `compact` — appended by compactOplog to anchor the pre-compaction head
+ *               hash (and, via erasedIds, authorize every erased payload);
+ *   `erase`   — appended by eraseOplogPayloads listing the ids+payload_hashes
+ *               it nulled, so verifyChain can tell an AUTHORIZED erasure from
+ *               an attacker silently nulling a payload.
  */
-export type OplogOp = StateEventType | "compact";
+export type OplogOp = StateEventType | "compact" | "erase";
 
 /**
  * Emitted by the store after a successful mutation. The kernel uses this to

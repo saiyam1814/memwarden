@@ -361,6 +361,78 @@ describe("mem::observe hookType session_end (handoff summary)", () => {
     expect(session?.summary).not.toContain('{"file_path"');
   });
 
+  it("the handoff carries the OUTCOME when the stop event supplies the assistant's final message (F6)", async () => {
+    await runSession();
+    // A per-turn Stop host (codex/kiro) fires again with the final answer.
+    await sdk.trigger({
+      function_id: "mem::observe",
+      payload: payload({
+        hookType: "session_end",
+        timestamp: "2026-07-11T19:05:00.000Z",
+        data: {
+          reason: "prompt_input_exit",
+          assistant_response: "Added an LRU cache to the geodata fetcher; all tests green.",
+        },
+      }),
+    });
+    const session = await kv.get<Session>(KV.sessions, "sess-J");
+    expect(session?.summary).toContain("Outcome:");
+    expect(session?.summary).toContain("all tests green");
+    const summary = await kv.get<SessionSummary>(KV.summaries, "sess-J");
+    expect(summary?.narrative).toContain("all tests green");
+  });
+
+  it("repeated session_end events REFRESH the handoff (per-turn Stop hosts are not dedup-swallowed) (F6)", async () => {
+    await runSession(); // ends at 19:00 with no assistant message
+    // Same session, one more turn: an edit then another Stop within the
+    // 5-minute dedup window, carrying the newer outcome.
+    await sdk.trigger({
+      function_id: "mem::observe",
+      payload: payload({
+        timestamp: "2026-07-11T19:01:00.000Z",
+        data: {
+          tool_name: "Edit",
+          tool_input: { file_path: "src/geodata-cache.ts" },
+          tool_output: "ok",
+        },
+      }),
+    });
+    const second = await sdk.trigger<unknown, { observationId?: string; deduplicated?: boolean }>({
+      function_id: "mem::observe",
+      payload: payload({
+        hookType: "session_end",
+        timestamp: "2026-07-11T19:02:00.000Z",
+        data: { reason: "prompt_input_exit", assistant_response: "second turn wrapped up" },
+      }),
+    });
+    expect(second.deduplicated).toBeUndefined();
+
+    const session = await kv.get<Session>(KV.sessions, "sess-J");
+    expect(session?.summary).toContain("second turn wrapped up");
+    expect(session?.summary).toContain("src/geodata-cache.ts");
+
+    // REFRESH, not accumulate: exactly one handoff observation per session.
+    const obs = await kv.list<{ concepts?: string[]; narrative?: string }>(
+      KV.observations("sess-J"),
+    );
+    const handoffs = obs.filter((o) => o.concepts?.includes("session-summary"));
+    expect(handoffs).toHaveLength(1);
+    expect(handoffs[0]?.narrative).toContain("second turn wrapped up");
+  });
+
+  it("identical repeated session_end deliveries (same timestamp, same data) still dedup", async () => {
+    await runSession();
+    const dup = await sdk.trigger<unknown, { deduplicated?: boolean }>({
+      function_id: "mem::observe",
+      payload: payload({
+        hookType: "session_end",
+        timestamp: "2026-07-11T19:00:00.000Z",
+        data: { reason: "prompt_input_exit" },
+      }),
+    });
+    expect(dup.deduplicated).toBe(true);
+  });
+
   it("session_end with no session row still stores a handoff observation", async () => {
     const r = await sdk.trigger<unknown, { observationId?: string }>({
       function_id: "mem::observe",

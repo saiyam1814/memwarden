@@ -97,6 +97,91 @@ describe("provenance extraction", () => {
     expect(isUnsourced(undefined)).toBe(true);
     expect(isUnsourced({ userConfirmed: false })).toBe(true);
   });
+
+  it("normalizes ABSOLUTE files under the capture cwd to repo-relative (F1 capture half)", () => {
+    const p = extractProvenance({
+      cwd: "/work/repo",
+      data: { tool_name: "Edit", tool_input: { file_path: "/work/repo/src/auth.ts" } },
+    });
+    expect(p.files).toEqual(["src/auth.ts"]);
+    // Outside the capture cwd: keep the absolute identity (cross-project
+    // memories must never be re-rooted into the wrong repo).
+    const q = extractProvenance({
+      cwd: "/work/repo",
+      data: { tool_name: "Read", tool_input: { file_path: "/etc/hosts" } },
+    });
+    expect(q.files).toEqual(["/etc/hosts"]);
+    // Prefix-sibling dirs are NOT "under" cwd (/work/repo2 vs /work/repo).
+    const r = extractProvenance({
+      cwd: "/work/repo",
+      data: { tool_name: "Read", tool_input: { file_path: "/work/repo2/src/auth.ts" } },
+    });
+    expect(r.files).toEqual(["/work/repo2/src/auth.ts"]);
+  });
+
+  it("extracts NESTED file paths under common keys (Kiro operations[], wrapped edits)", () => {
+    // Kiro fsWrite/fsReplace documents tool_input.operations[].path.
+    const kiro = extractProvenance({
+      cwd: "/w",
+      data: {
+        tool_name: "fsReplace",
+        tool_input: {
+          operations: [
+            { type: "replace", path: "src/a.ts", old_str: "x", new_str: "y" },
+            { type: "create", path: "src/b.ts", content: "z" },
+          ],
+        },
+      },
+    });
+    expect(kiro.files).toContain("src/a.ts");
+    expect(kiro.files).toContain("src/b.ts");
+
+    // Cursor/host variants that wrap file references one level down.
+    const wrapped = extractProvenance({
+      cwd: "/w",
+      data: {
+        tool_name: "applyPatch",
+        tool_input: { changes: [{ file_path: "src/c.ts", diff: "…" }] },
+      },
+    });
+    expect(wrapped.files).toContain("src/c.ts");
+
+    // Claude Code MultiEdit shape keeps working (top-level file_path).
+    const multi = extractProvenance({
+      cwd: "/w",
+      data: {
+        tool_name: "MultiEdit",
+        tool_input: {
+          file_path: "src/d.ts",
+          edits: [{ old_string: "a", new_string: "b" }],
+        },
+      },
+    });
+    expect(multi.files).toEqual(["src/d.ts"]);
+  });
+
+  it("bounds nested extraction by depth and count", () => {
+    // Too deep (beyond ~4 levels) is ignored…
+    const deep = extractProvenance({
+      cwd: "/w",
+      data: {
+        tool_name: "X",
+        tool_input: { a: { b: { c: { d: { e: { path: "src/too-deep.ts" } } } } } },
+      },
+    });
+    expect(deep.files ?? []).not.toContain("src/too-deep.ts");
+    // …and the total file count is capped.
+    const many = extractProvenance({
+      cwd: "/w",
+      data: {
+        tool_name: "X",
+        tool_input: {
+          operations: Array.from({ length: 100 }, (_, i) => ({ path: `src/f${i}.ts` })),
+        },
+      },
+    });
+    expect((many.files ?? []).length).toBeLessThanOrEqual(20);
+  });
 });
 
 describe("mem::doctor", () => {

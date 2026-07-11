@@ -664,6 +664,56 @@ describe("handleSessionEnd", () => {
     }
   });
 
+  it("codex Stop forwards last_assistant_message as the session OUTCOME (verified field, learn.chatgpt.com/docs/hooks)", async () => {
+    const fetchFn = vi.fn(async () => jsonResponse({ observationId: "o" })) as unknown as typeof fetch;
+    await handleSessionEnd(
+      JSON.stringify({
+        session_id: "x1",
+        cwd: "/w/x",
+        hook_event_name: "Stop",
+        turn_id: "t9",
+        stop_hook_active: false,
+        last_assistant_message: "Done — rotated the deploy keys and updated the docs.",
+      }),
+      { baseUrl: "http://d", fetchFn, host: "codex" },
+    );
+    const { body } = observeCall(fetchFn);
+    expect(body).toMatchObject({ hookType: "session_end", agent: "codex" });
+    expect(body.data).toEqual({
+      reason: "unknown",
+      assistant_response: "Done — rotated the deploy keys and updated the docs.",
+    });
+  });
+
+  it("kiro stop forwards assistant_response as the session OUTCOME (verified field, kiro.dev/docs/cli/hooks)", async () => {
+    const fetchFn = vi.fn(async () => jsonResponse({ observationId: "o" })) as unknown as typeof fetch;
+    await handleSessionEnd(
+      JSON.stringify({
+        session_id: "k1",
+        cwd: "/w/k",
+        hook_event_name: "stop",
+        assistant_response: "All tests green; the limiter now uses a token bucket.",
+      }),
+      { baseUrl: "http://d", fetchFn, host: "kiro" },
+    );
+    const { body } = observeCall(fetchFn);
+    expect(body).toMatchObject({ hookType: "session_end", agent: "kiro" });
+    expect(body.data).toEqual({
+      reason: "unknown",
+      assistant_response: "All tests green; the limiter now uses a token bucket.",
+    });
+  });
+
+  it("caps a huge assistant message before POSTing (stop hooks stay cheap)", async () => {
+    const fetchFn = vi.fn(async () => jsonResponse({ observationId: "o" })) as unknown as typeof fetch;
+    await handleSessionEnd(
+      JSON.stringify({ session_id: "x1", cwd: "/w/x", last_assistant_message: "z".repeat(20_000) }),
+      { baseUrl: "http://d", fetchFn, host: "codex" },
+    );
+    const { body } = observeCall(fetchFn);
+    expect(((body.data as { assistant_response: string }).assistant_response).length).toBeLessThanOrEqual(4000);
+  });
+
   it("gemini SessionEnd carries its documented reason values", async () => {
     const fetchFn = vi.fn(async () => jsonResponse({ observationId: "o" })) as unknown as typeof fetch;
     await handleSessionEnd(
