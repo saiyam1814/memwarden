@@ -234,7 +234,8 @@ checkout: `npm install && npm run build && node dist/cli/bin.js up`.)
 - **detects your installed tools** and writes the memwarden MCP server into each one's config,
   in that tool's own schema, without clobbering servers you already have,
 - **writes native lifecycle hooks** for every detected tool that has a hook (or plugin) system,
-  so capture and injection are mechanical — the agent cannot forget to do them,
+  so capture (tool traces *and* your prompts), injection, and the end-of-session handoff
+  summary are mechanical — the agent cannot forget to do them,
 - **writes an `AGENTS.md`** block only as a fallback, for detected tools with no hook system
   (or for everything, with `up --agents-md`).
 
@@ -280,15 +281,32 @@ matter, so here they are honestly. There are exactly three ways memory reaches a
 
 1. **Hooks (Claude Code, Codex, Cursor, Gemini CLI, Kiro, OpenCode).** Mechanical. A
    session-start hook injects this project's verified memory before you type a word; a
-   post-tool-use hook captures your work as it happens. One `memwarden hook` binary speaks each
-   host's dialect natively (`--host codex|cursor|gemini|kiro|opencode`) — same canonical event
-   in, each host's own response schema out. The agent cannot forget to do it. Four honest
-   caveats: Codex runs hooks only after you trust them via `/hooks`; Kiro attaches hooks per
-   custom agent (none defined = nothing to hook until you create one) and ignores post-tool-use
-   stdout, so Déjà Fix cannot auto-inject there (capture works, `/recall` works); OpenCode
-   capture is mechanical but injection rides a best-effort plugin path (`chat.message`) that
-   OpenCode does not formally document for context injection; and a "live" heartbeat proves
-   hooks are firing, not that every feature (capture AND injection) works on that host.
+   post-tool-use hook captures your work as it happens; a prompt hook records what you actually
+   asked for (never blocking the turn — on Cursor it always answers `{"continue": true}`); and a
+   session-end hook writes a **handoff summary** — goal, what happened, decisions, open threads —
+   synthesized deterministically (no LLM) and stored as searchable memory, so the next tool you
+   open starts from the conversation's intent and outcome, not clipped tool output. One
+   `memwarden hook` binary speaks each host's dialect natively
+   (`--host codex|cursor|gemini|kiro|opencode`) — same canonical event in, each host's own
+   response schema out. The agent cannot forget to do it. Honest caveats: Codex runs hooks only
+   after you trust them via `/hooks`; Kiro attaches hooks per custom agent (none defined =
+   nothing to hook until you create one) and ignores post-tool-use stdout, so Déjà Fix cannot
+   auto-inject there (capture works, `/recall` works); OpenCode capture is mechanical but
+   injection and prompt capture ride a best-effort plugin path (`chat.message`) that OpenCode
+   does not formally document; and a "live" heartbeat proves hooks are firing, not that every
+   feature works on that host.
+
+   What each host's session journal actually captures today:
+
+   | Tool | Tool traces | Prompts | Session handoff |
+   | --- | --- | --- | --- |
+   | **Claude Code** | mechanical (`PostToolUse`) | mechanical (`UserPromptSubmit`, verified) | mechanical (`SessionEnd`, verified) |
+   | **Codex** | mechanical (after `/hooks` trust) | best-effort (`UserPromptSubmit`; prompt field assumed Claude-style, unverified) | best-effort (`Stop` fires per turn — each turn refreshes the handoff) |
+   | **Cursor** | mechanical (`postToolUse`) | mechanical (`beforeSubmitPrompt`, verified; capture-only, never blocks) | mechanical (`sessionEnd`, verified) |
+   | **Gemini CLI** | mechanical (`AfterTool`) | mechanical (`BeforeAgent`, verified) | mechanical (`SessionEnd`, verified) |
+   | **Kiro** | mechanical (per custom agent) | best-effort (`userPromptSubmit`; payload assumed Claude-style, unverified) | best-effort (`stop` fires per turn) |
+   | **OpenCode** | mechanical (plugin `tool.execute.after`) | best-effort (plugin `chat.message` text parts) | best-effort (plugin `session.idle` fires per idle — each idle refreshes the handoff) |
+   | **Antigravity / OpenClaw** | unavailable (no hook system) | unavailable | unavailable — MCP tools / `AGENTS.md` + `/recall` only |
 2. **Standing instruction (OpenClaw, and anything else without hooks).** `up` falls back to an
    `AGENTS.md` block telling the agent to recall at the start of every task and save what it
    learns. Soft — the agent must follow it — which is exactly why it is now the fallback, not
@@ -299,10 +317,12 @@ matter, so here they are honestly. There are exactly three ways memory reaches a
    and captured with no agent cooperation. It does **not** intercept Claude Code (own protocol —
    covered by hooks) or Cursor/Kiro/Antigravity (their own backends).
 
-So: capture in Claude Code, then open Cursor or Codex and they pull up what Claude learned —
-mechanically, via each tool's own hooks. `memwarden status` tells you which of those pipes have
-actually carried traffic (the per-host live heartbeat), so "it works across tools" is something
-you can check, not something you take on faith.
+So: work in Claude Code, then open Cursor or Codex and they pull up what Claude learned —
+mechanically, via each tool's own hooks — including the session journal: the prompt that
+started the work and the handoff summary of how it ended, not just clipped tool output.
+`memwarden status` tells you which of those pipes have actually carried traffic (the per-host
+live heartbeat), so "it works across tools" is something you can check, not something you take
+on faith.
 
 ## The 60-second trust demo
 
@@ -339,7 +359,9 @@ Once it is up, you never touch it.
 ```
 
 1. **Capture.** `observe` compresses raw tool output into a compact record (no LLM call), and
-   hashes the source files it references.
+   hashes the source files it references. Session journals ride the same path: your prompts are
+   stored as first-class intent (title = what you asked, secret-redacted, length-capped), and
+   session end synthesizes a deterministic handoff summary from the session's observations.
 2. **Embed and compress.** text → `all-MiniLM-L6-v2` vector → **TurboQuant** 2/4-bit codes
    (Google's quantization algorithm, [arXiv:2504.19874](https://arxiv.org/abs/2504.19874),
    implemented from scratch in pure TypeScript).

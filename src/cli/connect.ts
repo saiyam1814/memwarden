@@ -74,6 +74,15 @@ export function buildClaudeHooks(hookBase: string): Record<string, HookGroup[]> 
     PostToolUse: [
       { matcher: "*", hooks: [{ type: "command", command: `${hookBase} hook capture ${MEMWARDEN_HOOK_MARKER}` }] },
     ],
+    // Session journal: UserPromptSubmit captures intent (the handler prints
+    // nothing, so the prompt always proceeds); SessionEnd triggers the
+    // daemon's handoff summary. Both fields verified July 2026.
+    UserPromptSubmit: [
+      { hooks: [{ type: "command", command: `${hookBase} hook prompt ${MEMWARDEN_HOOK_MARKER}` }] },
+    ],
+    SessionEnd: [
+      { hooks: [{ type: "command", command: `${hookBase} hook session-end ${MEMWARDEN_HOOK_MARKER}` }] },
+    ],
   };
 }
 
@@ -84,7 +93,7 @@ function isMemwardenHookGroup(g: HookGroup): boolean {
   return g.hooks.some(
     (h) =>
       h.command.includes(MEMWARDEN_HOOK_MARKER) ||
-      /\bhook (?:session-start|capture)\b/.test(h.command),
+      /\bhook (?:session-start|session-end|capture|prompt)\b/.test(h.command),
   );
 }
 

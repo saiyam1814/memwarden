@@ -14,7 +14,12 @@
 // synthetic path is always taken.
 
 import { TriggerAction, type ISdk } from "../kernel/index.js";
-import type { RawObservation, HookPayload } from "./types.js";
+import type {
+  RawObservation,
+  HookPayload,
+  Session,
+  CompressedObservation,
+} from "./types.js";
 import { projectKey } from "./git-identity.js";
 import { KV, STREAM, generateId } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
@@ -23,6 +28,7 @@ import { DedupMap } from "./dedup.js";
 import { withKeyedLock } from "./keyed-mutex.js";
 import { isAutoCompressEnabled, getAgentId } from "./config.js";
 import { buildSyntheticCompression } from "./compress-synthetic.js";
+import { buildSessionHandoff, MAX_STORED_PROMPT_CHARS } from "./handoff.js";
 import { extractProvenance } from "./provenance.js";
 import { hashFiles } from "./verify.js";
 import { recordFix, looksLikeResolvedFix } from "./dejafix.js";
@@ -88,11 +94,12 @@ export function registerObserveFunction(
           ? (payload.data as Record<string, unknown>)
           : {};
       const toolName = (d["tool_name"] as string) || payload.hookType;
-      dedupHash = dedupMap.computeHash(
-        payload.sessionId,
-        toolName,
-        d["tool_input"],
-      );
+      // Prompt events carry no tool_input; hash the prompt text instead so
+      // two DIFFERENT prompts in the same session never collide (only an
+      // identical retried prompt inside the TTL window dedups).
+      const dedupInput =
+        d["tool_input"] !== undefined ? d["tool_input"] : d["prompt"];
+      dedupHash = dedupMap.computeHash(payload.sessionId, toolName, dedupInput);
       if (dedupMap.isDuplicate(dedupHash)) {
         return { deduplicated: true, sessionId: payload.sessionId };
       }
@@ -136,8 +143,16 @@ export function registerObserveFunction(
         raw.toolInput = d["tool_input"];
         raw.toolOutput = d["tool_output"] || d["error"];
       }
-      if (payload.hookType === "prompt_submit") {
-        if (typeof d["prompt"] === "string") raw.userPrompt = d["prompt"];
+      if (
+        payload.hookType === "prompt_submit" ||
+        payload.hookType === "user_prompt"
+      ) {
+        // The prompt is first-class memory. It already went through
+        // stripPrivateData above (same secret-redaction path as tool output);
+        // cap length so a pasted novella cannot bloat the store.
+        if (typeof d["prompt"] === "string") {
+          raw.userPrompt = d["prompt"].slice(0, MAX_STORED_PROMPT_CHARS);
+        }
       }
 
       extractedImage = extractImage(sanitizedRaw);
@@ -267,6 +282,70 @@ export function registerObserveFunction(
             ? { firstPrompt: trimmedPrompt }
             : {}),
         });
+      }
+
+      // --- session_end: HANDOFF SUMMARY (session journal) ---------------
+      // The session's stored observations + firstPrompt are synthesized into
+      // a compact deterministic summary (goal / what happened / decisions /
+      // open threads) — no LLM. Persisted three ways: Session.summary,
+      // KV.summaries (mem::context renders it), and a searchable observation
+      // written over this obsId — so session-start recall in ANOTHER tool
+      // surfaces the handoff. This replaces generic compression entirely for
+      // session_end events.
+      if (payload.hookType === "session_end") {
+        const stored = await kv.list<CompressedObservation>(
+          KV.observations(payload.sessionId),
+        );
+        const prior = stored.filter((o) => o && o.id !== obsId);
+        const sess = await kv.get<Session>(KV.sessions, payload.sessionId);
+        const handoff = buildSessionHandoff({
+          obsId,
+          sessionId: payload.sessionId,
+          timestamp: payload.timestamp,
+          project:
+            sess?.project ??
+            (typeof payload.project === "string" && payload.project.trim()
+              ? payload.project
+              : undefined),
+          firstPrompt: sess?.firstPrompt,
+          agentId: raw.agentId,
+          observations: prior,
+        });
+
+        await kv.set(KV.observations(payload.sessionId), obsId, handoff.observation);
+        getSearchIndex().add(handoff.observation);
+        await vectorIndexAddGuarded(
+          obsId,
+          payload.sessionId,
+          handoff.observation.title + " " + handoff.observation.narrative,
+          { kind: "synthetic", logId: obsId },
+        );
+
+        if (sess) {
+          await kv.update(KV.sessions, payload.sessionId, [
+            { type: "set", path: "summary", value: handoff.summaryText },
+            { type: "set", path: "status", value: "completed" },
+            { type: "set", path: "endedAt", value: payload.timestamp },
+          ]);
+          await kv.set(KV.summaries, payload.sessionId, handoff.sessionSummary);
+        }
+
+        await sdk.trigger({
+          function_id: "stream::set",
+          payload: {
+            stream_name: STREAM.name,
+            group_id: STREAM.group(payload.sessionId),
+            item_id: obsId,
+            data: { type: "compressed", observation: handoff.observation },
+          },
+        });
+
+        logger.info("Session handoff captured", {
+          obsId,
+          sessionId: payload.sessionId,
+          observations: prior.length,
+        });
+        return { observationId: obsId };
       }
 
       // Per-observation LLM compression is opt-in .

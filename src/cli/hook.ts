@@ -9,6 +9,12 @@
 //      opened agent already knows what was done here — even by another tool.
 //   post tool use -> handleCapture: forwards the tool call/result to the
 //      daemon's observe path so memory accrues with zero manual effort.
+//   user prompt   -> handlePrompt: captures what the USER asked for (the
+//      session journal's intent half). NEVER blocks the turn: every path,
+//      including a downed daemon, returns the host's permissive response
+//      (Cursor's beforeSubmitPrompt expects {"continue": true}).
+//   session end   -> handleSessionEnd: tells the daemon the session is over
+//      so it synthesizes the handoff summary (mem::observe session_end).
 //
 // Hosts speak different dialects of the same idea, so both handlers go
 // through a canonical event layer: parseHostEvent maps each host's stdin
@@ -45,13 +51,17 @@ export function isHookHost(id: string): id is HookHost {
   return (HOOK_HOSTS as readonly string[]).includes(id);
 }
 
-/** The host-agnostic shape both handlers operate on. */
+/** The host-agnostic shape the handlers operate on. */
 export interface CanonicalEvent {
   sessionId?: string;
   cwd?: string;
   toolName?: string;
   toolInput?: unknown;
   toolOutput?: unknown;
+  /** The user's prompt text (user-prompt events only). */
+  prompt?: string;
+  /** Why the session ended (session-end events only). */
+  reason?: string;
 }
 
 function str(v: unknown): string | undefined {
@@ -69,6 +79,16 @@ function str(v: unknown): string | undefined {
  *      tool events — workspace_roots is the session-level fallback)
  *   opencode
  *     our own plugin sends the canonical field names directly.
+ *
+ * Prompt + session-end fields (July 2026):
+ *   `prompt` carries the user's text on Claude Code UserPromptSubmit, Cursor
+ *   beforeSubmitPrompt, and Gemini BeforeAgent (all VERIFIED against current
+ *   docs); Codex UserPromptSubmit and Kiro userPromptSubmit are ASSUMED to
+ *   use the same Claude-style `prompt` key (their hook payloads mirror the
+ *   Claude schema elsewhere — could not verify a published field reference).
+ *   `reason` carries the end reason on Claude Code / Gemini / Cursor
+ *   sessionEnd (verified); Codex Stop and Kiro stop carry no reason.
+ *
  * Malformed JSON yields an empty event — a hook is never the thing that
  * breaks an agent's turn.
  */
@@ -85,11 +105,15 @@ export function parseHostEvent(raw: string, host: HookHost): CanonicalEvent {
     const sessionId = str(obj["sessionId"]);
     const cwd = str(obj["cwd"]);
     const toolName = str(obj["toolName"]);
+    const prompt = str(obj["prompt"]);
+    const reason = str(obj["reason"]);
     if (sessionId) evt.sessionId = sessionId;
     if (cwd) evt.cwd = cwd;
     if (toolName) evt.toolName = toolName;
     if ("toolInput" in obj) evt.toolInput = obj["toolInput"];
     if ("toolOutput" in obj) evt.toolOutput = obj["toolOutput"];
+    if (prompt) evt.prompt = prompt;
+    if (reason) evt.reason = reason;
     return evt;
   }
   const evt: CanonicalEvent = {};
@@ -107,6 +131,12 @@ export function parseHostEvent(raw: string, host: HookHost): CanonicalEvent {
   if ("tool_input" in obj) evt.toolInput = obj["tool_input"];
   const outputKey = host === "cursor" ? "tool_output" : "tool_response";
   if (outputKey in obj) evt.toolOutput = obj[outputKey];
+  // Prompt text: `prompt` is verified for claude-code / cursor / gemini and
+  // assumed (Claude-style) for codex / kiro — see the doc comment above.
+  const prompt = str(obj["prompt"]);
+  if (prompt) evt.prompt = prompt;
+  const reason = str(obj["reason"]);
+  if (reason) evt.reason = reason;
   return evt;
 }
 
@@ -162,17 +192,24 @@ interface HookTimeouts {
   inject: number;
   capture: number;
   dejafix: number;
+  prompt: number;
+  sessionEnd: number;
 }
 
 // Hooks run inside the agent's turn: a slow daemon must degrade to "no
 // injection", never to a stalled agent. SessionStart gets the most headroom
 // (once per session, and the daemon may still be warming its embedding
 // model); Déjà Fix gets the least (it fires on every error-looking tool
-// output).
+// output). Prompt capture sits inside the submit path (Cursor literally
+// gates submission on the reply) so it stays tight; session-end runs after
+// the turn is over, and the daemon synthesizes the handoff inside the call,
+// so it gets the most headroom of all.
 const DEFAULT_TIMEOUTS: HookTimeouts = {
   inject: 2000,
   capture: 1500,
   dejafix: 800,
+  prompt: 1000,
+  sessionEnd: 3000,
 };
 
 function timeoutMs(kind: keyof HookTimeouts, deps: HookDeps): number {
@@ -302,6 +339,91 @@ export async function handleCapture(
   }
 
   return isInjectEnabled() ? dejaFixInjection(evt, cwd, host, deps, doFetch) : "";
+}
+
+/**
+ * The permissive reply a host expects from its prompt hook. Cursor's
+ * beforeSubmitPrompt gates submission on {"continue": true} (verified July
+ * 2026 docs — omitting it or printing nothing risks eating the prompt);
+ * every other host treats empty stdout + exit 0 as "allow".
+ */
+export function promptPassthrough(host: HookHost): string {
+  return host === "cursor" ? JSON.stringify({ continue: true }) : "";
+}
+
+// Client-side mirror of the daemon's stored-prompt cap: bounds the POST body
+// so a pasted novella cannot slow the submit path it rides on.
+const MAX_PROMPT_POST_CHARS = 4000;
+
+/**
+ * UserPromptSubmit (and dialect cousins): capture what the user asked for —
+ * the session journal's intent half. This handler must NEVER block the
+ * turn: every path (excluded project, capture off, empty prompt, downed or
+ * stalled daemon) returns the host's permissive response.
+ */
+export async function handlePrompt(raw: string, deps: HookDeps): Promise<string> {
+  const host = hostOf(deps);
+  const allow = promptPassthrough(host);
+  try {
+    const evt = parseHostEvent(raw, host);
+    const cwd = evt.cwd ?? process.cwd();
+    if (isProjectExcluded(cwd) || !isCaptureEnabled()) return allow;
+    const prompt = evt.prompt?.trim();
+    if (!prompt) return allow;
+    const doFetch = deps.fetchFn ?? fetch;
+    const now = deps.now ? deps.now() : new Date().toISOString();
+    await doFetch(`${deps.baseUrl}/memwarden/observe`, {
+      method: "POST",
+      headers: headers(deps),
+      signal: AbortSignal.timeout(timeoutMs("prompt", deps)),
+      body: JSON.stringify({
+        hookType: "user_prompt",
+        sessionId: evt.sessionId ?? "hook",
+        project: cwd,
+        cwd,
+        timestamp: now,
+        agent: host, // provenance + liveness heartbeat
+        data: { prompt: prompt.slice(0, MAX_PROMPT_POST_CHARS) },
+      }),
+    });
+  } catch {
+    // swallow — prompt capture is best-effort, the turn always proceeds
+  }
+  return allow;
+}
+
+/**
+ * SessionEnd (Codex/Kiro: Stop, OpenCode: session.idle): tell the daemon the
+ * session is over so mem::observe synthesizes the handoff summary. No host
+ * consumes output from its end-of-session hook, so this always prints
+ * nothing; failures are swallowed (a downed daemon just means no handoff).
+ */
+export async function handleSessionEnd(raw: string, deps: HookDeps): Promise<string> {
+  const host = hostOf(deps);
+  try {
+    const evt = parseHostEvent(raw, host);
+    const cwd = evt.cwd ?? process.cwd();
+    if (isProjectExcluded(cwd) || !isCaptureEnabled()) return "";
+    const doFetch = deps.fetchFn ?? fetch;
+    const now = deps.now ? deps.now() : new Date().toISOString();
+    await doFetch(`${deps.baseUrl}/memwarden/observe`, {
+      method: "POST",
+      headers: headers(deps),
+      signal: AbortSignal.timeout(timeoutMs("sessionEnd", deps)),
+      body: JSON.stringify({
+        hookType: "session_end",
+        sessionId: evt.sessionId ?? "hook",
+        project: cwd,
+        cwd,
+        timestamp: now,
+        agent: host,
+        data: { reason: evt.reason ?? "unknown" },
+      }),
+    });
+  } catch {
+    // swallow — the handoff is best-effort
+  }
+  return "";
 }
 
 // Cheap client-side gate: only ask the daemon for a fix when the output plausibly

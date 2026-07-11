@@ -8,8 +8,11 @@ import { describe, expect, it, vi } from "vitest";
 import {
   handleSessionStart,
   handleCapture,
+  handlePrompt,
+  handleSessionEnd,
   parseHostEvent,
   formatInjection,
+  promptPassthrough,
 } from "../src/cli/hook.js";
 
 function jsonResponse(body: unknown, ok = true): Response {
@@ -426,5 +429,284 @@ describe("host-aware handlers", () => {
       { baseUrl: "http://d", fetchFn },
     );
     expect(JSON.parse(out).hookSpecificOutput.hookEventName).toBe("SessionStart");
+  });
+});
+
+// --- handlePrompt: per-host prompt-event fixtures ------------------------
+//
+// Fixtures mirror each host's documented stdin for its prompt event
+// (July 2026): Claude Code UserPromptSubmit, Cursor beforeSubmitPrompt, and
+// Gemini BeforeAgent are verified; Codex UserPromptSubmit and Kiro
+// userPromptSubmit assume the Claude-style `prompt` key.
+
+function observeCall(fetchFn: unknown): { url: string; body: Record<string, unknown> } {
+  const calls = (fetchFn as { mock: { calls: unknown[][] } }).mock.calls;
+  return {
+    url: calls[0]![0] as string,
+    body: JSON.parse((calls[0]![1] as { body: string }).body),
+  };
+}
+
+describe("handlePrompt", () => {
+  it("claude-code UserPromptSubmit: captures the prompt, prints nothing", async () => {
+    const fetchFn = vi.fn(async () => jsonResponse({ observationId: "o" })) as unknown as typeof fetch;
+    const out = await handlePrompt(
+      JSON.stringify({
+        session_id: "s1",
+        transcript_path: "/t.jsonl",
+        cwd: "/w/a",
+        permission_mode: "default",
+        hook_event_name: "UserPromptSubmit",
+        prompt: "Write a test for the login function",
+      }),
+      { baseUrl: "http://d", fetchFn, now: () => "2026-07-11T00:00:00.000Z" },
+    );
+    expect(out).toBe(""); // exit 0, no JSON = allow
+    const { url, body } = observeCall(fetchFn);
+    expect(url).toContain("/memwarden/observe");
+    expect(body).toMatchObject({
+      hookType: "user_prompt",
+      sessionId: "s1",
+      project: "/w/a",
+      cwd: "/w/a",
+      agent: "claude-code",
+      timestamp: "2026-07-11T00:00:00.000Z",
+    });
+    expect(body.data).toEqual({ prompt: "Write a test for the login function" });
+  });
+
+  it("cursor beforeSubmitPrompt: captures and returns {continue:true}", async () => {
+    const fetchFn = vi.fn(async () => jsonResponse({ observationId: "o" })) as unknown as typeof fetch;
+    const out = await handlePrompt(
+      JSON.stringify({
+        conversation_id: "conv1",
+        workspace_roots: ["/w/cur"],
+        hook_event_name: "beforeSubmitPrompt",
+        prompt: "refactor the parser",
+        attachments: [],
+      }),
+      { baseUrl: "http://d", fetchFn, host: "cursor" },
+    );
+    expect(JSON.parse(out)).toEqual({ continue: true });
+    const { body } = observeCall(fetchFn);
+    expect(body).toMatchObject({
+      hookType: "user_prompt",
+      sessionId: "conv1",
+      cwd: "/w/cur",
+      agent: "cursor",
+    });
+    expect((body.data as { prompt: string }).prompt).toBe("refactor the parser");
+  });
+
+  it("cursor NEVER blocks: {continue:true} even when the daemon is down", async () => {
+    const fetchFn = vi.fn(async () => {
+      throw new Error("ECONNREFUSED");
+    }) as unknown as typeof fetch;
+    const out = await handlePrompt(
+      JSON.stringify({ conversation_id: "c", workspace_roots: ["/w"], prompt: "hi" }),
+      { baseUrl: "http://d", fetchFn, host: "cursor" },
+    );
+    expect(JSON.parse(out)).toEqual({ continue: true });
+  });
+
+  it("cursor NEVER blocks: {continue:true} even on malformed stdin", async () => {
+    const fetchFn = vi.fn() as unknown as typeof fetch;
+    const out = await handlePrompt("not json", { baseUrl: "http://d", fetchFn, host: "cursor" });
+    expect(JSON.parse(out)).toEqual({ continue: true });
+    expect((fetchFn as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(0);
+  });
+
+  it("gemini BeforeAgent: captures the prompt with the gemini heartbeat", async () => {
+    const fetchFn = vi.fn(async () => jsonResponse({ observationId: "o" })) as unknown as typeof fetch;
+    const out = await handlePrompt(
+      JSON.stringify({
+        session_id: "g1",
+        cwd: "/w/gem",
+        hook_event_name: "BeforeAgent",
+        prompt: "add a changelog",
+      }),
+      { baseUrl: "http://d", fetchFn, host: "gemini" },
+    );
+    expect(out).toBe("");
+    const { body } = observeCall(fetchFn);
+    expect(body).toMatchObject({ hookType: "user_prompt", sessionId: "g1", agent: "gemini" });
+  });
+
+  it("codex and kiro (assumed Claude-style prompt key) capture and stay silent", async () => {
+    for (const host of ["codex", "kiro"] as const) {
+      const fetchFn = vi.fn(async () => jsonResponse({ observationId: "o" })) as unknown as typeof fetch;
+      const out = await handlePrompt(
+        JSON.stringify({ session_id: "x1", cwd: "/w/x", prompt: "do the thing" }),
+        { baseUrl: "http://d", fetchFn, host },
+      );
+      expect(out).toBe("");
+      const { body } = observeCall(fetchFn);
+      expect(body).toMatchObject({ hookType: "user_prompt", agent: host });
+    }
+  });
+
+  it("opencode plugin event (canonical fields) captures", async () => {
+    const fetchFn = vi.fn(async () => jsonResponse({ observationId: "o" })) as unknown as typeof fetch;
+    const out = await handlePrompt(
+      JSON.stringify({ sessionId: "oc1", cwd: "/w/oc", prompt: "wire the plugin" }),
+      { baseUrl: "http://d", fetchFn, host: "opencode" },
+    );
+    expect(out).toBe("");
+    const { body } = observeCall(fetchFn);
+    expect(body).toMatchObject({ hookType: "user_prompt", sessionId: "oc1", agent: "opencode" });
+  });
+
+  it("an empty prompt never reaches the daemon", async () => {
+    const fetchFn = vi.fn() as unknown as typeof fetch;
+    const out = await handlePrompt(
+      JSON.stringify({ session_id: "s", cwd: "/w", prompt: "   " }),
+      { baseUrl: "http://d", fetchFn },
+    );
+    expect(out).toBe("");
+    expect((fetchFn as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(0);
+  });
+
+  it("caps a giant prompt in the POST body", async () => {
+    const fetchFn = vi.fn(async () => jsonResponse({ observationId: "o" })) as unknown as typeof fetch;
+    await handlePrompt(
+      JSON.stringify({ session_id: "s", cwd: "/w", prompt: "y".repeat(20_000) }),
+      { baseUrl: "http://d", fetchFn },
+    );
+    const { body } = observeCall(fetchFn);
+    expect((body.data as { prompt: string }).prompt.length).toBeLessThanOrEqual(4000);
+  });
+
+  it("degrades to permissive when the daemon stalls (abort at deadline)", async () => {
+    const fetchFn = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(init.signal?.reason ?? new Error("aborted")),
+          );
+        }),
+    ) as unknown as typeof fetch;
+    const out = await handlePrompt(
+      JSON.stringify({ conversation_id: "c", workspace_roots: ["/w"], prompt: "hi" }),
+      { baseUrl: "http://d", fetchFn, host: "cursor", timeouts: { prompt: 50 } },
+    );
+    expect(JSON.parse(out)).toEqual({ continue: true });
+  });
+});
+
+describe("promptPassthrough", () => {
+  it("cursor gets {continue:true}; every other host gets empty stdout", () => {
+    expect(JSON.parse(promptPassthrough("cursor"))).toEqual({ continue: true });
+    for (const host of ["claude-code", "codex", "gemini", "kiro", "opencode"] as const) {
+      expect(promptPassthrough(host)).toBe("");
+    }
+  });
+});
+
+// --- handleSessionEnd: per-host end-of-session fixtures ------------------
+
+describe("handleSessionEnd", () => {
+  it("claude-code SessionEnd: posts session_end with the reason", async () => {
+    const fetchFn = vi.fn(async () => jsonResponse({ observationId: "o" })) as unknown as typeof fetch;
+    const out = await handleSessionEnd(
+      JSON.stringify({
+        session_id: "s1",
+        cwd: "/w/a",
+        hook_event_name: "SessionEnd",
+        reason: "prompt_input_exit",
+      }),
+      { baseUrl: "http://d", fetchFn, now: () => "2026-07-11T01:00:00.000Z" },
+    );
+    expect(out).toBe("");
+    const { url, body } = observeCall(fetchFn);
+    expect(url).toContain("/memwarden/observe");
+    expect(body).toMatchObject({
+      hookType: "session_end",
+      sessionId: "s1",
+      cwd: "/w/a",
+      agent: "claude-code",
+      timestamp: "2026-07-11T01:00:00.000Z",
+    });
+    expect(body.data).toEqual({ reason: "prompt_input_exit" });
+  });
+
+  it("cursor sessionEnd: session_id + workspace_roots (no cwd on this event)", async () => {
+    const fetchFn = vi.fn(async () => jsonResponse({ observationId: "o" })) as unknown as typeof fetch;
+    await handleSessionEnd(
+      JSON.stringify({
+        session_id: "sess1",
+        reason: "completed",
+        duration_ms: 120000,
+        workspace_roots: ["/w/cur"],
+      }),
+      { baseUrl: "http://d", fetchFn, host: "cursor" },
+    );
+    const { body } = observeCall(fetchFn);
+    expect(body).toMatchObject({
+      hookType: "session_end",
+      sessionId: "sess1",
+      cwd: "/w/cur",
+      agent: "cursor",
+    });
+    expect(body.data).toEqual({ reason: "completed" });
+  });
+
+  it("codex Stop and kiro stop (no reason field) default to 'unknown'", async () => {
+    for (const host of ["codex", "kiro"] as const) {
+      const fetchFn = vi.fn(async () => jsonResponse({ observationId: "o" })) as unknown as typeof fetch;
+      const out = await handleSessionEnd(
+        JSON.stringify({ session_id: "x1", cwd: "/w/x" }),
+        { baseUrl: "http://d", fetchFn, host },
+      );
+      expect(out).toBe("");
+      const { body } = observeCall(fetchFn);
+      expect(body).toMatchObject({ hookType: "session_end", agent: host });
+      expect(body.data).toEqual({ reason: "unknown" });
+    }
+  });
+
+  it("gemini SessionEnd carries its documented reason values", async () => {
+    const fetchFn = vi.fn(async () => jsonResponse({ observationId: "o" })) as unknown as typeof fetch;
+    await handleSessionEnd(
+      JSON.stringify({ session_id: "g1", cwd: "/w/gem", hook_event_name: "SessionEnd", reason: "exit" }),
+      { baseUrl: "http://d", fetchFn, host: "gemini" },
+    );
+    const { body } = observeCall(fetchFn);
+    expect(body.data).toEqual({ reason: "exit" });
+  });
+
+  it("opencode session.idle (canonical fields from our plugin)", async () => {
+    const fetchFn = vi.fn(async () => jsonResponse({ observationId: "o" })) as unknown as typeof fetch;
+    await handleSessionEnd(
+      JSON.stringify({ sessionId: "oc1", cwd: "/w/oc", reason: "idle" }),
+      { baseUrl: "http://d", fetchFn, host: "opencode" },
+    );
+    const { body } = observeCall(fetchFn);
+    expect(body).toMatchObject({ hookType: "session_end", sessionId: "oc1", agent: "opencode" });
+    expect(body.data).toEqual({ reason: "idle" });
+  });
+
+  it("never throws on malformed stdin or a downed daemon", async () => {
+    const fetchFn = vi.fn(async () => {
+      throw new Error("down");
+    }) as unknown as typeof fetch;
+    await expect(handleSessionEnd("not json", { baseUrl: "http://d", fetchFn })).resolves.toBe("");
+  });
+
+  it("degrades to no-op when the daemon stalls (abort at deadline)", async () => {
+    const fetchFn = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(init.signal?.reason ?? new Error("aborted")),
+          );
+        }),
+    ) as unknown as typeof fetch;
+    const t0 = Date.now();
+    const out = await handleSessionEnd(
+      JSON.stringify({ session_id: "s", cwd: "/w" }),
+      { baseUrl: "http://d", fetchFn, timeouts: { sessionEnd: 50 } },
+    );
+    expect(out).toBe("");
+    expect(Date.now() - t0).toBeLessThan(1500);
   });
 });

@@ -12,6 +12,7 @@ export type { VectorBackend, VectorBackendHit } from "./vector-backend.js";
 export type HookType =
   | "session_start"
   | "prompt_submit"
+  | "user_prompt"
   | "pre_tool_use"
   | "post_tool_use"
   | "post_tool_failure"

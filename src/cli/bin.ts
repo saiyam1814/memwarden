@@ -47,6 +47,8 @@ import {
 import {
   handleSessionStart,
   handleCapture,
+  handlePrompt,
+  handleSessionEnd,
   readStdin,
   isHookHost,
   type HookHost,
@@ -239,6 +241,8 @@ async function hook(rest: string[]): Promise<void> {
   let out = "";
   if (event === "session-start") out = await handleSessionStart(raw, deps);
   else if (event === "capture") out = await handleCapture(raw, deps);
+  else if (event === "prompt") out = await handlePrompt(raw, deps);
+  else if (event === "session-end") out = await handleSessionEnd(raw, deps);
   if (out) process.stdout.write(out);
 }
 
