@@ -6,13 +6,22 @@
 import {
   applyUpdateOps,
   type MutationListener,
+  type OplogCompactResult,
   type OplogEntry,
+  type OplogEraseResult,
   type StateEventType,
   type StateMutationEvent,
   type StateStore,
   type UpdateOp,
 } from "./store.js";
-import { GENESIS_PREV_HASH, hashOplogEntry, verifyChain } from "./oplog.js";
+import {
+  GENESIS_PREV_HASH,
+  hashOplogEntryV2,
+  hashPayload,
+  planCompaction,
+  pairKey,
+  verifyChain,
+} from "./oplog.js";
 
 /** Structured-clone a JSON value so callers can never mutate stored state. */
 function clone<T>(value: T): T {
@@ -114,6 +123,58 @@ export class StoreMemory implements StateStore {
     return brokenAt === null ? { ok: true } : { ok: false, brokenAt };
   }
 
+  async eraseOplogPayloads(scope: string, key: string): Promise<OplogEraseResult> {
+    // Same refusal semantics as StoreLibsql (parity): never erase a live
+    // record's history; all-or-none when payload-bearing v1 rows exist.
+    if (this.store.get(scope)?.has(key)) return { erased: 0, refused: "live-record" };
+    const rows = this.oplog.filter((e) => e.scope === scope && e.key === key);
+    const v1Count = rows.filter(
+      (e) => e.v !== 2 && e.payload !== null && e.payload !== undefined,
+    ).length;
+    if (v1Count > 0) return { erased: 0, refused: "v1-entries", v1Count };
+    let erased = 0;
+    for (let i = 0; i < this.oplog.length; i++) {
+      const e = this.oplog[i]!;
+      if (e.scope !== scope || e.key !== key) continue;
+      if (e.payload === null || e.payload === undefined) continue;
+      this.oplog[i] = { ...e, payload: null };
+      erased++;
+    }
+    return { erased };
+  }
+
+  async compactOplog(opts?: { dryRun?: boolean }): Promise<OplogCompactResult> {
+    const livePairs = new Set<string>();
+    for (const [scope, keys] of this.store) {
+      for (const key of keys.keys()) livePairs.add(pairKey(scope, key));
+    }
+    const compactedAt = new Date().toISOString();
+    const plan = planCompaction(this.oplog, livePairs, compactedAt);
+    const base = {
+      entriesRewritten: plan.entriesRewritten,
+      erasedCount: plan.erasedCount,
+      previousHeadHash: plan.previousHeadHash,
+      compactedAt,
+    };
+    if (opts?.dryRun) {
+      return {
+        ...base,
+        dryRun: true,
+        vacuum: { ok: false, bytesReclaimed: null, detail: "dry run — nothing written" },
+      };
+    }
+    // Atomic by construction: the array swap is synchronous, and writes are
+    // single-threaded in-process — no observer can see a half-rewritten log.
+    this.oplog.length = 0;
+    this.oplog.push(...plan.entries, plan.compactRecord);
+    this.nextOplogId = plan.compactRecord.id + 1;
+    return {
+      ...base,
+      dryRun: false,
+      vacuum: { ok: true, bytesReclaimed: null, detail: "in-memory store — nothing to vacuum" },
+    };
+  }
+
   async close(): Promise<void> {
     this.listeners.clear();
   }
@@ -127,8 +188,22 @@ export class StoreMemory implements StateStore {
     const id = this.nextOplogId++;
     const ts = new Date().toISOString();
     const prev_hash = this.oplog.length === 0 ? GENESIS_PREV_HASH : this.oplog[this.oplog.length - 1]!.hash;
-    const hash = hashOplogEntry({ id, ts, op, scope, key, payload, prev_hash });
-    this.oplog.push({ id, ts, op, scope, key, payload: clone(payload), prev_hash, hash });
+    // Chain v2: the hash covers payload_hash, not the raw payload, so a
+    // later erasure can null the payload in place (parity with StoreLibsql).
+    const payload_hash = hashPayload(payload);
+    const hash = hashOplogEntryV2({ id, ts, op, scope, key, payload_hash, prev_hash });
+    this.oplog.push({
+      id,
+      ts,
+      op,
+      scope,
+      key,
+      payload: clone(payload),
+      v: 2,
+      payload_hash,
+      prev_hash,
+      hash,
+    });
   }
 
   private emit(event: StateMutationEvent): void {

@@ -221,6 +221,23 @@ export class Kernel implements ISdk {
         const entries = await this.store.readOplog();
         return { count: entries.length } as R;
       }
+      case "state::oplog-head": {
+        // The current chain head — receipts record it so they can say WHICH
+        // chain their cited entries live in (compaction re-chains hashes).
+        const entries = await this.store.readOplog();
+        const head = entries[entries.length - 1];
+        return (head ? { id: head.id, hash: head.hash } : { id: 0, hash: "" }) as R;
+      }
+      case "state::oplog-erase": {
+        // In-place payload erasure for one (scope, key). The store refuses
+        // for live records and for v1 rows (see StateStore.eraseOplogPayloads).
+        const p = payload as { scope: string; key: string };
+        return (await this.store.eraseOplogPayloads(p.scope, p.key)) as R;
+      }
+      case "state::compact": {
+        const p = (payload ?? {}) as { dryRun?: boolean };
+        return (await this.store.compactOplog({ dryRun: p.dryRun === true })) as R;
+      }
       case "state::oplog-find": {
         // Chain evidence for one key (delete receipts). Payloads are
         // STRIPPED — a receipt proves an entry existed in the chain without

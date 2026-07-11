@@ -34,6 +34,14 @@ export interface UpdateOp {
 export type StateEventType = "set" | "update" | "delete";
 
 /**
+ * What an oplog row's `op` can be: any mutation, plus the synthetic
+ * `compact` record that `compactOplog` appends to anchor the pre-compaction
+ * head hash. `compact` never appears in mutation events — it is not a KV
+ * mutation.
+ */
+export type OplogOp = StateEventType | "compact";
+
+/**
  * Emitted by the store after a successful mutation. The kernel uses this to
  * fire any registered type:"state" trigger whose scope matches `scope`
  * (payload = {key, event_type, old_value, new_value}).
@@ -53,21 +61,63 @@ export interface StateMutationEvent {
 export type MutationListener = (event: StateMutationEvent) => void;
 
 /**
- * One append-only oplog record. The hash chain makes the log tamper-evident:
- * `hash = sha256(canonical(id, ts, op, scope, key, payload, prev_hash))`.
+ * One append-only oplog record. The hash chain makes the log tamper-evident.
+ * Two entry versions coexist (see oplog.ts):
+ *
+ *   v1: hash = sha256(canonical(id, ts, op, scope, key, payload, prev_hash))
+ *   v2: hash = sha256(canonical(v:2, id, ts, op, scope, key, payload_hash,
+ *       prev_hash)) where payload_hash = sha256(canonical(payload)) — so the
+ *       payload column can be nulled in place (erasure) without breaking the
+ *       chain, while the content commitment survives.
+ *
  * `prev_hash` is the hash of the immediately preceding entry, or the empty
  * string for the genesis entry.
  */
 export interface OplogEntry {
   readonly id: number;
   readonly ts: string;
-  readonly op: StateEventType;
+  readonly op: OplogOp;
   readonly scope: string;
   readonly key: string;
-  /** The post-mutation value (set/update) or null (delete). JSON value. */
+  /**
+   * The post-mutation value (set/update), null (delete), or null after
+   * erasure of a v2 entry (payload_hash then still commits to the original).
+   */
   readonly payload: unknown;
+  /** Entry version: 1 = legacy (hash over raw payload), 2 = hash over payload_hash. */
+  readonly v: number;
+  /** sha256(canonical payload) for v2 entries (sentinel for null); null on v1. */
+  readonly payload_hash: string | null;
   readonly prev_hash: string;
   readonly hash: string;
+}
+
+/** Result of eraseOplogPayloads. Refusals erase NOTHING (all-or-none). */
+export interface OplogEraseResult {
+  /** Number of oplog rows whose payload was nulled in place. */
+  erased: number;
+  /**
+   * Why nothing was erased: "live-record" = the kv row still exists (only
+   * DELETED records may be erased), "v1-entries" = legacy rows whose hash
+   * covers the raw payload are present; run compactOplog first.
+   */
+  refused?: "live-record" | "v1-entries";
+  /** With refused:"v1-entries": how many v1 rows carry a payload. */
+  v1Count?: number;
+}
+
+/** Result of compactOplog. */
+export interface OplogCompactResult {
+  /** Rows whose stored bytes changed (re-versioned, re-chained, or erased). */
+  entriesRewritten: number;
+  /** Payloads nulled by this compaction (forget-deleted records only). */
+  erasedCount: number;
+  /** Head hash of the pre-compaction chain ("" for an empty log) — anchored in the compact record. */
+  previousHeadHash: string;
+  compactedAt: string;
+  dryRun: boolean;
+  /** VACUUM outcome; bytesReclaimed is null when not measurable (:memory:, in-process store). */
+  vacuum: { ok: boolean; bytesReclaimed: number | null; detail?: string };
 }
 
 /**
@@ -97,6 +147,26 @@ export interface StateStore {
    * broken link, or null if the chain is intact (or empty).
    */
   verifyOplog(): Promise<{ ok: true } | { ok: false; brokenAt: number }>;
+
+  /**
+   * Null the payload of every oplog row for (scope, key) IN PLACE, keeping
+   * payload_hash so v2 chain verification still passes. Only allowed for
+   * DELETED records (no live kv row) — erasing a live record's history would
+   * silently rewrite the story of data that still exists. Refuses (erasing
+   * nothing) when the record is live or when v1 rows with payloads are
+   * present (their hash covers the raw payload; use compactOplog).
+   */
+  eraseOplogPayloads(scope: string, key: string): Promise<OplogEraseResult>;
+
+  /**
+   * One-shot migration + shrink: re-chain EVERY entry as v2 from genesis
+   * (computing payload_hash from the stored payload where needed), null the
+   * payloads of entries whose (scope, key) was delete-tailed AND has no live
+   * kv row (never a live record's), and append a `compact` record anchoring
+   * the pre-compaction head hash. Afterwards every entry is v2 and future
+   * erasures are in-place and chain-safe. dryRun computes counts only.
+   */
+  compactOplog(opts?: { dryRun?: boolean }): Promise<OplogCompactResult>;
 
   /** Flush and release any resources (closes the libSQL client). Idempotent. */
   close(): Promise<void>;
