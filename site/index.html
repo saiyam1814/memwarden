@@ -4,9 +4,9 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>memwarden — the memory firewall for AI coding agents</title>
-<meta name="description" content="Your agent's memory is lying to you. Prove yours isn't. Verified, self-custodied memory for AI coding agents: nothing reaches your agent's context without provenance that still checks out. Local-first, cross-tool, no API key." />
+<meta name="description" content="Your agent's memory is lying to you. Prove yours isn't. Verified, self-custodied memory for AI coding agents: memory whose provenance no longer checks out is blocked before injection. Local-first, cross-tool, no API key." />
 <meta property="og:title" content="memwarden — the memory firewall for AI coding agents" />
-<meta property="og:description" content="Your agent's memory is lying to you. Prove yours isn't. Verified, self-custodied memory: stale or unsourced context never reaches the model." />
+<meta property="og:description" content="Your agent's memory is lying to you. Prove yours isn't. Verified, self-custodied memory: known-stale context never reaches the model." />
 <style>
   :root{
     --bg:#0a0d14; --bg2:#0e131d; --card:#121826; --card2:#0f1521; --line:#1f2839;
@@ -318,7 +318,7 @@ npm test 2>&1 | npx memwarden <span class="a">dejafix lookup</span></pre>
     <p class="note">At this scale pure 4-bit codes match full precision on every metric at 5.9×
       smaller vectors; at 10,000 distractors they give up ~7 points of R@10 unless exact
       rescoring is enabled (which keeps full vectors resident) — run the benchmark with
-      <code>--distractors 10000</code> to see both sides. 303 tests, including a Verified Recall
+      <code>--distractors 10000</code> to see both sides. 316 tests, including a Verified Recall
       suite, the Déjà Fix engine, HTTP security (auth / host firewall / content-type), and a
       cross-tool reliability harness that proves memory captured in one tool is recalled in
       another.</p>

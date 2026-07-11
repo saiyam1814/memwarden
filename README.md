@@ -8,8 +8,9 @@
 
 memwarden is verified, self-custodied memory for AI coding agents. It is local-first,
 dependency-light, and works across every tool you use — Claude Code, Codex, Cursor, Kiro,
-Antigravity, OpenCode, OpenClaw. The point isn't to remember *more*. It's that nothing gets
-injected into your agent's context without provenance that still checks out.
+Antigravity, OpenCode, OpenClaw. The point isn't to remember *more*. It's that memory whose
+provenance no longer checks out is **blocked before injection**, and everything else is
+labeled for exactly what it is — verified, sourced, or unsourced.
 
 `memory firewall` · `verified recall` · `tamper-evident` · `self-custodied` · `cross-tool` · `no API key`
 
@@ -55,10 +56,12 @@ shareable artifact you can point at your own existing memory and watch it light 
 memwarden is local-first, tamper-evident, and portable: one `export` produces a Brain Bundle you
 can move between machines or agents. Zero cloud. The data lives at `~/.memwarden` and nowhere else.
 
-**3. The memory firewall.** Nothing enters your agent's context without provenance that still
-holds. The unique lever — possible only for a coding-agent tool because the repo is ground
-truth — is tying memory validity to **source-file content hashes**. The repo tells us, on every
-recall, whether a memory is still earned.
+**3. The memory firewall.** Memory whose provenance no longer holds — a hash that stopped
+matching, a file that's gone — is dropped before it reaches the model; what passes is labeled
+verified / sourced / unsourced rather than laundered into one pile. The unique lever — possible
+only for a coding-agent tool because the repo is ground truth — is tying memory validity to
+**source-file content hashes**. The repo tells us, on every recall, whether a memory is still
+earned.
 
 ## Source-file hashes: the ground truth
 
@@ -220,7 +223,10 @@ checkout: `npm install && npm run build && node dist/cli/bin.js up`.)
 | **OpenCode** | `~/.config/opencode/opencode.json` | standing instruction + `/recall` |
 | **OpenClaw** | `~/.openclaw/openclaw.json` | standing instruction + `/recall` |
 
-Restart each tool once so it loads the new server. `memwarden down` removes the service.
+Restart each tool once so it loads the new server. `memwarden status` shows the daemon,
+semantic recall, and per-tool wiring — read from each tool's actual config, not assumed.
+`memwarden down` removes the service; `memwarden down --all` also unwires every tool
+(MCP entries, Claude hooks, this project's AGENTS.md block), and `--data` deletes the brain.
 
 **You stay in charge of the automatic paths.** `MEMWARDEN_INJECT=off` starts sessions with a
 clean slate (no auto-injection anywhere — explicit `/recall` and the MCP tools still work);
@@ -400,7 +406,7 @@ src/cli/         up / down / connect / doctor / audit / forget / exclude / dejaf
 src/cli/tools.ts per-tool adapters: Claude Code, Codex, Cursor, Kiro, Antigravity, OpenCode, OpenClaw
 src/bundle/      portable Brain Bundle export & import
 benchmark/       reproducible recall benchmark
-test/            303 tests: kernel, store parity, oplog, quantizer, MCP, proxy, tool-wiring,
+test/            316 tests: kernel, store parity, oplog, quantizer, MCP, proxy, tool-wiring,
                  Verified Recall, Déjà Fix, foreign-store audit, delete receipts, injection
                  controls, conflict audit, HTTP security (auth/host/content-type),
                  path scoping, self-heal, cross-tool reliability harness, e2e
