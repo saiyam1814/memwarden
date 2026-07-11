@@ -188,6 +188,38 @@ describe("Verified Recall firewall (safe_only)", () => {
     return r.results.length;
   }
 
+  it("MEMWARDEN_RECALL_POLICY=verified-only refuses everything not hash-verified", async () => {
+    const root = repo();
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "src", "auth.ts"), "// bearer auth tokens, 1h TTL\n");
+    // One verified memory (file-backed) and one unsourced one (no evidence).
+    await observe(root, "src/auth.ts", "auth uses bearer tokens with a 1h TTL");
+    await sdk.trigger({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "post_tool_use",
+        sessionId: "s1",
+        project: root,
+        cwd: root,
+        timestamp: new Date().toISOString(),
+        data: { tool_name: "Bash", tool_input: { command: "true" }, tool_output: "someone said bearer auth tokens are being replaced" },
+      },
+    });
+
+    // balanced (default): both are recallable under safe_only.
+    expect(await search(root, true)).toBeGreaterThanOrEqual(2);
+
+    // verified-only: just the hash-verified one survives auto-injection.
+    process.env.MEMWARDEN_RECALL_POLICY = "verified-only";
+    try {
+      expect(await search(root, true)).toBe(1);
+      // Explicit unfiltered lookups are never policy-filtered.
+      expect(await search(root, false)).toBeGreaterThanOrEqual(2);
+    } finally {
+      delete process.env.MEMWARDEN_RECALL_POLICY;
+    }
+  });
+
   it("recalls a verified memory, then drops it once its file drifts", async () => {
     const root = repo();
     mkdirSync(join(root, "src"));

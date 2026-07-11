@@ -27,6 +27,7 @@ import {
   getQuantRescoreDepth,
   getQuantSeed,
   getVectorBackend,
+  getRecallPolicy,
 } from "./config.js";
 import { memoryToObservation } from "./memory-utils.js";
 import { canonicalizePath } from "./paths.js";
@@ -540,14 +541,23 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           // worktree must be checked against the files the agent is actually
           // looking at, not the (possibly diverged or deleted) capture dir.
           const obsSession = await loadSession(r.sessionId);
-          if (
-            !obs ||
-            classifyProvenance(obs.provenance, cwdFilter, {
-              verifyAgainstRoot:
-                obsSession?.projectKey !== undefined &&
-                obsSession.projectKey === cwdFilterKey,
-            }).status === "stale"
-          ) {
+          const verdict = !obs
+            ? null
+            : classifyProvenance(obs.provenance, cwdFilter, {
+                verifyAgainstRoot:
+                  obsSession?.projectKey !== undefined &&
+                  obsSession.projectKey === cwdFilterKey,
+              });
+          // Policy floor: `balanced` (default) drops only detected-stale;
+          // `verified-only` additionally refuses everything that is not
+          // hash-verified against the live checkout — the strict answer to
+          // memory poisoning via unsourced/unverifiable content (OWASP ASI06).
+          const dropUnderPolicy =
+            !verdict ||
+            verdict.status === "stale" ||
+            (getRecallPolicy() === "verified-only" &&
+              verdict.status !== "verified");
+          if (dropUnderPolicy) {
             staleDropped++;
             continue;
           }

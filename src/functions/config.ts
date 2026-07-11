@@ -195,6 +195,20 @@ export function getQuantRescoreDepth(): number {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
+/**
+ * Recall policy for the safe_only firewall:
+ *   balanced      (default) drop detected-stale, keep verified / sourced /
+ *                 unsourced — labeled, never laundered.
+ *   verified-only auto-inject ONLY hash-verified-current memory. The strict
+ *                 stance against memory poisoning (OWASP ASI06): content that
+ *                 cannot prove itself never reaches a model automatically.
+ * Explicit lookups (plain memory_search) are never policy-filtered.
+ */
+export function getRecallPolicy(): "balanced" | "verified-only" {
+  const raw = (env("MEMWARDEN_RECALL_POLICY") ?? "").trim().toLowerCase();
+  return raw === "verified-only" ? "verified-only" : "balanced";
+}
+
 /** Rotation seed; same seed reproduces the identical rotation everywhere. */
 export function getQuantSeed(): string {
   return env("MEMWARDEN_QUANT_SEED") ?? "memwarden-tq-v1";
