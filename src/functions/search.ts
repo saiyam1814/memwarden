@@ -8,7 +8,6 @@
 
 import type { ISdk } from "../kernel/index.js";
 import type {
-  CompactSearchResult,
   CompressedObservation,
   Memory,
   SearchResult,
@@ -33,7 +32,7 @@ import {
 import { memoryToObservation } from "./memory-utils.js";
 import { canonicalizePath } from "./paths.js";
 import { gitProjectKey } from "./git-identity.js";
-import { classifyProvenance } from "./verify.js";
+import { classifyProvenance, type Verdict } from "./verify.js";
 import { recordAccessBatch } from "./access-tracker.js";
 import { loadVectorIndex, persistVectorIndex } from "./vector-persistence.js";
 import { logger } from "./logger.js";
@@ -443,6 +442,83 @@ export async function buildScopedAllowedIds(
   return { allowed, sessions };
 }
 
+// --- recall serialization (labeled) ---------------------------------
+//
+// Balanced recall injects sourced/unsourced memory BY DESIGN, and the
+// promise (README, SECURITY.md) is that it arrives LABELED. This is the ONE
+// serializer for recall output — compact and narrative both go through it —
+// and it attaches the trust verdict the safe_only firewall pass already
+// computed (never reclassified a second time). `trust` is absent only when
+// no verdict exists, i.e. a plain non-safe_only search.
+
+export type TrustLabel = "verified" | "sourced" | "unsourced" | "stale";
+
+export function trustLabelOf(verdict: Verdict): TrustLabel {
+  switch (verdict.status) {
+    case "verified":
+      return "verified";
+    case "sourced_unverified":
+      return "sourced";
+    case "stale":
+      return "stale";
+    case "unsourced":
+      return "unsourced";
+  }
+}
+
+interface RecallItemBase {
+  obsId: string;
+  sessionId: string;
+  title: string;
+  score: number;
+  timestamp: string;
+  trust?: TrustLabel;
+}
+export interface CompactRecallItem extends RecallItemBase {
+  type: CompressedObservation["type"];
+}
+export interface NarrativeRecallItem extends RecallItemBase {
+  narrative: string;
+}
+
+export function serializeRecallItem(
+  r: SearchResult,
+  format: "compact",
+  verdict?: Verdict,
+): CompactRecallItem;
+export function serializeRecallItem(
+  r: SearchResult,
+  format: "narrative",
+  verdict?: Verdict,
+): NarrativeRecallItem;
+export function serializeRecallItem(
+  r: SearchResult,
+  format: "compact" | "narrative",
+  verdict?: Verdict,
+): CompactRecallItem | NarrativeRecallItem {
+  const base: RecallItemBase = {
+    obsId: r.observation.id,
+    sessionId: r.sessionId,
+    title: r.observation.title,
+    score: r.score,
+    timestamp: r.observation.timestamp,
+    ...(verdict ? { trust: trustLabelOf(verdict) } : {}),
+  };
+  return format === "compact"
+    ? { ...base, type: r.observation.type }
+    : { ...base, narrative: r.observation.narrative };
+}
+
+/** One narrative line, label first — the text surfaces (hooks, proxy, MCP
+ * resume) inject exactly this, so the label travels with the memory. */
+export function formatNarrativeItem(
+  item: NarrativeRecallItem,
+  idx: number,
+): string {
+  const label = item.trust ? `[${item.trust}] ` : "";
+  return `${idx + 1}. ${label}${item.title}\n${item.narrative}`;
+}
+
 export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction(
     "mem::search",
@@ -559,45 +635,51 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       // Measure retrieval itself (not the one-time cold rebuild above) — the
       // "is finding context fast?" number.
       const searchStartedAt = performance.now();
-      const bm25Results = idx.search(query, fetchLimit);
+      // Scope-aware retrieval: with a project/cwd filter active, BOTH
+      // streams (BM25 keyword and vector) search WITHIN the allowlist of
+      // in-scope ids so the top fetchLimit is filled with valid candidates,
+      // instead of a global top-k that mostly gets post-filtered away —
+      // enough stronger out-of-scope docs (>= the over-fetch window) would
+      // otherwise starve a valid in-scope result entirely. Purely an
+      // optimization: the scope post-filter below still runs on every
+      // candidate (defense in depth), so a too-wide allowlist can never
+      // leak an out-of-scope result. MEMWARDEN_SCOPED_VECTOR_SEARCH=off is
+      // the kill switch back to global-scan + post-filter for both streams.
+      let scopedAllowed: Set<string> | null = null;
+      // Sessions preloaded by the scoped allowlist build; seeds the
+      // per-candidate session cache so the post-filter doesn't re-read them.
+      let preloadedSessions: Session[] | null = null;
+      if (filtering && isScopedVectorSearchEnabled()) {
+        const scoped = await buildScopedAllowedIds(kv, idx, {
+          projectFilter,
+          cwdFilter,
+          projectFilterKey,
+          cwdFilterKey,
+        });
+        scopedAllowed = scoped.allowed;
+        preloadedSessions = scoped.sessions;
+      }
+      const bm25Results = scopedAllowed
+        ? idx.search(query, fetchLimit, scopedAllowed)
+        : idx.search(query, fetchLimit);
       // Fuse in the semantic stream when an embedding provider + vector index
       // are present, so meaning-based queries (different words than the
       // memory) resolve. Provider-less mode stays pure BM25. A failing
       // embed falls back to BM25 rather than breaking search.
       let results = bm25Results;
-      // Sessions preloaded by the scoped allowlist build (below); seeds the
-      // per-candidate session cache so the post-filter doesn't re-read them.
-      let preloadedSessions: Session[] | null = null;
       const vIdx = getVectorIndex();
       const ep = currentEmbeddingProvider;
       if (vIdx && ep && vIdx.size > 0) {
         try {
           const qVec = await ep.embed(clipEmbedInput(query));
           if (qVec.length === ep.dimensions) {
-            // Scope-aware vector stream: with a project/cwd filter active,
-            // search WITHIN the allowlist of in-scope ids so the top
-            // fetchLimit is filled with valid candidates, instead of a
-            // global top-k that mostly gets post-filtered away. Purely an
-            // optimization: the scope post-filter below still runs on every
-            // candidate (defense in depth), so a too-wide allowlist can
-            // never leak an out-of-scope result. Falls back to the global
-            // scan when disabled or the backend lacks searchAllowed.
+            // The vector stream uses the same allowlist; falls back to the
+            // global scan when the backend lacks searchAllowed.
             let vectorHits: Ranked[];
-            if (
-              filtering &&
-              isScopedVectorSearchEnabled() &&
-              typeof vIdx.searchAllowed === "function"
-            ) {
-              const scoped = await buildScopedAllowedIds(kv, idx, {
-                projectFilter,
-                cwdFilter,
-                projectFilterKey,
-                cwdFilterKey,
-              });
-              preloadedSessions = scoped.sessions;
+            if (scopedAllowed && typeof vIdx.searchAllowed === "function") {
               vectorHits =
-                scoped.allowed.size > 0
-                  ? vIdx.searchAllowed(qVec, fetchLimit, scoped.allowed)
+                scopedAllowed.size > 0
+                  ? vIdx.searchAllowed(qVec, fetchLimit, scopedAllowed)
                   : [];
             } else {
               vectorHits = vIdx.search(qVec, fetchLimit);
@@ -673,6 +755,9 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         ? Math.min(fetchLimit, Math.max(effectiveLimit * 3, effectiveLimit + 20))
         : effectiveLimit;
       const candidates: typeof results = [];
+      // Verdicts computed by the firewall pass, kept so the serializer can
+      // label recall output without classifying twice.
+      const verdictByObs = new Map<string, Verdict>();
       let staleDropped = 0;
       for (const r of results) {
         if (candidates.length >= candidateTarget) break;
@@ -732,10 +817,11 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
             verdict.status === "stale" ||
             (getRecallPolicy() === "verified-only" &&
               verdict.status !== "verified");
-          if (dropUnderPolicy) {
+          if (dropUnderPolicy || !verdict) {
             staleDropped++;
             continue;
           }
+          verdictByObs.set(r.obsId, verdict);
         }
         candidates.push(r);
       }
@@ -812,14 +898,9 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       };
 
       if (format === "compact") {
-        const compactResults: CompactSearchResult[] = recallResults.map((r) => ({
-          obsId: r.observation.id,
-          sessionId: r.sessionId,
-          title: r.observation.title,
-          type: r.observation.type,
-          score: r.score,
-          timestamp: r.observation.timestamp,
-        }));
+        const compactResults: CompactRecallItem[] = recallResults.map((r) =>
+          serializeRecallItem(r, "compact", verdictByObs.get(r.observation.id)),
+        );
         const packed = applyTokenBudget(compactResults);
         return {
           format,
@@ -831,18 +912,11 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       }
 
       if (format === "narrative") {
-        const narrativeResults = recallResults.map((r) => ({
-          obsId: r.observation.id,
-          sessionId: r.sessionId,
-          title: r.observation.title,
-          narrative: r.observation.narrative,
-          score: r.score,
-          timestamp: r.observation.timestamp,
-        }));
+        const narrativeResults = recallResults.map((r) =>
+          serializeRecallItem(r, "narrative", verdictByObs.get(r.observation.id)),
+        );
         const packed = applyTokenBudget(narrativeResults);
-        const text = packed.items
-          .map((r, idxN) => `${idxN + 1}. ${r.title}\n${r.narrative}`)
-          .join("\n\n");
+        const text = packed.items.map(formatNarrativeItem).join("\n\n");
         return {
           format,
           results: packed.items,

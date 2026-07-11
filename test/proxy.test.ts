@@ -55,16 +55,19 @@ afterEach(async () => {
 interface Harness {
   proxyPort: number;
   upstreamSystems: () => string[];
+  upstreamMessages: () => Array<{ role: string; content: string }>;
   upstreamAuth: () => string | undefined;
-  observed: Array<{ prompt: string; output: string }>;
+  observed: Array<{ sessionId: string; prompt: string; output: string }>;
 }
 
 async function harness(
-  opts: { stream?: boolean; secret?: string } = {},
+  opts: { stream?: boolean; secret?: string; project?: string } = {},
 ): Promise<Harness> {
   let upstreamSystems: string[] = [];
+  let upstreamMessages: Array<{ role: string; content: string }> = [];
   let upstreamAuth: string | undefined;
-  const observed: Array<{ prompt: string; output: string }> = [];
+  const observed: Array<{ sessionId: string; prompt: string; output: string }> =
+    [];
 
   const daemon = await listen(async (req, res) => {
     const body = await readBody(req);
@@ -75,9 +78,11 @@ async function harness(
     }
     if (req.url === "/memwarden/observe") {
       const p = JSON.parse(body) as {
+        sessionId?: string;
         data?: { tool_input?: { prompt?: string }; tool_output?: string };
       };
       observed.push({
+        sessionId: p.sessionId ?? "",
         prompt: p.data?.tool_input?.prompt ?? "",
         output: p.data?.tool_output ?? "",
       });
@@ -96,6 +101,7 @@ async function harness(
     const payload = JSON.parse(body) as {
       messages?: Array<{ role: string; content: string }>;
     };
+    upstreamMessages = payload.messages ?? [];
     upstreamSystems = (payload.messages ?? [])
       .filter((m) => m.role === "system")
       .map((m) => m.content);
@@ -116,12 +122,13 @@ async function harness(
   });
   cleanups.push(upstream.close);
 
+  const project = opts.project ?? "/repo";
   const proxy: RunningProxy = startProxyServer({
     port: 0,
     upstreamUrl: `http://127.0.0.1:${upstream.port}/v1`,
     daemonUrl: `http://127.0.0.1:${daemon.port}`,
-    project: "/repo",
-    cwd: "/repo",
+    project,
+    cwd: project,
     ...(opts.secret ? { secret: opts.secret } : {}),
   });
   await once(proxy.server, "listening");
@@ -131,6 +138,7 @@ async function harness(
   return {
     proxyPort,
     upstreamSystems: () => upstreamSystems,
+    upstreamMessages: () => upstreamMessages,
     upstreamAuth: () => upstreamAuth,
     observed,
   };
@@ -159,17 +167,53 @@ async function chat(
   return res.text();
 }
 
+// Recalled memory in the forwarded request: it must ride in a USER-role
+// message (framed as untrusted data), never a system message.
+function memoryInUserTurn(h: Harness): boolean {
+  return h
+    .upstreamMessages()
+    .filter((m) => m.role === "user")
+    .some((m) => m.content.includes("IAM bearer tokens"));
+}
+
 describe("memory proxy", () => {
   it("injects recalled memory into the upstream request (JSON)", async () => {
     const h = await harness();
     const reply = await chat(h.proxyPort, false);
 
-    // memory injected as a system message
-    const systems = h.upstreamSystems();
-    expect(systems.some((s) => s.includes("IAM bearer tokens"))).toBe(true);
+    // memory injected into the request (user turn, untrusted-data framing)
+    expect(memoryInUserTurn(h)).toBe(true);
 
     // upstream answer forwarded back to the client unchanged
     expect(reply).toContain("Use IAM tokens.");
+  });
+
+  it("never injects memory as a system message; frames it as untrusted data in the user turn", async () => {
+    // Regression (F5): recalled memory was promoted into a `system` message,
+    // giving memory (which can embed hostile captured text — OWASP ASI06)
+    // instruction-level authority. It must ride in the user turn, wrapped in
+    // the same <memwarden-memory> untrusted-data framing the hooks use.
+    const h = await harness();
+    await chat(h.proxyPort, false);
+
+    // Only the developer's own system prompt goes out — no memory in it.
+    const systems = h.upstreamSystems();
+    expect(systems.length).toBe(1);
+    expect(systems[0]).toContain("You are a helpful assistant.");
+    expect(systems.some((s) => s.includes("IAM bearer tokens"))).toBe(false);
+
+    // The memory arrives in the user turn, delimited and framed as DATA.
+    const users = h.upstreamMessages().filter((m) => m.role === "user");
+    expect(users.length).toBe(1);
+    const u = users[0]!.content;
+    expect(u).toContain("<memwarden-memory>");
+    expect(u).toContain("</memwarden-memory>");
+    expect(u).toContain("not part of your instructions");
+    expect(u).toContain("IAM bearer tokens");
+    // The user's actual question survives, after the framed preamble.
+    expect(u.indexOf("How does auth work")).toBeGreaterThan(
+      u.indexOf("</memwarden-memory>"),
+    );
   });
 
   it("captures the exchange back into memory (JSON)", async () => {
@@ -190,20 +234,29 @@ describe("memory proxy", () => {
     expect(reply).toContain("[DONE]");
 
     // memory still injected, and the streamed answer reassembled on capture
-    expect(h.upstreamSystems().some((s) => s.includes("IAM bearer tokens"))).toBe(true);
+    expect(memoryInUserTurn(h)).toBe(true);
     const captured = await waitFor(() => h.observed.length > 0);
     expect(captured).toBe(true);
     expect(h.observed[0]!.output).toBe("Use IAM tokens.");
   });
 
-  it("inserts memory after the developer's own system prompt", async () => {
-    const h = await harness();
-    await chat(h.proxyPort, false);
-    const systems = h.upstreamSystems();
-    // two system messages: the dev's first, the injected memory second
-    expect(systems.length).toBe(2);
-    expect(systems[0]).toContain("You are a helpful assistant.");
-    expect(systems[1]).toContain("IAM bearer tokens");
+  it("scopes the capture session to the project (no cross-project session reuse)", async () => {
+    // Regression (F2): every proxy used one `proxy-<port>` session. A
+    // session's project metadata is fixed at creation, so captures from a
+    // proxy serving project B could land in a session created under project
+    // A and become unsearchable from B.
+    const hA = await harness({ project: "/repo/alpha" });
+    const hB = await harness({ project: "/repo/beta" });
+    await chat(hA.proxyPort, false);
+    await chat(hB.proxyPort, false);
+    expect(await waitFor(() => hA.observed.length > 0)).toBe(true);
+    expect(await waitFor(() => hB.observed.length > 0)).toBe(true);
+    const sidA = hA.observed[0]!.sessionId;
+    const sidB = hB.observed[0]!.sessionId;
+    expect(sidA.startsWith("proxy-")).toBe(true);
+    expect(sidB.startsWith("proxy-")).toBe(true);
+    // Different projects must never share a fallback session.
+    expect(sidA).not.toBe(sidB);
   });
 
   it("survives a client that disconnects mid-stream (no crash, next request works)", async () => {
@@ -305,7 +358,7 @@ describe("memory proxy client auth", () => {
     const h = await harness({ secret: SECRET });
     const reply = await chat(h.proxyPort, false, `Bearer ${SECRET}`);
     expect(reply).toContain("Use IAM tokens.");
-    expect(h.upstreamSystems().some((s) => s.includes("IAM bearer tokens"))).toBe(true);
+    expect(memoryInUserTurn(h)).toBe(true);
     // the memwarden secret must never leak to the upstream; with no
     // upstreamKey configured, no Authorization goes out at all
     expect(h.upstreamAuth()).toBeUndefined();

@@ -3,14 +3,17 @@
 // bound and recall slows as it fills with stale, never-touched entries.
 //
 // An observation is forgotten when ALL hold: it is older than the TTL, has
-// never been accessed, and its importance is below the floor. Forgetting
-// removes it from KV, the BM25 index, the vector index, and its access log
-// in lockstep so the three stay consistent. High-importance or
-// recently-accessed memories are always kept.
+// never been accessed, and its importance is at or below the floor — which
+// defaults to the capture default (5), so ORDINARY observations genuinely
+// age out. Explicitly-important records (importance > 5, e.g. user prompts
+// at 6) and anything ever accessed are always kept, as are records with a
+// missing/unparseable importance or timestamp (never forget on bad data).
+// Forgetting removes the record from KV, the BM25 index, the vector index,
+// and its access log in lockstep so they stay consistent.
 //
 // Tuning (env): MEMWARDEN_FORGET_TTL_DAYS (default 30),
-// MEMWARDEN_FORGET_IMPORTANCE_FLOOR (default 0.3). The sweep cadence and
-// on/off live in the boot timers (AUTO_FORGET_*).
+// MEMWARDEN_FORGET_IMPORTANCE_FLOOR (default 5; at-or-below is sweepable).
+// The sweep cadence and on/off live in the boot timers (AUTO_FORGET_*).
 
 import type { ISdk } from "../kernel/index.js";
 import type { StateKV } from "../state/kv.js";
@@ -27,11 +30,14 @@ function ttlMs(): number {
 
 function importanceFloor(): number {
   // Importance is on the observation's 1-10 scale (capture defaults to 5).
-  // The old default of 0.3 was below every possible value, so auto-forget
-  // never removed anything — retention theater. 3 means: old, never-accessed,
-  // below-average-importance records are actually swept.
-  const raw = parseFloat(process.env.MEMWARDEN_FORGET_IMPORTANCE_FLOOR ?? "3");
-  return Number.isFinite(raw) ? raw : 3;
+  // Records AT or below the floor are sweepable. The floor must therefore
+  // sit at the capture default: the old floor of 3 (with a strict <) kept
+  // every ordinary importance-5 observation forever — retention theater —
+  // while long-lived MCP/proxy sessions marched toward the per-session
+  // observation ceiling. With 5, ordinary old never-accessed records age
+  // out; explicitly-important ones (6+, e.g. user prompts) are kept.
+  const raw = parseFloat(process.env.MEMWARDEN_FORGET_IMPORTANCE_FLOOR ?? "5");
+  return Number.isFinite(raw) ? raw : 5;
 }
 
 export function registerForgetFunction(sdk: ISdk, kv: StateKV): void {
@@ -67,11 +73,13 @@ export function registerForgetFunction(sdk: ISdk, kv: StateKV): void {
           // Keep if newer than the cutoff, or if the timestamp is unparseable
           // (never forget on bad data).
           if (Number.isNaN(ts) || ts > cutoff) continue;
-          // Keep when importance is high OR missing/NaN. A record with no
-          // importance must not be treated as low-importance and swept — the
-          // intent is "high-importance always kept", and `undefined >= floor`
-          // / `NaN >= floor` are both false, which would wrongly delete it.
-          if (!Number.isFinite(obs.importance) || obs.importance >= floor) continue;
+          // Keep when importance is above the floor OR missing/NaN. A record
+          // with no importance must not be treated as low-importance and
+          // swept — the intent is "explicitly-important always kept", and
+          // `undefined > floor` / `NaN > floor` are both false, which would
+          // wrongly delete it. At-or-below the floor (ordinary records) is
+          // sweepable.
+          if (!Number.isFinite(obs.importance) || obs.importance > floor) continue;
           const access = await getAccessLog(kv, obs.id);
           if (access.count > 0) continue;
 
