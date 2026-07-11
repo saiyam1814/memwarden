@@ -315,19 +315,23 @@ async function doctor(rest: string[]): Promise<void> {
 // memwarden forget <obsId> — delete one memory and print the tamper-evident
 // receipt: the oplog entries proving the write and the delete, chain status,
 // and a hash over the receipt itself. An id that doesn't exist reports
-// exactly that — never a fake success.
+// exactly that — never a fake success. --erase additionally nulls the
+// memory's oplog payloads in place (chain-safe on v2 entries; points at
+// `memwarden compact` when legacy v1 entries block it).
 async function forget(rest: string[]): Promise<void> {
   const obsId = rest.find((a) => !a.startsWith("--"));
-  if (!obsId) throw new Error("usage: memwarden forget <observationId> [--json]");
+  if (!obsId) throw new Error("usage: memwarden forget <observationId> [--erase] [--json]");
+  const erase = rest.includes("--erase");
   const res = await fetch(`${DAEMON_URL}/memwarden/forget`, {
     method: "POST",
     headers: authHeaders(),
-    body: JSON.stringify({ observation_id: obsId }),
+    body: JSON.stringify({ observation_id: obsId, erase }),
   });
   if (!res.ok) throw new Error(`forget failed: HTTP ${res.status}`);
   const r = (await res.json()) as {
     deleted: boolean;
     reason?: string;
+    eraseBlocked?: string;
     receipt?: {
       obsId: string;
       title: string;
@@ -335,6 +339,7 @@ async function forget(rest: string[]): Promise<void> {
       deleteEntry: { id: number; ts: string; hash: string } | null;
       createEntry: { id: number; ts: string; hash: string } | null;
       chainIntact: boolean;
+      contentErased: boolean;
       receiptHash: string;
     };
   };
@@ -349,12 +354,26 @@ async function forget(rest: string[]): Promise<void> {
   }
   const rec = r.receipt!;
   console.log(`\n  Deleted "${rec.title}" (${rec.obsId})\n`);
-  console.log(
-    `  Removed from the active store, search, recall, and every index.\n` +
-      `  Honest scope: the original content remains inside the local append-only\n` +
-      `  oplog (that is what makes the history tamper-evident). Full erasure\n` +
-      `  requires oplog compaction, which is not built yet.\n`,
-  );
+  if (rec.contentErased) {
+    console.log(
+      `  Removed from the active store, search, recall, and every index — and its\n` +
+        `  content was erased from the oplog in place (the chain still verifies:\n` +
+        `  entry hashes cover the content's hash, which stays as the commitment).\n`,
+    );
+  } else if (r.eraseBlocked) {
+    console.log(
+      `  Removed from the active store, search, recall, and every index.\n` +
+        `  Erase was requested but blocked: ${r.eraseBlocked}.\n`,
+    );
+  } else {
+    console.log(
+      `  Removed from the active store, search, recall, and every index.\n` +
+        `  Honest scope: the original content remains inside the local append-only\n` +
+        `  oplog (that is what makes the history tamper-evident). To erase it too,\n` +
+        `  use \`memwarden forget <id> --erase\`, or \`memwarden compact\` to erase\n` +
+        `  every already-forgotten memory and shrink the store.\n`,
+    );
+  }
   console.log(`  delete receipt`);
   if (rec.createEntry) {
     console.log(`    written   oplog #${rec.createEntry.id} at ${rec.createEntry.ts}`);
@@ -365,12 +384,72 @@ async function forget(rest: string[]): Promise<void> {
     console.log(`              hash ${rec.deleteEntry.hash.slice(0, 16)}…`);
   }
   console.log(`    chain     ${rec.chainIntact ? "intact (verified end to end)" : "BROKEN — run memwarden doctor"}`);
+  console.log(`    erased    ${rec.contentErased ? "yes — content removed from the oplog" : "no — content still in the oplog"}`);
   console.log(`    receipt   ${rec.receiptHash}`);
   console.log(
     `\n  The deletion is recorded in the hash-chained oplog: removing or editing\n` +
       `  the record would break the chain. Keep --json output as a shareable proof\n` +
       `  the deletion happened (it contains hashes, never the deleted content).\n`,
   );
+}
+
+// memwarden compact — one-shot oplog migration + shrink. Re-chains every
+// entry as chain v2 (hashes cover the content's hash, not the content),
+// erases the payloads of already-forgotten memories, anchors the old head
+// hash in a compact record, and VACUUMs the database file.
+async function compact(rest: string[]): Promise<void> {
+  const dryRun = rest.includes("--dry-run");
+  const res = await fetch(`${DAEMON_URL}/memwarden/compact`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ dry_run: dryRun }),
+  });
+  if (!res.ok) throw new Error(`compact failed: HTTP ${res.status}`);
+  const r = (await res.json()) as {
+    entriesRewritten: number;
+    erasedCount: number;
+    previousHeadHash: string;
+    compactedAt: string;
+    dryRun: boolean;
+    vacuum: { ok: boolean; bytesReclaimed: number | null; detail?: string };
+  };
+  if (rest.includes("--json")) {
+    console.log(JSON.stringify(r, null, 2));
+    return;
+  }
+  console.log(`\n  memwarden compact${r.dryRun ? " (dry run — nothing was written)" : ""}\n`);
+  console.log(`    entries rewritten   ${r.entriesRewritten}`);
+  console.log(`    payloads erased     ${r.erasedCount} (forgotten memories only — live data untouched)`);
+  console.log(
+    `    previous head hash  ${r.previousHeadHash ? r.previousHeadHash : "(empty chain)"}${
+      r.dryRun ? "" : "\n                        anchored in the new chain's compact record"
+    }`,
+  );
+  if (r.dryRun) {
+    console.log(`    vacuum              skipped (dry run)`);
+  } else if (r.vacuum.ok) {
+    console.log(
+      `    vacuum              ok${
+        r.vacuum.bytesReclaimed === null
+          ? ""
+          : ` — ${formatBytes(r.vacuum.bytesReclaimed)} reclaimed`
+      }`,
+    );
+  } else {
+    console.log(`    vacuum              FAILED — ${r.vacuum.detail ?? "unknown"} (erasure still applied)`);
+  }
+  console.log(
+    `\n  After compact every entry is chain v2: future \`memwarden forget --erase\`\n` +
+      `  erases in place without breaking the chain. Receipts issued before this\n` +
+      `  compaction cite pre-compaction hashes; their chain's head hash is the\n` +
+      `  previousHeadHash anchored above.\n`,
+  );
+}
+
+function formatBytes(n: number): string {
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  if (n >= 1024) return `${Math.ceil(n / 1024)} KB`;
+  return `${n} B`;
 }
 
 // memwarden exclude/include — per-project firewall holes. An excluded
@@ -1132,6 +1211,8 @@ async function main(): Promise<void> {
       return include(rest);
     case "forget":
       return forget(rest);
+    case "compact":
+      return compact(rest);
     case "dejafix":
       return dejafix(rest);
     case "export":
@@ -1148,7 +1229,8 @@ async function main(): Promise<void> {
           "  memwarden doctor [path] [--all-projects]        # audit this project (or the whole brain)\n" +
           "  memwarden audit <store> [--root repo] [--json] [--html [out.html]]  # audit a FOREIGN store (claude-mem db, CLAUDE.md, Mem0 json)\n" +
           "  memwarden exclude [path] | include [path] | exclude --list   # per-project: no capture, no injection\n" +
-          "  memwarden forget <observationId> [--json]       # delete one memory, get a tamper-evident receipt\n" +
+          "  memwarden forget <observationId> [--erase] [--json]  # delete one memory, get a tamper-evident receipt; --erase nulls its oplog content too\n" +
+          "  memwarden compact [--dry-run] [--json]          # erase all forgotten memories from the oplog, migrate the chain, VACUUM\n" +
           "  memwarden dejafix lookup [--cwd dir] < err.txt  # find a verified prior fix for an error\n" +
           '  memwarden dejafix record --fix "…" [--file f] [--root-cause s] < err.txt\n' +
           "  memwarden export <file>\n" +

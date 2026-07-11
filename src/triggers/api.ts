@@ -465,11 +465,16 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
   sdk.registerFunction(
     "api::forget",
     async (
-      req: ApiRequest<{ observation_id?: string; observationId?: string }>,
+      req: ApiRequest<{
+        observation_id?: string;
+        observationId?: string;
+        erase?: boolean;
+      }>,
     ): Promise<Response> => {
       const body = (req.body ?? {}) as {
         observation_id?: string;
         observationId?: string;
+        erase?: boolean;
       };
       const observationId =
         asNonEmptyString(body.observation_id) ??
@@ -479,7 +484,7 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
       }
       const result = await sdk.trigger({
         function_id: "mem::forget",
-        payload: { observationId },
+        payload: { observationId, erase: body.erase === true },
       });
       return { status_code: 200, body: result };
     },
@@ -489,6 +494,32 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
     function_id: "api::forget",
     config: {
       api_path: "/memwarden/forget",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  // --- POST /memwarden/compact --------------------------------------
+  // One-shot oplog migration + shrink: re-chain every entry as chain v2,
+  // erase the payloads of forget-deleted records, anchor the old head hash
+  // in a compact record, VACUUM. Auth'd: it rewrites the brain's history
+  // file. dry_run reports what would happen without writing.
+  sdk.registerFunction(
+    "api::compact",
+    async (req: ApiRequest<{ dry_run?: boolean; dryRun?: boolean }>): Promise<Response> => {
+      const body = (req.body ?? {}) as { dry_run?: boolean; dryRun?: boolean };
+      const result = await sdk.trigger({
+        function_id: "state::compact",
+        payload: { dryRun: body.dry_run === true || body.dryRun === true },
+      });
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::compact",
+    config: {
+      api_path: "/memwarden/compact",
       http_method: "POST",
       middleware_function_ids: ["middleware::api-auth"],
     },
