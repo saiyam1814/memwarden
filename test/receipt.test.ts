@@ -95,6 +95,7 @@ describe("mem::forget", () => {
           deleteEntry: rec.deleteEntry,
           createEntry: rec.createEntry,
           chainIntact: rec.chainIntact,
+          contentErased: rec.contentErased,
         }),
       )
       .digest("hex");
