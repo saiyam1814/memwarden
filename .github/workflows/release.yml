@@ -45,10 +45,12 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+      # npm trusted publishing (OIDC) requires Node >=22.14 / npm >=11.5.1.
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@latest
       - run: npm ci
       - run: npm publish --provenance --access public
         env:

@@ -54,6 +54,13 @@ jobs:
         run: ${{ matrix.setup }}
       - run: npm ci
       - run: npx napi build --release --platform --target ${{ matrix.target }}
+      # Per-platform gate: the freshly built binding must pass memwarden's
+      # real native integration tests on THIS platform before it ships.
+      - name: test the binding on this platform
+        working-directory: .
+        run: |
+          npm ci
+          npx vitest run test/turbovec-native.test.ts
       - uses: actions/upload-artifact@v4
         with:
           name: binding-${{ matrix.target }}
@@ -69,10 +76,13 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+      # npm trusted publishing (OIDC) requires Node >=22.14 / npm >=11.5.1.
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@latest
+        working-directory: .
       - uses: actions/download-artifact@v4
         with:
           pattern: binding-*
