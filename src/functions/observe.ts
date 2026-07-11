@@ -15,6 +15,7 @@
 
 import { TriggerAction, type ISdk } from "../kernel/index.js";
 import type { RawObservation, HookPayload } from "./types.js";
+import { projectKey } from "./git-identity.js";
 import { KV, STREAM, generateId } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
 import { stripPrivateData } from "./privacy.js";
@@ -113,6 +114,15 @@ export function registerObserveFunction(
       hookType: payload.hookType,
       raw: sanitizedRaw,
     };
+
+    // Project identity (additive): a stable key that survives worktrees and
+    // moved checkouts, stored ALONGSIDE the path fields — recall uses it only
+    // to widen path scoping, so key-less data behaves exactly as before.
+    const stableProjectKey =
+      typeof payload.cwd === "string" && payload.cwd.trim().length > 0
+        ? projectKey(payload.cwd)
+        : undefined;
+    if (stableProjectKey) raw.projectKey = stableProjectKey;
 
     let extractedImage: string | undefined;
 
@@ -251,6 +261,7 @@ export function registerObserveFunction(
           updatedAt: ts,
           status: "active",
           observationCount: 1,
+          ...(stableProjectKey ? { projectKey: stableProjectKey } : {}),
           ...(inheritedAgentId ? { agentId: inheritedAgentId } : {}),
           ...(trimmedPrompt && trimmedPrompt.length > 0
             ? { firstPrompt: trimmedPrompt }

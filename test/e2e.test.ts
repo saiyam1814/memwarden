@@ -18,6 +18,9 @@
 // compose.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   registerWorker,
   startHttpServer,
@@ -298,6 +301,67 @@ describe("E2E: boot -> observe -> search (BM25) -> context over the REST wire", 
     };
     // one row per host, not per contact
     expect(stats2.hosts.filter((h) => h.host === "codex")).toHaveLength(1);
+  });
+
+  it("project identity widens recall across git worktrees, and only there", async () => {
+    // Two directories, one repository: a synthetic main checkout and a linked
+    // worktree (a `.git` FILE pointing into main's .git/worktrees). Plus an
+    // unrelated non-git directory as the control.
+    const base = realpathSync(mkdtempSync(join(tmpdir(), "memwarden-e2e-wt-")));
+    try {
+      const main = join(base, "main");
+      mkdirSync(join(main, ".git", "worktrees", "b"), { recursive: true });
+      writeFileSync(
+        join(main, ".git", "config"),
+        '[remote "origin"]\n\turl = git@github.com:acme/rocket.git\n',
+        "utf8",
+      );
+      const worktree = join(base, "b");
+      mkdirSync(worktree, { recursive: true });
+      writeFileSync(
+        join(worktree, ".git"),
+        `gitdir: ${join(main, ".git", "worktrees", "b")}\n`,
+        "utf8",
+      );
+      const unrelated = join(base, "elsewhere");
+      mkdirSync(unrelated, { recursive: true });
+
+      // Capture in the MAIN checkout.
+      const o = await postJson(
+        "/observe",
+        observePayload({ sessionId: "sess-main", project: main, cwd: main }),
+      );
+      expect(o.status).toBe(201);
+
+      // Recall from the WORKTREE (different path, same repo): widened in.
+      const fromWorktree = await postJson("/search", {
+        query: "authentication",
+        cwd: worktree,
+      });
+      expect(fromWorktree.status).toBe(200);
+      const wt = (await fromWorktree.json()) as { results: unknown[] };
+      expect(wt.results.length).toBeGreaterThan(0);
+
+      // Recall from an unrelated directory: still firewalled out.
+      const fromElsewhere = await postJson("/search", {
+        query: "authentication",
+        cwd: unrelated,
+      });
+      const other = (await fromElsewhere.json()) as { results: unknown[] };
+      expect(other.results.length).toBe(0);
+
+      // And key-less pre-existing data keeps exact path behavior: a virtual
+      // (non-existent) cwd matches only its own spelling.
+      await postJson("/observe", observePayload({ sessionId: "sess-legacy" }));
+      const legacy = await postJson("/search", {
+        query: "authentication",
+        cwd: "/work/proj-e2e",
+      });
+      const legacyBody = (await legacy.json()) as { results: unknown[] };
+      expect(legacyBody.results.length).toBeGreaterThan(0);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 
   it("full round trip: observe then search then context all succeed in one boot", async () => {
