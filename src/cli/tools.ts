@@ -14,7 +14,7 @@
 //   opencode     ~/.config/opencode/opencode.json     (mcp -> {type,command[],environment})
 //   openclaw     ~/.openclaw/openclaw.json            (mcp.servers)
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 /** How the memwarden MCP server is launched (stdio). */
@@ -252,6 +252,37 @@ export function writeAgentsMd(dir: string): { path: string; created: boolean } {
   const existing = created ? null : readFileSync(path, "utf8");
   writeFileSync(path, mergeAgentsMd(existing), "utf8");
   return { path, created };
+}
+
+/** Strip the memwarden block from an AGENTS.md body. Pure; null = no block. */
+export function unmergeAgentsMd(existing: string): string | null {
+  const start = existing.indexOf(AGENTS_START);
+  const end = existing.indexOf(AGENTS_END);
+  if (start === -1 || end === -1 || end <= start) return null;
+  const before = existing.slice(0, start).replace(/\n+$/, "\n");
+  const after = existing.slice(end + AGENTS_END.length).replace(/^\n+/, "\n");
+  const merged = (before + after).replace(/\n{3,}/g, "\n\n");
+  return merged.trim() ? merged : "";
+}
+
+/**
+ * Remove the memwarden block from AGENTS.md. Only the sentinel-marked block
+ * is touched; a file that becomes empty is deleted (we created it).
+ */
+export function removeAgentsMd(dir: string): { path: string; removed: boolean } {
+  const path = join(dir, "AGENTS.md");
+  if (!existsSync(path)) return { path, removed: false };
+  const existing = readFileSync(path, "utf8");
+  const next = unmergeAgentsMd(existing);
+  if (next === null) return { path, removed: false };
+  // "# AGENTS.md" alone is the header we wrote around our block — treat a
+  // header-only remainder as empty too.
+  if (!next || next.trim() === "# AGENTS.md") {
+    rmSync(path);
+  } else {
+    writeFileSync(path, next, "utf8");
+  }
+  return { path, removed: true };
 }
 
 export interface WireResult {

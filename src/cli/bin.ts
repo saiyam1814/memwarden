@@ -27,7 +27,14 @@ import {
   writeClaudeHooks,
   claudeSettingsPathFor,
 } from "./connect.js";
-import { TOOLS, writeTool, writeAgentsMd, type LaunchInfo } from "./tools.js";
+import {
+  TOOLS,
+  writeTool,
+  writeAgentsMd,
+  removeAgentsMd,
+  type LaunchInfo,
+} from "./tools.js";
+import { HOST_HOOKS, hostHookById } from "./host-hooks.js";
 import {
   handleSessionStart,
   handleCapture,
@@ -678,42 +685,65 @@ async function up(rest: string[]): Promise<void> {
       "  no supported tools detected. Re-run with --all to wire them all anyway.",
     );
   } else {
-    console.log(`  wiring ${targets.length} tool(s):`);
+    console.log(`  wiring ${targets.length} tool(s) (MCP):`);
     for (const t of targets) {
       const r = writeTool(t, home, launch);
       if (r.status === "skipped") {
         console.log(`    - ${t.label.padEnd(13)} skipped (${r.reason})`);
         continue;
       }
-      // Claude Code also gets real hooks: SessionStart auto-inject +
-      // PostToolUse auto-capture (true automatic memory, no agent needed).
-      let how = "agent recalls/saves via MCP + AGENTS.md";
-      if (t.id === "claude-code") {
-        writeClaudeHooks(join(home, ".claude", "settings.json"), HOOK_BASE);
-        how = "hooks — auto inject + auto capture";
-      }
       console.log(`    ✓ ${t.label.padEnd(13)} ${r.path}`);
-      console.log(`      ${" ".repeat(13)} ${how}`);
     }
   }
 
-  // 3. AGENTS.md in this project: tells the hook-less tools to use memory
-  //    at task boundaries (the cross-tool auto-recall lever).
-  const agents = writeAgentsMd(process.cwd());
-  console.log("");
-  console.log(
-    `  AGENTS.md ✓ ${agents.created ? "wrote" : "updated"} ${agents.path}`,
+  // 3. native lifecycle hooks — mechanical auto inject + auto capture for
+  //    every host with a hook (or plugin) system, not just Claude Code.
+  const hookHosts = all ? HOST_HOOKS : HOST_HOOKS.filter((h) => h.detect(home));
+  if (hookHosts.length > 0) {
+    console.log("");
+    console.log("  hooks (mechanical auto inject + auto capture):");
+    for (const h of hookHosts) {
+      const results = h.write(home, HOOK_BASE);
+      for (const r of results) {
+        if (r.status === "wired") {
+          console.log(`    ✓ ${h.label.padEnd(13)} ${r.path}`);
+        } else {
+          console.log(`    - ${h.label.padEnd(13)} skipped (${r.reason ?? "no change"})`);
+        }
+      }
+      if (h.note && results.some((r) => r.status === "wired")) {
+        console.log(`      ${" ".repeat(13)} note: ${h.note}`);
+      }
+    }
+  }
+
+  // 4. AGENTS.md fallback: ONLY for detected tools that got no hook adapter
+  //    (instruction-following is the last resort, hooks are the mechanism).
+  //    --agents-md forces it for every tool.
+  const wantAgentsMd = rest.includes("--agents-md");
+  const hookless = targets.filter(
+    (t) => !hostHookById(t.id) && t.id !== "antigravity", // antigravity rides the gemini adapter
   );
+  if (wantAgentsMd || hookless.length > 0) {
+    const agents = writeAgentsMd(process.cwd());
+    console.log("");
+    console.log(
+      `  AGENTS.md ✓ ${agents.created ? "wrote" : "updated"} ${agents.path}` +
+        (wantAgentsMd
+          ? ""
+          : ` (fallback for ${hookless.map((t) => t.label).join(", ")} — no hook system)`),
+    );
+  }
 
   console.log(
-    `\n  Done. Restart each tool once so it loads the memwarden MCP server.\n` +
-      `  Recall in any tool: type /recall, or just ask. Claude Code captures\n` +
-      `  and recalls automatically; for global auto-capture on other tools,\n` +
-      `  point them at the memory proxy (see README).\n`,
+    `\n  Done. Restart each tool once so it loads the memwarden MCP server\n` +
+      `  and hooks. Capture and recall are mechanical wherever hooks were\n` +
+      `  written above; type /recall in any tool to force it. Check what is\n` +
+      `  actually flowing with: memwarden status\n`,
   );
 }
 
-function down(): void {
+function down(rest: string[]): void {
   const r = uninstallService();
   if (r.ok) {
     console.log(`[memwarden] stopped and removed the ${r.kind} service.`);
@@ -723,6 +753,28 @@ function down(): void {
         `A daemon started in the background will exit when you log out.`,
     );
   }
+  if (!rest.includes("--all")) {
+    console.log(
+      `[memwarden] hooks and configs left in place — 'memwarden down --all' unwires them too.`,
+    );
+    return;
+  }
+  // --all: strip memwarden's hooks from every host config (only entries whose
+  // command is recognizably ours are touched) and the AGENTS.md block here.
+  const home = homedir();
+  for (const h of HOST_HOOKS) {
+    for (const res of h.remove(home)) {
+      if (res.status === "removed") {
+        console.log(`[memwarden] removed ${h.label} hooks from ${res.path}`);
+      } else if (res.status === "skipped" && res.reason) {
+        console.log(`[memwarden] ${h.label}: ${res.reason}`);
+      }
+    }
+  }
+  const agents = removeAgentsMd(process.cwd());
+  if (agents.removed) {
+    console.log(`[memwarden] removed the memwarden block from ${agents.path}`);
+  }
 }
 
 async function main(): Promise<void> {
@@ -731,7 +783,7 @@ async function main(): Promise<void> {
     case "up":
       return up(rest);
     case "down":
-      return down();
+      return down(rest);
     case "connect":
       return connect(rest);
     case "hook":
@@ -755,8 +807,8 @@ async function main(): Promise<void> {
     default:
       console.log(
         "usage:\n" +
-          "  memwarden up [--all] [--url URL] [--secret S]   # start daemon + wire every installed tool\n" +
-          "  memwarden down                                  # stop + remove the daemon service\n" +
+          "  memwarden up [--all] [--agents-md] [--url URL] [--secret S]   # start daemon + wire every installed tool\n" +
+          "  memwarden down [--all]                          # stop the daemon service; --all also unwires hooks + AGENTS.md\n" +
           "  memwarden connect [claude-code|cursor|cline|windsurf] [--with-hooks] [--url URL] [--secret S]\n" +
           "  memwarden doctor [path] [--all-projects]        # audit this project (or the whole brain)\n" +
           "  memwarden audit <store> [--root repo] [--json] [--html [out.html]]  # audit a FOREIGN store (claude-mem db, CLAUDE.md, Mem0 json)\n" +
