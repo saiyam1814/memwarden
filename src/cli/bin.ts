@@ -28,7 +28,13 @@ import {
   claudeSettingsPathFor,
 } from "./connect.js";
 import { TOOLS, writeTool, writeAgentsMd, type LaunchInfo } from "./tools.js";
-import { handleSessionStart, handleCapture, readStdin } from "./hook.js";
+import {
+  handleSessionStart,
+  handleCapture,
+  readStdin,
+  isHookHost,
+  type HookHost,
+} from "./hook.js";
 import { ensureDaemon, daemonAlive, DAEMON_ENTRY } from "../daemon/ensure.js";
 import { installService, uninstallService } from "../daemon/service.js";
 import { getSecret } from "../functions/config.js";
@@ -195,10 +201,21 @@ function connect(rest: string[]): void {
 
 async function hook(rest: string[]): Promise<void> {
   const event = rest[0];
+  // --host <id> selects the host dialect (stdin parsing + reply schema).
+  // An unknown host degrades to the claude-code dialect rather than failing:
+  // a hook must never be the thing that breaks an agent's turn.
+  const hostIdx = rest.indexOf("--host");
+  const hostArg = hostIdx >= 0 ? rest[hostIdx + 1] : undefined;
+  const host: HookHost =
+    hostArg && isHookHost(hostArg) ? hostArg : "claude-code";
+  if (hostArg && !isHookHost(hostArg)) {
+    console.error(`[memwarden] unknown hook host '${hostArg}' — using claude-code dialect`);
+  }
   const raw = await readStdin();
   const secret = getSecret();
   const deps = {
     baseUrl: DAEMON_URL,
+    host,
     ...(secret ? { secret } : {}),
   };
   let out = "";
