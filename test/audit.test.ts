@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   auditStore,
+  buildAuditPlan,
   detectStoreKind,
   extractFileRefs,
   renderAuditHtml,
@@ -97,6 +98,9 @@ describe("audit: markdown pile", () => {
     // markdown has no timestamps -> drift not checkable
     expect(r.driftCheckable).toBe(false);
     expect(r.drifted.length).toBe(0);
+    expect(r.plan?.map((p) => p.id)).toContain("quarantine-missing-file-memory");
+    expect(r.plan?.map((p) => p.id)).toContain("record-capture-time-evidence");
+    expect(r.plan?.map((p) => p.id)).toContain("anchor-unanchored-memory");
   });
 });
 
@@ -139,6 +143,9 @@ describe("audit: sqlite store (claude-mem-shaped)", () => {
     expect(r.missing[0]!.id).toBe("o3");
     expect(r.unanchored).toBe(1);
     expect(r.driftCheckable).toBe(true);
+    expect(r.plan?.[0]?.priority).toBe("critical");
+    expect(r.plan?.map((p) => p.id)).toContain("refresh-drifted-code-memory");
+    expect(r.plan?.map((p) => p.id)).toContain("promote-present-to-verified-recall");
   });
 
   it("treats space-separated no-timezone timestamps as UTC (SQLite CURRENT_TIMESTAMP)", async () => {
@@ -223,27 +230,27 @@ describe("detectStoreKind", () => {
   });
 });
 
-describe("renderAuditHtml", () => {
-  const report: AuditReport = {
-    store: "/x/claude-mem.db",
-    kind: "sqlite",
-    root: "/repo",
-    total: 4,
-    anchored: 3,
-    uniqueFiles: 3,
-    missing: [
-      { id: "m1", title: "auth in <script>src/gone.ts</script>", origin: "obs", status: "missing", detail: "no longer exists: src/gone.ts" },
-    ],
-    drifted: [
-      { id: "m2", title: "refactor done", origin: "obs", status: "drifted", detail: "changed after capture: src/moved.ts" },
-    ],
-    present: 1,
-    unanchored: 1,
-    driftCheckable: true,
-  };
+const sampleAuditReport: AuditReport = {
+  store: "/x/claude-mem.db",
+  kind: "sqlite",
+  root: "/repo",
+  total: 4,
+  anchored: 3,
+  uniqueFiles: 3,
+  missing: [
+    { id: "m1", title: "auth in <script>src/gone.ts</script>", origin: "obs", status: "missing", detail: "no longer exists: src/gone.ts" },
+  ],
+  drifted: [
+    { id: "m2", title: "refactor done", origin: "obs", status: "drifted", detail: "changed after capture: src/moved.ts" },
+  ],
+  present: 1,
+  unanchored: 1,
+  driftCheckable: true,
+};
 
+describe("renderAuditHtml", () => {
   it("produces a self-contained HTML document with the verdict and findings", () => {
-    const html = renderAuditHtml(report);
+    const html = renderAuditHtml(sampleAuditReport);
     expect(html.startsWith("<!doctype html>")).toBe(true);
     // self-contained: no external script/style/link references
     expect(html).not.toMatch(/<link\b/);
@@ -255,17 +262,19 @@ describe("renderAuditHtml", () => {
     expect(html).toContain("2 of 3");
     expect(html).toContain("67%");
     expect(html).toContain("src/gone.ts");
+    expect(html).toContain("Action plan");
+    expect(html).toContain("Quarantine memories whose referenced files are gone");
   });
 
   it("escapes HTML in titles/details (no injection from store content)", () => {
-    const html = renderAuditHtml(report);
+    const html = renderAuditHtml(sampleAuditReport);
     expect(html).not.toContain("<script>src/gone.ts</script>");
     expect(html).toContain("&lt;script&gt;");
   });
 
   it("handles a store with nothing anchored", () => {
     const empty: AuditReport = {
-      ...report,
+      ...sampleAuditReport,
       total: 2,
       anchored: 0,
       uniqueFiles: 0,
@@ -276,5 +285,42 @@ describe("renderAuditHtml", () => {
     };
     const html = renderAuditHtml(empty);
     expect(html).toContain("Nothing in this store references a file");
+  });
+});
+
+describe("buildAuditPlan", () => {
+  it("turns audit evidence into deterministic next actions", () => {
+    const plan = buildAuditPlan(sampleAuditReport);
+    expect(plan.map((p) => p.id)).toEqual([
+      "quarantine-missing-file-memory",
+      "refresh-drifted-code-memory",
+      "promote-present-to-verified-recall",
+      "anchor-unanchored-memory",
+      "wire-live-memory-firewall",
+    ]);
+    expect(plan[0]).toMatchObject({
+      priority: "critical",
+      dimension: "D7_CONTROL_SAFETY",
+    });
+    expect(plan.some((p) => p.command === "npm install -g memwarden && memwarden up")).toBe(true);
+  });
+
+  it("emits a useful empty-store action", () => {
+    const empty: AuditReport = {
+      ...sampleAuditReport,
+      total: 0,
+      anchored: 0,
+      uniqueFiles: 0,
+      missing: [],
+      drifted: [],
+      present: 0,
+      unanchored: 0,
+    };
+    expect(buildAuditPlan(empty)).toEqual([
+      expect.objectContaining({
+        id: "no-memory-found",
+        priority: "low",
+      }),
+    ]);
   });
 });

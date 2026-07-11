@@ -86,8 +86,8 @@ Every memory is classified against the live repo:
 *unverified*, not *dangerous*, so it stays available for explicit lookups. `memory_resume`, the
 `/recall` prompt, the Claude Code SessionStart hook, and the proxy all run recall with the
 firewall on. It scans a wide window to backfill lower-ranked safe results and warns (rather than
-silently capping) if that window is exhausted. It also drops an older memory that a newer safe
-memory contradicts, using conservative subject/value claims — no LLM, no fuzzy black box. Plain
+silently capping) if that window is exhausted. It reports contradictions in `memwarden doctor`,
+but recall never drops fresh memory on a fuzzy contradiction heuristic. Plain
 `memory_search` stays unfiltered for deliberate lookups; the REST API refuses `safe_only` without
 a `cwd` to verify against rather than pass memory through unchecked.
 
@@ -176,6 +176,12 @@ open, attach, or screenshot), or `--json` for the raw data:
 ```bash
 npx memwarden audit ~/.claude-mem/claude-mem.db --root ~/code/my-repo --html audit.html
 ```
+
+The audit now includes a deterministic action plan in both `--json` and `--html`: quarantine
+missing-file memory, refresh drifted code facts, turn PRESENT facts into hash-verified recall,
+anchor free-floating memories, and wire live recall through the memory firewall. It is the first
+step toward an evidence-driven memory harness: every recommendation cites the audit finding that
+caused it, and nothing changes automatically.
 
 ## Setup is one command
 
@@ -388,7 +394,7 @@ src/cli/         up / down / connect / doctor / audit / forget / exclude / dejaf
 src/cli/tools.ts per-tool adapters: Claude Code, Codex, Cursor, Kiro, Antigravity, OpenCode, OpenClaw
 src/bundle/      portable Brain Bundle export & import
 benchmark/       reproducible recall benchmark
-test/            301 tests: kernel, store parity, oplog, quantizer, MCP, proxy, tool-wiring,
+test/            303 tests: kernel, store parity, oplog, quantizer, MCP, proxy, tool-wiring,
                  Verified Recall, Déjà Fix, foreign-store audit, delete receipts, injection
                  controls, conflict audit, HTTP security (auth/host/content-type),
                  path scoping, self-heal, cross-tool reliability harness, e2e

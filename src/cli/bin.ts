@@ -396,7 +396,7 @@ function include(rest: string[]): void {
 // daemon or any setup. `npx memwarden audit ~/.claude-mem/claude-mem.db` is
 // the whole onboarding.
 async function audit(rest: string[]): Promise<void> {
-  const { auditStore, renderAuditHtml } = await import("../functions/audit.js");
+  const { auditStore, buildAuditPlan, renderAuditHtml } = await import("../functions/audit.js");
 
   // --root and --html each consume the following arg as a value (--html's is
   // optional); mark those indices so they aren't mistaken for the positional
@@ -480,6 +480,25 @@ async function audit(rest: string[]): Promise<void> {
     console.log(`  ${yellow("[drifted]")} ${f.title} — ${f.detail}`);
   }
   if (report.missing.length > 0 || report.drifted.length > 0) console.log("");
+
+  const plan = report.plan ?? buildAuditPlan(report);
+  if (plan.length > 0) {
+    console.log(`  ${bold("Action plan")}`);
+    for (const item of plan.slice(0, 5)) {
+      const label =
+        item.priority === "critical"
+          ? red(item.priority.toUpperCase())
+          : item.priority === "high"
+            ? yellow(item.priority.toUpperCase())
+            : item.priority === "low"
+              ? gray(item.priority.toUpperCase())
+              : item.priority.toUpperCase();
+      console.log(`  [${label}] ${item.title}`);
+      console.log(`      ${item.detail}`);
+      if (item.command) console.log(`      ${gray(item.command)}`);
+    }
+    console.log("");
+  }
 
   const badCount = report.missing.length + report.drifted.length;
   if (report.anchored > 0) {
