@@ -340,6 +340,23 @@ on. Reproduce with `npm run benchmark`:
   full vectors resident (accuracy back, memory saving gone). Run
   `npx tsx benchmark/recall.ts --distractors 10000` to see it yourself.
 
+And the retrieval engine itself: an optional native Rust backend built on
+[turbovec](https://github.com/RyanCodrai/turbovec) (Google's TurboQuant algorithm; real
+`IdMapIndex` with stable IDs, O(1) deletion, and allowlist filtering inside the SIMD kernel).
+Measured at 10,000 × 384-dim vectors (`npm run benchmark:backends`):
+
+| Vector backend | recall@10 vs FP32 | search p50 / p95 | bytes/vector |
+| --- | --- | --- | --- |
+| typescript/full (baseline) | 100% | 14.96 / 16.21 ms | 1536 |
+| typescript/turboquant-4bit | 100% | 18.90 / 19.53 ms | 260 |
+| **turbovec/native-4bit** | **100%** | **0.15 / 0.20 ms** | **196** |
+
+~125× faster search with zero recall drop. Honest defaults: the native backend is **opt-in**
+(`MEMWARDEN_VECTOR_BACKEND=turbovec`) until prebuilt binaries pass CI on every platform, and
+`memwarden status` always names the backend actually serving — a native backend that failed
+to load reports its TypeScript fallback, never a silent claim. The binding lives in
+[`native/turbovec-node/`](native/turbovec-node/) (`@memwarden/turbovec`, MIT).
+
 ## What it does
 
 | Capability | How |
@@ -418,7 +435,7 @@ src/cli/tools.ts per-tool MCP adapters: Claude Code, Codex, Cursor, Kiro, Antigr
 src/cli/host-hooks.ts  native lifecycle-hook adapters: Claude Code, Codex, Cursor, Gemini CLI, Kiro, OpenCode
 src/bundle/      portable Brain Bundle export & import
 benchmark/       reproducible recall benchmark
-test/            316 tests: kernel, store parity, oplog, quantizer, MCP, proxy, tool-wiring,
+test/            379 tests: kernel, store parity, oplog, quantizer, MCP, proxy, tool-wiring,
                  Verified Recall, Déjà Fix, foreign-store audit, delete receipts, injection
                  controls, conflict audit, HTTP security (auth/host/content-type),
                  path scoping, self-heal, cross-tool reliability harness, e2e

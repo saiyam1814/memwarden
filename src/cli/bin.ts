@@ -949,7 +949,15 @@ async function status(rest: string[]): Promise<void> {
   // Per-tool rows: MCP state comes from the schema-exact unmerge check, the
   // hook column from each host adapter's own config file, live from the
   // daemon heartbeat. Antigravity rides the ~/.gemini family's hooks.
-  const toolRows = TOOLS.map((t) => {
+  interface ToolRow {
+    id: string;
+    label: string;
+    detected: boolean;
+    mcp: string;
+    hooks: string;
+    lastSeen: string | null;
+  }
+  const toolRows: ToolRow[] = TOOLS.map((t) => {
     const hookAdapter =
       hostHookById(t.id) ??
       (t.id === "antigravity" ? hostHookById("gemini") : undefined);
@@ -969,6 +977,19 @@ async function status(rest: string[]): Promise<void> {
       lastSeen: lastSeen.get(heartbeatId) ?? null,
     };
   });
+  // Gemini CLI has a hook adapter but no MCP adapter of its own (the
+  // antigravity row covers the shared ~/.gemini MCP config).
+  const gemini = hostHookById("gemini");
+  if (gemini) {
+    toolRows.push({
+      id: "gemini",
+      label: "Gemini CLI",
+      detected: gemini.detect(home),
+      mcp: "—",
+      hooks: gemini.wired(home) ? "wired" : "—",
+      lastSeen: lastSeen.get("gemini") ?? null,
+    });
+  }
 
   if (asJson) {
     console.log(

@@ -116,18 +116,19 @@
   </nav>
 
   <header>
-    <span class="pill">one command · every agent remembers · verified &amp; self-custodied</span>
+    <span class="pill">one command · native hooks in every agent · verified &amp; self-custodied</span>
     <h1>Every agent remembers.<br/>One command: <span class="grad">memwarden&nbsp;up</span></h1>
-    <p class="sub">One command wires verified, self-custodied memory into Claude Code, Codex,
-      Cursor, Kiro, Antigravity, OpenCode and OpenClaw — no cloud, no config. And memwarden never
-      injects a memory whose source no longer checks out, so what your agent recalls is memory you
-      can actually trust.</p>
+    <p class="sub">Native lifecycle hooks in Claude Code, Codex, Cursor, Gemini CLI, Kiro and
+      OpenCode: your work is captured as it happens and recalled before you type a word, in every
+      tool, with no instruction files and no "please remember to remember". And memory whose
+      source no longer checks out is blocked before it reaches the model, so what your agent
+      recalls is memory you can actually trust.</p>
 
     <div class="cmd">
       <code>$ <span class="p">npm install -g memwarden && memwarden up</span></code>
       <button class="copy" onclick="navigator.clipboard&&navigator.clipboard.writeText('npm install -g memwarden && memwarden up');this.textContent='copied'">copy</button>
     </div>
-    <p class="sub" style="margin-top:10px;font-size:15px;opacity:.8">Starts a self-healing daemon and wires every installed tool into it, in that tool's own config. That's the whole setup.</p>
+    <p class="sub" style="margin-top:10px;font-size:15px;opacity:.8">Starts a self-healing daemon, installs on-device semantic embeddings, and wires hooks + MCP into every installed tool, in each tool's own config. That's the whole setup — and <code>memwarden status</code> proves it's flowing.</p>
     <div class="cta">
       <a class="btn primary" href="#setup">What <code>memwarden&nbsp;up</code> does</a>
       <a class="btn ghost" href="https://www.npmjs.com/package/memwarden">npm</a>
@@ -136,7 +137,7 @@
 
     <div class="stats">
       <div class="stat"><b class="accent">1</b><small>command wires<br/>every tool</small></div>
-      <div class="stat"><b>7</b><small>agents share<br/>one brain</small></div>
+      <div class="stat"><b>6</b><small>agents with native hooks<br/>one shared brain</small></div>
       <div class="stat"><b>0</b><small>stale memories<br/>reach the model</small></div>
       <div class="stat"><b>0</b><small>cloud · self-custodied<br/>lives at ~/.memwarden</small></div>
     </div>
@@ -153,7 +154,7 @@
     <div class="grid">
       <div class="feat"><div class="ic">🩺</div><h3>Verified Recall — the anti-feature</h3><p>Memory is firewalled before it reaches a model. Stale memory is never injected. <code>memwarden doctor</code> runs the same check as a red/yellow/green audit against any existing store. Point it at your own memory and watch it light up yellow.</p></div>
       <div class="feat"><div class="ic">🪂</div><h3>Self-custodied &amp; portable</h3><p>Your second brain shouldn't depend on a vendor's roadmap. memwarden is local-first, tamper-evident, and portable: one <code>export</code> produces a Brain Bundle you can move between machines or agents. Zero cloud — the data lives at <code>~/.memwarden</code> and nowhere else.</p></div>
-      <div class="feat"><div class="ic">🧱</div><h3>The memory firewall</h3><p>Nothing enters your agent's context without provenance that still holds. The unique lever — possible only for a coding tool because the repo is ground truth — is tying memory validity to source-file content hashes.</p></div>
+      <div class="feat"><div class="ic">🧱</div><h3>The memory firewall</h3><p>Memory whose provenance stopped checking out is dropped before it reaches the model; what passes is labeled verified / sourced / unsourced, never laundered into one pile. The unique lever — possible only for a coding tool because the repo is ground truth — is tying memory validity to source-file content hashes.</p></div>
     </div>
   </section>
 
@@ -227,28 +228,47 @@ npm test 2>&1 | npx memwarden <span class="a">dejafix lookup</span></pre>
   <section id="setup">
     <h2>Setup is one command</h2>
     <p class="lead"><kbd>memwarden up</kbd> starts a self-healing daemon (one global brain at
-      <code>~/.memwarden</code>) and wires every installed tool into it, in that tool's own
-      config schema, without clobbering servers you already have. No keys to paste, no cloud,
-      no config files to hand-edit.</p>
+      <code>~/.memwarden</code>), installs the on-device embedding runtime so recall is semantic
+      from day one, and wires hooks + MCP into every installed tool, in that tool's own config
+      schema, without clobbering anything you already have. No keys to paste, no cloud, no config
+      files to hand-edit.</p>
 <pre>$ <span class="a">memwarden up</span>
   secret    <span class="g">✓</span> generated (~/.memwarden/secret)
+  semantic  <span class="g">✓</span> local embeddings ready (all-MiniLM-L6-v2 — on-device, nothing leaves)
   daemon    <span class="g">✓</span> http://localhost:3111   brain: ~/.memwarden
-  <span class="g">✓</span> Claude Code   ~/.claude/settings.json   hooks — auto inject + auto capture
-  <span class="g">✓</span> Codex         ~/.codex/config.toml      MCP server + /recall
-  <span class="g">✓</span> Cursor        ~/.cursor/mcp.json        MCP server + /recall
-  <span class="g">✓</span> OpenCode      ~/.config/opencode/...     MCP server + /recall
+  <span class="g">✓</span> Claude Code   MCP + hooks — auto inject + auto capture
+  <span class="g">✓</span> Codex         MCP + hooks (~/.codex/hooks.json — run /hooks once to trust)
+  <span class="g">✓</span> Cursor        MCP + hooks (~/.cursor/hooks.json)
+  <span class="g">✓</span> Gemini CLI    hooks (~/.gemini/settings.json)
+  <span class="g">✓</span> Kiro          MCP + hooks (per custom agent)
+  <span class="g">✓</span> OpenCode      MCP + plugin (~/.config/opencode/plugins/)
 
   Done. Every agent on this machine now shares one verified brain.</pre>
     <div class="tools">
       <div class="tool"><b>Claude Code</b><small class="auto">hooks · fully automatic</small></div>
-      <div class="tool"><b>Codex</b><small class="inst">instruction + /recall</small></div>
-      <div class="tool"><b>Cursor</b><small class="inst">instruction + /recall</small></div>
-      <div class="tool"><b>Kiro</b><small class="inst">instruction + /recall</small></div>
-      <div class="tool"><b>Antigravity</b><small class="inst">instruction + /recall</small></div>
-      <div class="tool"><b>OpenCode</b><small class="inst">instruction + /recall</small></div>
-      <div class="tool"><b>OpenClaw</b><small class="inst">instruction + /recall</small></div>
-      <div class="tool"><b>endpoints you control</b><small class="auto">proxy · OpenCode/Ollama/custom URL</small></div>
+      <div class="tool"><b>Codex</b><small class="auto">hooks · trust once via /hooks</small></div>
+      <div class="tool"><b>Cursor</b><small class="auto">hooks · fully automatic</small></div>
+      <div class="tool"><b>Gemini CLI</b><small class="auto">hooks · fully automatic</small></div>
+      <div class="tool"><b>Kiro</b><small class="auto">hooks · per custom agent</small></div>
+      <div class="tool"><b>OpenCode</b><small class="auto">plugin · capture automatic</small></div>
+      <div class="tool"><b>Antigravity</b><small class="inst">MCP + /recall (rides ~/.gemini hooks)</small></div>
+      <div class="tool"><b>OpenClaw</b><small class="inst">AGENTS.md instruction + /recall</small></div>
     </div>
+    <p class="note">Then prove it's flowing, per tool — <b>detected</b> (installed),
+      <b>configured</b> (MCP + hooks on disk), <b>live</b> (a hook from that host actually reached
+      the daemon). Wired-but-never-live is the failure every other memory layer hides; here it's a
+      column:</p>
+<pre>$ <span class="a">memwarden status</span>
+  daemon    <span class="g">✓</span> running  http://localhost:3111  brain: ~/.memwarden
+  memory    412 memories, 37 sessions, 412 vectors
+  semantic  <span class="g">✓</span> local:Xenova/all-MiniLM-L6-v2 (384d)
+  vectors   TurboQuant 4-bit, 5.9x smaller (typescript/turboquant-4bit)
+
+  tool          detected  mcp     hooks      live
+  Claude Code   yes       wired   wired      <span class="g">live (2m ago)</span>
+  Codex         yes       wired   wired      <span class="g">live (1h ago)</span>
+  Cursor        yes       wired   wired      <span class="y">never seen</span>   <span class="c">&larr; restart Cursor</span>
+  Gemini CLI    yes       —       wired      <span class="g">live (3d ago)</span></pre>
   </section>
 
   <section id="cross">
@@ -260,36 +280,38 @@ npm test 2>&1 | npx memwarden <span class="a">dejafix lookup</span></pre>
     <div class="doors">
       <div class="door">
         <div class="n">Door 1 · mechanical</div>
-        <h3>Hooks</h3>
-        <p>Claude Code injects this project's verified memory before you type, and captures your
-          work as it happens. The agent cannot forget to do it.</p>
+        <h3>Native hooks, everywhere</h3>
+        <p>Claude Code, Codex, Cursor, Gemini CLI, Kiro and OpenCode all get real lifecycle
+          hooks in their own config format: a session-start hook injects this project's verified
+          memory before you type, and capture happens as tools run. The agent cannot forget to do
+          it — there is no instruction to follow. One canonical event layer speaks each host's
+          dialect (<code>memwarden hook &lt;event&gt; --host cursor</code>, etc.).</p>
         <span class="tag mech">guaranteed</span>
       </div>
       <div class="door">
-        <div class="n">Door 2 · standing instruction</div>
-        <h3>MCP + AGENTS.md</h3>
-        <p>For Codex, Cursor, Kiro, Antigravity, OpenCode and OpenClaw, <kbd>up</kbd> writes an
-          instruction telling the agent to recall first and save as it goes. This is how every
-          cross-tool memory layer does these tools, plus <kbd>/recall</kbd> when you want to force
-          it.</p>
-        <span class="tag soft">agent follows it</span>
-      </div>
-      <div class="door">
-        <div class="n">Door 3 · mechanical</div>
+        <div class="n">Door 2 · mechanical</div>
         <h3>The proxy</h3>
         <p>Point a tool's model base URL at the memwarden proxy on <code>:3141</code> and every
           turn is recalled and captured with no agent cooperation. On a secured install the
           tool's API key is your memwarden secret — the proxy refuses other local processes, so
-          nothing else can spend your upstream key or poison capture. Works only where you
-          control the endpoint: OpenCode, OpenClaw, Ollama, LM Studio, custom OpenAI base URLs.</p>
+          nothing else can spend your upstream key or poison capture. Works where you control
+          the endpoint: Ollama, LM Studio, custom OpenAI base URLs.</p>
         <span class="tag mech">guaranteed</span>
       </div>
+      <div class="door">
+        <div class="n">Door 3 · fallback</div>
+        <h3>MCP + AGENTS.md</h3>
+        <p>Tools without a hook surface (today: OpenClaw) still get the MCP server, plus an
+          AGENTS.md instruction to recall first and save as they go — explicitly the fallback,
+          not the mechanism, and <kbd>/recall</kbd> forces it on demand.</p>
+        <span class="tag soft">agent follows it</span>
+      </div>
     </div>
-    <p class="note">Only hooks and the proxy are mechanically guaranteed. The proxy applies to
-      model endpoints you control, not to tools with their own protocol or backend (Claude Code is
-      covered by hooks; Cursor, Kiro and Antigravity by the standing instruction). For MCP-only
-      tools, "automatic" means a standing instruction the agent follows, the same mechanism every
-      memory layer uses, backed by <kbd>/recall</kbd> on demand.</p>
+    <p class="note">Honest small print: Codex requires one-time hook trust-pinning (run
+      <kbd>/hooks</kbd> inside Codex); Kiro hooks attach per custom agent; OpenCode capture is
+      mechanical while injection is best-effort. <kbd>memwarden status</kbd> shows exactly which
+      of these are live rather than assumed — that column is the difference between "configured"
+      and "working".</p>
   </section>
 
   <section id="how">
@@ -298,7 +320,7 @@ npm test 2>&1 | npx memwarden <span class="a">dejafix lookup</span></pre>
       under a token budget. Scoping is by canonical path, so recall never silently misses.</p>
     <div class="flow">
       <b>your tool</b> &nbsp;──observe + hash files──▶&nbsp; compress &nbsp;──▶&nbsp; libSQL store + <b>hash-chained oplog</b><br/><br/>
-      &nbsp;&nbsp;MiniLM embed &nbsp;──▶&nbsp; <b>TurboQuant</b> 4-bit codes &nbsp;──▶&nbsp; vector index<br/><br/>
+      &nbsp;&nbsp;MiniLM embed &nbsp;──▶&nbsp; <b>TurboQuant</b> 4-bit codes &nbsp;──▶&nbsp; vector index (TypeScript, or native <b>turbovec</b> opt-in)<br/><br/>
       <b>your tool</b> &nbsp;◀──verified recall──&nbsp; BM25 + vector (RRF), <b>firewalled</b>, packed under a token budget
     </div>
   </section>
@@ -318,8 +340,26 @@ npm test 2>&1 | npx memwarden <span class="a">dejafix lookup</span></pre>
     <p class="note">At this scale pure 4-bit codes match full precision on every metric at 5.9×
       smaller vectors; at 10,000 distractors they give up ~7 points of R@10 unless exact
       rescoring is enabled (which keeps full vectors resident) — run the benchmark with
-      <code>--distractors 10000</code> to see both sides. 316 tests, including a Verified Recall
-      suite, the Déjà Fix engine, HTTP security (auth / host firewall / content-type), and a
+      <code>--distractors 10000</code> to see both sides.</p>
+
+    <p class="lead" style="margin-top:34px">And the retrieval engine: a native Rust backend built
+      on <a href="https://github.com/RyanCodrai/turbovec">turbovec</a> (Google's TurboQuant
+      algorithm, real <code>IdMapIndex</code> — stable IDs, O(1) deletion, allowlist filtering
+      inside the SIMD kernel). Measured at 10,000 × 384-dim vectors, reproduce with
+      <code>npm run benchmark:backends</code>:</p>
+    <table>
+      <tr><th>Vector backend</th><th>recall@10 vs FP32</th><th>search p50 / p95</th><th>bytes / vector</th></tr>
+      <tr><td>typescript/full (baseline)</td><td>100%</td><td>14.96 / 16.21 ms</td><td>1536</td></tr>
+      <tr><td>typescript/turboquant-4bit</td><td>100%</td><td>18.90 / 19.53 ms</td><td>260</td></tr>
+      <tr><td><b>turbovec/native-4bit</b></td><td class="ok">100%</td><td class="ok">0.15 / 0.20 ms</td><td class="ok">196</td></tr>
+    </table>
+    <p class="note">~125× faster search, zero recall drop, 7.8× smaller vectors, and the firewall's
+      scope filters can run <i>inside</i> the search kernel as allowlists. Honest defaults: the
+      native backend is opt-in (<code>MEMWARDEN_VECTOR_BACKEND=turbovec</code>) until prebuilt
+      binaries pass CI on every platform, and <code>memwarden status</code> always names the
+      backend actually serving — a native backend that failed to load reports its TypeScript
+      fallback, never a silent claim. 379 tests, including a Verified Recall suite, the Déjà Fix
+      engine, HTTP security (auth / host firewall / content-type), per-host hook dialects, and a
       cross-tool reliability harness that proves memory captured in one tool is recalled in
       another.</p>
   </section>
