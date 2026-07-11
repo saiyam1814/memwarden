@@ -535,7 +535,19 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           const obs = await loadObsOrMemory(r);
           // Fail closed for stale/missing candidates. Sourced-unverified memory
           // is allowed by design, but stale memory never gets injected.
-          if (!obs || classifyProvenance(obs.provenance, cwdFilter).status === "stale") {
+          // When the memory's stable projectKey matches the caller's, verify
+          // against the CALLER's checkout — a widened result from another
+          // worktree must be checked against the files the agent is actually
+          // looking at, not the (possibly diverged or deleted) capture dir.
+          const obsSession = await loadSession(r.sessionId);
+          if (
+            !obs ||
+            classifyProvenance(obs.provenance, cwdFilter, {
+              verifyAgainstRoot:
+                obsSession?.projectKey !== undefined &&
+                obsSession.projectKey === cwdFilterKey,
+            }).status === "stale"
+          ) {
             staleDropped++;
             continue;
           }

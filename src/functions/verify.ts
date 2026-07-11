@@ -69,6 +69,19 @@ export interface Verdict {
 export function classifyProvenance(
   prov: Provenance | undefined,
   root: string,
+  opts?: {
+    /**
+     * Verify relative files against `root` (the CALLER's checkout) instead
+     * of the capture directory. Callers set this when they have proven the
+     * two directories are the same project (matching stable projectKey —
+     * e.g. two git worktrees of one repo). Without it, recall from worktree
+     * B would "verify" a memory against worktree A's files: a checkout that
+     * has since diverged, or was deleted (false stale). With it, the verdict
+     * answers the question Verified Recall actually asks: is this memory
+     * still true HERE, where the agent is working.
+     */
+    verifyAgainstRoot?: boolean;
+  },
 ): Verdict {
   if (isUnsourced(prov)) {
     return { status: "unsourced", reason: "no file, command, or user-confirmation evidence" };
@@ -81,8 +94,12 @@ export function classifyProvenance(
   // of the same relative name (e.g. two repos both with src/auth.ts) and
   // produce a false `verified` (hashes happen to match) or false `stale`
   // (the other repo lacks the file). Absolute files are unaffected. Fall
-  // back to `root` only when the memory recorded no cwd.
-  const base = prov?.cwd && isAbsolute(prov.cwd) ? prov.cwd : root;
+  // back to `root` only when the memory recorded no cwd — or when the caller
+  // proved same-project identity and asked to verify against its checkout.
+  const base =
+    !opts?.verifyAgainstRoot && prov?.cwd && isAbsolute(prov.cwd)
+      ? prov.cwd
+      : root;
   const deleted: string[] = [];
   const changed: string[] = [];
   let hashMatched = 0; // existing files whose captured hash still matches

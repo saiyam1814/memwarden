@@ -19,6 +19,7 @@ import type { StateKV } from "../state/kv.js";
 import type { CompressedObservation, Memory, Session } from "./types.js";
 import { KV } from "../state/schema.js";
 import { classifyProvenance } from "./verify.js";
+import { gitProjectKey } from "./git-identity.js";
 import { memoryToObservation } from "./memory-utils.js";
 import { canonicalizePath } from "./paths.js";
 import { getDataDir } from "./config.js";
@@ -96,9 +97,14 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
       };
       const conflictCandidates: CompressedObservation[] = [];
 
-      const audit = (obs: CompressedObservation) => {
+      // Same-project memories from another worktree/moved checkout must be
+      // verified against THIS checkout's files (see classifyProvenance opts).
+      const rootKey = gitProjectKey(root);
+      const audit = (obs: CompressedObservation, sessionKey?: string) => {
         report.total++;
-        const verdict = classifyProvenance(obs.provenance, root);
+        const verdict = classifyProvenance(obs.provenance, root, {
+          verifyAgainstRoot: sessionKey !== undefined && sessionKey === rootKey,
+        });
         const entry: DoctorEntry = { id: obs.id, title: obs.title, reason: verdict.reason };
         switch (verdict.status) {
           case "verified":
@@ -150,7 +156,7 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
         const obs = await kv
           .list<CompressedObservation>(KV.observations(s.id))
           .catch(() => []);
-        for (const o of obs) audit(o);
+        for (const o of obs) audit(o, s.projectKey);
       }
 
       report.conflicts = detectConflicts(conflictCandidates);

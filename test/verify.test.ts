@@ -48,6 +48,40 @@ function repo(): string {
 }
 
 describe("classifyProvenance", () => {
+  it("verifyAgainstRoot checks the caller's checkout, not the capture dir", () => {
+    // Same project, two checkouts: captured in A, recalled from B.
+    const a = repo();
+    const b = repo();
+    writeFileSync(join(a, "auth.ts"), "const ttl = 900;\n");
+    const prov: Provenance = {
+      cwd: a,
+      files: ["auth.ts"],
+      fileHashes: hashFiles(["auth.ts"], a),
+    };
+
+    // Default (no proven identity): verified against A regardless of B.
+    expect(classifyProvenance(prov, b).status).toBe("verified");
+
+    // Proven same-project: B lacks the file -> stale FOR B (the checkout the
+    // agent is actually looking at), even though A still matches.
+    expect(
+      classifyProvenance(prov, b, { verifyAgainstRoot: true }).status,
+    ).toBe("stale");
+
+    // B has the identical content -> verified for B.
+    writeFileSync(join(b, "auth.ts"), "const ttl = 900;\n");
+    expect(
+      classifyProvenance(prov, b, { verifyAgainstRoot: true }).status,
+    ).toBe("verified");
+
+    // B diverged -> stale for B while A would still pass.
+    writeFileSync(join(b, "auth.ts"), "const ttl = 60;\n");
+    expect(
+      classifyProvenance(prov, b, { verifyAgainstRoot: true }).status,
+    ).toBe("stale");
+    expect(classifyProvenance(prov, b).status).toBe("verified");
+  });
+
   it("unsourced when there is no evidence", () => {
     expect(classifyProvenance(undefined, "/r").status).toBe("unsourced");
     expect(classifyProvenance({ userConfirmed: false }, "/r").status).toBe("unsourced");
