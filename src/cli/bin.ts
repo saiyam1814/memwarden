@@ -628,6 +628,40 @@ async function up(rest: string[]): Promise<void> {
     `  secret    ✓ ${generated ? "generated" : "loaded"} (${secretFilePath(dataDir)})`,
   );
 
+  // 0.5. semantic runtime — install transformers.js into <dataDir>/runtime
+  //      so recall is semantic, not lexical-only, after a plain npm install.
+  //      Runs BEFORE the daemon starts so the daemon boots with it available.
+  //      Skippable (--lexical-only / MEMWARDEN_EMBEDDING_PROVIDER=none) and
+  //      never fatal: on failure the daemon honestly reports BM25-only.
+  const embeddingOff =
+    rest.includes("--lexical-only") ||
+    (process.env.MEMWARDEN_EMBEDDING_PROVIDER ?? "local").trim().toLowerCase() ===
+      "none";
+  if (embeddingOff) {
+    console.log("  semantic  - skipped (lexical-only requested)");
+  } else {
+    const { LocalEmbeddingProvider } = await import(
+      "../embedding/local-embedding.js"
+    );
+    if (await LocalEmbeddingProvider.isAvailable()) {
+      console.log("  semantic  ✓ local embeddings ready (all-MiniLM-L6-v2)");
+    } else {
+      console.log(
+        "  semantic  … installing local embedding runtime (one time, ~250MB; the\n" +
+          "              23MB model downloads on first use — all local, nothing\n" +
+          "              leaves this machine)",
+      );
+      const { installSemanticRuntime } = await import("../embedding/runtime.js");
+      const inst = installSemanticRuntime(dataDir);
+      console.log(
+        inst.ok
+          ? `  semantic  ✓ installed (${inst.message})`
+          : `  semantic  ⚠ install failed (${inst.message}) — recall runs\n` +
+              `              lexical-only (BM25). Retry later with: memwarden up`,
+      );
+    }
+  }
+
   // 1. daemon — install a self-healing OS service (starts at login, restarts
   //    on crash). Fall back to a detached spawn if there's no service manager.
   //    Either way the wiring continues; the configs point at this daemon.

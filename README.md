@@ -198,6 +198,10 @@ checkout: `npm install && npm run build && node dist/cli/bin.js up`.)
 
 `memwarden up` is the whole thing. It:
 
+- **installs the local embedding runtime** (transformers.js + all-MiniLM-L6-v2, one time,
+  ~250MB into `~/.memwarden/runtime`) so recall is semantic, not keyword-only, on every
+  install. Everything runs on-device; nothing leaves the machine. Skip with `--lexical-only`
+  and recall stays BM25 — and says so, rather than pretending,
 - **starts a self-healing daemon** in the background (one global brain at `~/.memwarden`) and
   registers it as an OS service (macOS LaunchAgent / Linux systemd `--user`) so it restarts on
   crash and starts at login,

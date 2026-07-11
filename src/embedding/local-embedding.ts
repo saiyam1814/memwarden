@@ -12,6 +12,7 @@
 // guarded add path in search.ts soft-fails, it never breaks observe.
 
 import type { EmbeddingProvider } from "../functions/types.js";
+import { importTransformers } from "./runtime.js";
 
 const DEFAULT_MODEL = "Xenova/all-MiniLM-L6-v2";
 const MINILM_DIMS = 384;
@@ -50,16 +51,9 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     if (this.extractor) return this.extractor;
     if (!this.loading) {
       this.loading = (async () => {
-        const specifier = "@huggingface/transformers";
-        let mod: { pipeline?: unknown };
-        try {
-          mod = (await import(specifier)) as { pipeline?: unknown };
-        } catch {
-          throw new Error(
-            "Local embeddings require the optional '@huggingface/transformers' package. " +
-              "Install it with: npm install @huggingface/transformers",
-          );
-        }
+        // Resolution chain: bare specifier, then <dataDir>/runtime (where
+        // `memwarden up` installs it). Throws actionably when neither hits.
+        const mod = await importTransformers();
         const pipeline = mod.pipeline as
           | ((task: string, model: string) => Promise<FeatureExtractor>)
           | undefined;
@@ -82,17 +76,15 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
   }
 
   /**
-   * Fast check: is the optional '@huggingface/transformers' package even
-   * resolvable? Resolves the module (cheap) without building the pipeline or
-   * downloading the model (expensive). Lets the daemon decide at boot whether
-   * to advertise semantic memory at all, instead of claiming it's on and then
-   * silently falling back to BM25 when the package isn't installed (it's a
-   * devDependency, so npx installs won't have it).
+   * Fast check: is transformers.js resolvable anywhere on the chain (bare
+   * specifier or the memwarden runtime dir)? Resolves the module (cheap)
+   * without building the pipeline or downloading the model (expensive).
+   * Lets the daemon decide at boot whether to advertise semantic memory at
+   * all, instead of claiming it's on and silently falling back to BM25.
    */
   static async isAvailable(): Promise<boolean> {
     try {
-      const specifier = "@huggingface/transformers";
-      const mod = (await import(specifier)) as { pipeline?: unknown };
+      const mod = await importTransformers();
       return typeof mod.pipeline === "function";
     } catch {
       return false;
