@@ -357,6 +357,8 @@ describe("mem::observe hookType session_end (handoff summary)", () => {
     const session = await kv.get<Session>(KV.sessions, "sess-J");
     expect(session?.summary).toContain("Decisions:");
     expect(session?.summary).toContain("LRU cache");
+    // the tool_input JSON before the ` | ` separator must not leak into the span
+    expect(session?.summary).not.toContain('{"file_path"');
   });
 
   it("session_end with no session row still stores a handoff observation", async () => {

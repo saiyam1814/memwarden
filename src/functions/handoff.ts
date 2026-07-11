@@ -103,11 +103,14 @@ function isError(o: HandoffSourceObservation): boolean {
   return ERRORISH_RE.test(o.narrative ?? "");
 }
 
-/** Sentences (line- or period-delimited spans) of `text` matching `re`. */
+/** Sentences of `text` matching `re`. Splits on newlines, sentence ends, and
+ * the ` | ` separator synthetic compression uses between tool input and
+ * output — so a decision found in tool output is not prefixed with the
+ * tool_input JSON. */
 function matchingSpans(text: string, re: RegExp): string[] {
   const out: string[] = [];
   for (const line of text.split("\n")) {
-    for (const span of line.split(/(?<=[.!?])\s+/)) {
+    for (const span of line.split(/(?<=[.!?])\s+|\s\|\s/)) {
       const t = span.trim();
       if (t.length > 8 && re.test(t)) out.push(clip(t, 160));
     }
