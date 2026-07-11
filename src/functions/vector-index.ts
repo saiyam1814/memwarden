@@ -52,6 +52,11 @@ export interface VectorHit {
 export class VectorIndex {
   private vectors = new Map<string, Entry>();
 
+  /** See VectorBackend.backendLabel: pure-TS, uncompressed Float32 storage. */
+  get backendLabel(): string {
+    return "typescript/full";
+  }
+
   add(obsId: string, sessionId: string, embedding: Float32Array): void {
     this.vectors.set(obsId, { embedding, sessionId });
   }

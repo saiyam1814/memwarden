@@ -572,6 +572,51 @@ async function dejafix(rest: string[]): Promise<void> {
   throw new Error("usage: memwarden dejafix <lookup|record> …");
 }
 
+// memwarden status — one honest snapshot of the running daemon: memory and
+// session counts, the embedding provider, and WHICH vector backend is
+// actually serving search (the VectorBackend label from /memwarden/stats —
+// never a guess; a native backend that failed to load reports its
+// TypeScript fallback label here).
+async function status(rest: string[]): Promise<void> {
+  let res: globalThis.Response;
+  try {
+    res = await fetch(`${DAEMON_URL}/memwarden/stats`, { headers: authHeaders() });
+  } catch {
+    console.log(`\n  daemon: not running at ${DAEMON_URL} (start it with: memwarden up)\n`);
+    process.exitCode = 1;
+    return;
+  }
+  if (!res.ok) throw new Error(`status failed: HTTP ${res.status}`);
+  const s = (await res.json()) as {
+    memories: number;
+    sessions: number;
+    vectors: number;
+    vectorBackend: string | null;
+    embedding: { provider: string; dimensions: number } | null;
+    compression: { algorithm: string; bits: number; ratio: number } | null;
+  };
+  if (rest.includes("--json")) {
+    console.log(JSON.stringify(s, null, 2));
+    return;
+  }
+  console.log(`\nmemwarden status — ${DAEMON_URL}\n`);
+  console.log(`  memories   ${s.memories}`);
+  console.log(`  sessions   ${s.sessions}`);
+  console.log(`  vectors    ${s.vectors}`);
+  if (s.embedding) {
+    console.log(`  embedding  ${s.embedding.provider} (${s.embedding.dimensions}d)`);
+  } else {
+    console.log(`  embedding  off (BM25-only)`);
+  }
+  if (s.vectorBackend) {
+    const comp = s.compression ? `, ${s.compression.ratio}x compression` : "";
+    console.log(`  backend    ${s.vectorBackend}${comp}`);
+  } else {
+    console.log(`  backend    none (vector stream off)`);
+  }
+  console.log("");
+}
+
 async function importBrain(file: string | undefined): Promise<void> {
   if (!file) throw new Error("usage: memwarden import <file>");
   const bundle = JSON.parse(readFileSync(file, "utf8"));
@@ -715,6 +760,8 @@ async function main(): Promise<void> {
       return up(rest);
     case "down":
       return down();
+    case "status":
+      return status(rest);
     case "connect":
       return connect(rest);
     case "hook":
@@ -740,6 +787,7 @@ async function main(): Promise<void> {
         "usage:\n" +
           "  memwarden up [--all] [--url URL] [--secret S]   # start daemon + wire every installed tool\n" +
           "  memwarden down                                  # stop + remove the daemon service\n" +
+          "  memwarden status [--json]                       # daemon snapshot incl. the active vector backend\n" +
           "  memwarden connect [claude-code|cursor|cline|windsurf] [--with-hooks] [--url URL] [--secret S]\n" +
           "  memwarden doctor [path] [--all-projects]        # audit this project (or the whole brain)\n" +
           "  memwarden audit <store> [--root repo] [--json] [--html [out.html]]  # audit a FOREIGN store (claude-mem db, CLAUDE.md, Mem0 json)\n" +
