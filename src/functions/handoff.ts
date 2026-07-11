@@ -14,7 +14,7 @@
 //
 // Everything here is pure over its input (no clock, no fs, no kv).
 
-import type { CompressedObservation, SessionSummary } from "./types.js";
+import type { CompressedObservation, Provenance, SessionSummary } from "./types.js";
 
 /** Cap applied to a stored user prompt (observe's user_prompt path). Long
  * pasted prompts keep their head — that is where the intent lives. */
@@ -34,6 +34,7 @@ export interface HandoffSourceObservation {
   files?: string[];
   timestamp?: string;
   userPrompt?: string;
+  provenance?: Provenance;
 }
 
 export interface HandoffInput {
@@ -234,6 +235,30 @@ export function buildSessionHandoff(input: HandoffInput): Handoff {
   const goalLine = goal === "(no prompt captured)" ? input.sessionId : firstLine(goal);
   const title = clip(`Session handoff: ${goalLine}`, 80);
 
+  // The handoff INHERITS provenance from the observations it summarizes.
+  // Without this, a handoff copies decision text out of code-backed memories
+  // but classifies as unsourced — so a fact the firewall would refuse as
+  // stale gets laundered through the summary. Conservative on purpose: if
+  // ANY inherited file drifts, the whole handoff is stale (a digest carrying
+  // possibly-false claims should be withheld from auto-injection; explicit
+  // lookups still find it).
+  const provFiles: string[] = [];
+  const provHashes: Record<string, string> = {};
+  let provCwd: string | undefined;
+  for (const o of obs) {
+    const p = o.provenance;
+    if (!p) continue;
+    if (!provCwd && p.cwd) provCwd = p.cwd;
+    for (const f of p.files ?? []) {
+      if (provFiles.length >= 20) break;
+      if (!provFiles.includes(f)) {
+        provFiles.push(f);
+        const h = p.fileHashes?.[f];
+        if (h) provHashes[f] = h;
+      }
+    }
+  }
+
   const observation: CompressedObservation = {
     id: input.obsId,
     sessionId: input.sessionId,
@@ -254,6 +279,13 @@ export function buildSessionHandoff(input: HandoffInput): Handoff {
     confidence: 0.6,
   };
   if (input.agentId) observation.agentId = input.agentId;
+  if (provFiles.length > 0 || provCwd) {
+    observation.provenance = {
+      ...(provCwd ? { cwd: provCwd } : {}),
+      ...(provFiles.length > 0 ? { files: provFiles } : {}),
+      ...(Object.keys(provHashes).length > 0 ? { fileHashes: provHashes } : {}),
+    };
+  }
 
   const sessionSummary: SessionSummary = {
     sessionId: input.sessionId,

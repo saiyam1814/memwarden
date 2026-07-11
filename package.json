@@ -1,7 +1,7 @@
 {
   "name": "memwarden",
   "version": "0.0.5",
-  "description": "The memory firewall for AI coding agents. Verified, self-custodied, tamper-evident — one brain across every tool.",
+  "description": "The memory firewall for AI coding agents. Verified, self-custodied, tamper-evident \u2014 one brain across every tool.",
   "type": "module",
   "engines": {
     "node": ">=20.0.0"
@@ -42,7 +42,8 @@
     "demo:trust": "tsx demo/trust.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "demo:firewall": "tsx demo/firewall.ts"
   },
   "license": "Apache-2.0",
   "dependencies": {
