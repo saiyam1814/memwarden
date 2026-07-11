@@ -635,45 +635,51 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       // Measure retrieval itself (not the one-time cold rebuild above) — the
       // "is finding context fast?" number.
       const searchStartedAt = performance.now();
-      const bm25Results = idx.search(query, fetchLimit);
+      // Scope-aware retrieval: with a project/cwd filter active, BOTH
+      // streams (BM25 keyword and vector) search WITHIN the allowlist of
+      // in-scope ids so the top fetchLimit is filled with valid candidates,
+      // instead of a global top-k that mostly gets post-filtered away —
+      // enough stronger out-of-scope docs (>= the over-fetch window) would
+      // otherwise starve a valid in-scope result entirely. Purely an
+      // optimization: the scope post-filter below still runs on every
+      // candidate (defense in depth), so a too-wide allowlist can never
+      // leak an out-of-scope result. MEMWARDEN_SCOPED_VECTOR_SEARCH=off is
+      // the kill switch back to global-scan + post-filter for both streams.
+      let scopedAllowed: Set<string> | null = null;
+      // Sessions preloaded by the scoped allowlist build; seeds the
+      // per-candidate session cache so the post-filter doesn't re-read them.
+      let preloadedSessions: Session[] | null = null;
+      if (filtering && isScopedVectorSearchEnabled()) {
+        const scoped = await buildScopedAllowedIds(kv, idx, {
+          projectFilter,
+          cwdFilter,
+          projectFilterKey,
+          cwdFilterKey,
+        });
+        scopedAllowed = scoped.allowed;
+        preloadedSessions = scoped.sessions;
+      }
+      const bm25Results = scopedAllowed
+        ? idx.search(query, fetchLimit, scopedAllowed)
+        : idx.search(query, fetchLimit);
       // Fuse in the semantic stream when an embedding provider + vector index
       // are present, so meaning-based queries (different words than the
       // memory) resolve. Provider-less mode stays pure BM25. A failing
       // embed falls back to BM25 rather than breaking search.
       let results = bm25Results;
-      // Sessions preloaded by the scoped allowlist build (below); seeds the
-      // per-candidate session cache so the post-filter doesn't re-read them.
-      let preloadedSessions: Session[] | null = null;
       const vIdx = getVectorIndex();
       const ep = currentEmbeddingProvider;
       if (vIdx && ep && vIdx.size > 0) {
         try {
           const qVec = await ep.embed(clipEmbedInput(query));
           if (qVec.length === ep.dimensions) {
-            // Scope-aware vector stream: with a project/cwd filter active,
-            // search WITHIN the allowlist of in-scope ids so the top
-            // fetchLimit is filled with valid candidates, instead of a
-            // global top-k that mostly gets post-filtered away. Purely an
-            // optimization: the scope post-filter below still runs on every
-            // candidate (defense in depth), so a too-wide allowlist can
-            // never leak an out-of-scope result. Falls back to the global
-            // scan when disabled or the backend lacks searchAllowed.
+            // The vector stream uses the same allowlist; falls back to the
+            // global scan when the backend lacks searchAllowed.
             let vectorHits: Ranked[];
-            if (
-              filtering &&
-              isScopedVectorSearchEnabled() &&
-              typeof vIdx.searchAllowed === "function"
-            ) {
-              const scoped = await buildScopedAllowedIds(kv, idx, {
-                projectFilter,
-                cwdFilter,
-                projectFilterKey,
-                cwdFilterKey,
-              });
-              preloadedSessions = scoped.sessions;
+            if (scopedAllowed && typeof vIdx.searchAllowed === "function") {
               vectorHits =
-                scoped.allowed.size > 0
-                  ? vIdx.searchAllowed(qVec, fetchLimit, scoped.allowed)
+                scopedAllowed.size > 0
+                  ? vIdx.searchAllowed(qVec, fetchLimit, scopedAllowed)
                   : [];
             } else {
               vectorHits = vIdx.search(qVec, fetchLimit);

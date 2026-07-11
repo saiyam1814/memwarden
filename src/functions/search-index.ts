@@ -121,11 +121,24 @@ export class SearchIndex {
     return idf * (num / den);
   }
 
-  search(query: string, limit = 20): Bm25Hit[] {
+  /**
+   * BM25 search. With `allowedIds`, only those docs are scored/collected —
+   * the scoped-search counterpart of the vector index's searchAllowed, so a
+   * project-filtered query fills its top-k with in-scope candidates instead
+   * of a global top-k that mostly gets post-filtered away. IDF stays
+   * corpus-global (df from the full posting list) so relative ranking
+   * matches the unscoped search; the allowlist only restricts candidates.
+   */
+  search(
+    query: string,
+    limit = 20,
+    allowedIds?: ReadonlySet<string>,
+  ): Bm25Hit[] {
     const rawTerms = this.tokenize(query.toLowerCase());
     if (rawTerms.length === 0) return [];
     const n = this.docs.size;
     if (n === 0) return [];
+    if (allowedIds && allowedIds.size === 0) return [];
     const avgLen = this.totalLength / n;
 
     // exact terms at full weight, synonyms at 0.7, de-duplicated
@@ -150,6 +163,7 @@ export class SearchIndex {
       if (!posting) return;
       const df = posting.size;
       for (const obsId of posting) {
+        if (allowedIds && !allowedIds.has(obsId)) continue;
         const doc = this.docs.get(obsId)!;
         const tf = this.termFreqs.get(obsId)?.get(term) ?? 0;
         const add = this.contribution(tf, df, n, doc.termCount, avgLen) * weight * factor;
