@@ -40,6 +40,11 @@ import {
 } from "./tools.js";
 import { HOST_HOOKS, hostHookById, hooklessToolIds } from "./host-hooks.js";
 import {
+  runningProcessNames,
+  toolRunState,
+  restartAdvice,
+} from "./running.js";
+import {
   handleSessionStart,
   handleCapture,
   readStdin,
@@ -791,11 +796,22 @@ async function up(rest: string[]): Promise<void> {
     );
   }
 
+  // 5. restart truth, per tool — auto-discovered from the live process
+  //    table instead of a blanket "restart everything". memwarden never
+  //    restarts an agent itself: killing a live session to load a config
+  //    would be a worse failure than the one it fixes.
+  const procs = runningProcessNames();
+  console.log("");
+  console.log("  what actually needs a restart:");
+  for (const t of targets) {
+    const state = toolRunState(t.id, procs);
+    console.log(`    ${state === "running" ? "⟳" : "✓"} ${t.label.padEnd(13)} ${restartAdvice(t.id, state)}`);
+  }
+
   console.log(
-    `\n  Done. Restart each tool once so it loads the memwarden MCP server\n` +
-      `  and hooks. Capture and recall are mechanical wherever hooks were\n` +
-      `  written above; type /recall in any tool to force it. Check what is\n` +
-      `  actually flowing with: memwarden status\n`,
+    `\n  Done. Capture and recall are mechanical wherever hooks were written\n` +
+      `  above; type /recall in any tool to force it. Check what is actually\n` +
+      `  flowing with: memwarden status\n`,
   );
 }
 
@@ -1045,14 +1061,21 @@ async function status(rest: string[]): Promise<void> {
   console.log(
     `  ${"tool".padEnd(13)} ${"detected".padEnd(9)} ${"mcp".padEnd(10)} ${"hooks".padEnd(12)} live`,
   );
+  const procs = runningProcessNames();
   for (const r of toolRows) {
     // Without a reachable daemon there is no heartbeat to consult — "never
-    // seen" would be a claim we can't back.
-    const live = r.lastSeen
-      ? `live (${relativeTime(r.lastSeen)})`
-      : r.hooks !== "AGENTS.md" && daemonUp
-        ? "never seen"
-        : "—";
+    // seen" would be a claim we can't back. And when the tool is wired,
+    // provably running, and its hooks have never phoned home, say the
+    // actionable thing outright.
+    let live = "—";
+    if (r.lastSeen) {
+      live = `live (${relativeTime(r.lastSeen)})`;
+    } else if (r.hooks !== "AGENTS.md" && daemonUp) {
+      live =
+        r.hooks !== "—" && toolRunState(r.id, procs) === "running"
+          ? "never seen — restart it (running with the old config)"
+          : "never seen";
+    }
     console.log(
       `  ${r.label.padEnd(13)} ${(r.detected ? "yes" : "no").padEnd(9)} ${r.mcp.padEnd(10)} ${r.hooks.padEnd(12)} ${live}`,
     );

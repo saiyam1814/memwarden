@@ -226,15 +226,21 @@ checkout: `npm install && npm run build && node dist/cli/bin.js up`.)
 | **OpenCode** | `~/.config/opencode/opencode.json` | plugin in `~/.config/opencode/plugins/` | mechanical (plugin) |
 | **OpenClaw** | `~/.openclaw/openclaw.json` | — (no hook system) | `AGENTS.md` instruction + `/recall` |
 
-Restart each tool once so it loads the new server and hooks. Codex additionally requires you to
-trust the hooks once: open Codex and run `/hooks`. `memwarden down` removes the service;
-`memwarden down --all` also unwires every hook, MCP entry, and the `AGENTS.md` block (only
-entries memwarden wrote — your own hooks are never touched), and `--data` deletes the brain.
+You rarely need to restart anything: CLI agents (Claude Code, Codex, Gemini CLI, OpenCode)
+load hooks per session, so your **next** session is wired automatically — only a session that
+is already open keeps the old config, and only long-lived GUI apps (Cursor, Kiro) need a real
+restart. `memwarden up` ends by checking the live process table and telling you, per tool,
+which of those cases you're actually in — it never restarts an agent for you (killing a live
+session to load a config would be a worse failure than the one it fixes). Codex additionally
+requires you to trust the hooks once: open Codex and run `/hooks`. `memwarden down` removes
+the service; `memwarden down --all` also unwires every hook, MCP entry, and the `AGENTS.md`
+block (only entries memwarden wrote — your own hooks are never touched), and `--data` deletes
+the brain.
 
 `memwarden status` shows the whole picture per tool — **detected** (installed), **configured**
 (MCP + hooks present in the config files), and **live** (a hook from that host actually reached
-the daemon, and when). Wired-but-never-live is the failure it exists to catch: usually the tool
-needs a restart, or Codex hooks are not trust-pinned yet.
+the daemon, and when). Wired-but-never-live is the failure it exists to catch, and when the
+tool is provably running with the old config it says so outright: `never seen — restart it`.
 
 **You stay in charge of the automatic paths.** `MEMWARDEN_INJECT=off` starts sessions with a
 clean slate (no auto-injection anywhere — explicit `/recall` and the MCP tools still work);
