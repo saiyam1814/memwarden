@@ -15,6 +15,7 @@ import {
   existsSync,
   mkdirSync,
   chmodSync,
+  rmSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -25,9 +26,18 @@ import {
   mcpConfigPathFor,
   buildMcpServerEntry,
   writeClaudeHooks,
+  removeClaudeHooks,
   claudeSettingsPathFor,
 } from "./connect.js";
-import { TOOLS, writeTool, writeAgentsMd, type LaunchInfo } from "./tools.js";
+import {
+  TOOLS,
+  writeTool,
+  unwireTool,
+  toolWireState,
+  writeAgentsMd,
+  removeAgentsMd,
+  type LaunchInfo,
+} from "./tools.js";
 import { handleSessionStart, handleCapture, readStdin } from "./hook.js";
 import { ensureDaemon, daemonAlive, DAEMON_ENTRY } from "../daemon/ensure.js";
 import { installService, uninstallService } from "../daemon/service.js";
@@ -749,7 +759,12 @@ async function up(rest: string[]): Promise<void> {
   );
 }
 
-function down(): void {
+function down(rest: string[]): void {
+  const all = rest.includes("--all");
+  const purgeData = rest.includes("--data");
+  const home = homedir();
+  const dataDir = process.env.MEMWARDEN_DATA_DIR ?? join(home, ".memwarden");
+
   const r = uninstallService();
   if (r.ok) {
     console.log(`[memwarden] stopped and removed the ${r.kind} service.`);
@@ -759,6 +774,174 @@ function down(): void {
         `A daemon started in the background will exit when you log out.`,
     );
   }
+
+  if (!all) {
+    console.log(
+      `[memwarden] MCP entries, Claude hooks, and AGENTS.md blocks were left in\n` +
+        `place (so 'memwarden up' restores instantly). Remove everything with:\n` +
+        `  memwarden down --all          # also unwire every tool\n` +
+        `  memwarden down --all --data   # and delete the brain at ${dataDir}`,
+    );
+    return;
+  }
+
+  // Unwire every tool we know how to wire — including ones no longer
+  // "detected", since a leftover config entry is exactly what we're removing.
+  console.log(`[memwarden] unwiring tools:`);
+  for (const t of TOOLS) {
+    const u = unwireTool(t, home);
+    if (u.status === "removed") {
+      console.log(`    ✓ ${t.label.padEnd(13)} removed from ${u.path}`);
+    } else if (u.reason !== "no config file" && u.reason !== "not wired") {
+      console.log(`    ⚠ ${t.label.padEnd(13)} skipped (${u.reason})`);
+    }
+  }
+
+  const hooksResult = removeClaudeHooks(join(home, ".claude", "settings.json"));
+  if (hooksResult.changed) {
+    console.log(`    ✓ Claude hooks   removed from ${hooksResult.path}`);
+  }
+
+  const agents = removeAgentsMd(process.cwd());
+  if (agents.action !== "none") {
+    console.log(
+      `    ✓ AGENTS.md      ${agents.action === "deleted" ? "deleted" : "memwarden block removed"} (${agents.path})`,
+    );
+  }
+  console.log(
+    `[memwarden] note: AGENTS.md blocks in OTHER projects are per-project — run\n` +
+      `'memwarden down --all' from each, or delete the marked block by hand.`,
+  );
+
+  if (purgeData) {
+    rmSync(dataDir, { recursive: true, force: true });
+    console.log(
+      `[memwarden] deleted ${dataDir} (memories, oplog, secret, embedding runtime).`,
+    );
+  } else {
+    console.log(
+      `[memwarden] your brain is untouched at ${dataDir} — delete it with\n` +
+        `'memwarden down --all --data' or keep it for a future 'memwarden up'.`,
+    );
+  }
+}
+
+// --- `memwarden status` --------------------------------------------
+
+async function status(): Promise<void> {
+  const home = homedir();
+  const dataDir = process.env.MEMWARDEN_DATA_DIR ?? join(home, ".memwarden");
+  const version = (() => {
+    try {
+      const pkg = JSON.parse(
+        readFileSync(join(dirname(SELF), "..", "..", "package.json"), "utf8"),
+      ) as { version?: string };
+      return pkg.version ?? "unknown";
+    } catch {
+      return "unknown";
+    }
+  })();
+
+  console.log(`\nmemwarden status  (v${version})\n`);
+
+  // daemon + live stats (livez is unauthenticated; stats needs the secret)
+  interface StatsBody {
+    memories?: number;
+    sessions?: number;
+    vectors?: number;
+    embedding?: { provider: string; dimensions: number } | null;
+    compression?: { algorithm: string; bits: number; ratio: number } | null;
+  }
+  let stats: StatsBody | null = null;
+  let daemonUp = false;
+  try {
+    const res = await fetch(`${DAEMON_URL}/memwarden/livez`, {
+      signal: AbortSignal.timeout(1500),
+    });
+    daemonUp = res.ok;
+  } catch {
+    daemonUp = false;
+  }
+  if (daemonUp) {
+    try {
+      const res = await fetch(`${DAEMON_URL}/memwarden/stats`, {
+        headers: authHeaders(),
+        signal: AbortSignal.timeout(2500),
+      });
+      if (res.ok) stats = (await res.json()) as StatsBody;
+    } catch {
+      // stats stay null; daemon line still prints
+    }
+  }
+  console.log(
+    `  daemon    ${daemonUp ? "✓ running" : "✗ not running"}  ${DAEMON_URL}  brain: ${dataDir}` +
+      (daemonUp && !stats ? "  (stats unavailable — secret mismatch?)" : ""),
+  );
+  if (stats) {
+    console.log(
+      `  memory    ${stats.memories ?? 0} memories, ${stats.sessions ?? 0} sessions, ${stats.vectors ?? 0} vectors`,
+    );
+  }
+
+  // semantic recall — the daemon's live answer when up, a local resolution
+  // check otherwise. Never claim semantic without evidence.
+  if (stats) {
+    console.log(
+      stats.embedding
+        ? `  semantic  ✓ ${stats.embedding.provider} (${stats.embedding.dimensions}d)`
+        : `  semantic  ✗ lexical-only (BM25) — run 'memwarden up' to install local embeddings`,
+    );
+    console.log(
+      stats.compression
+        ? `  vectors   ${stats.compression.algorithm} ${stats.compression.bits}-bit, ${stats.compression.ratio}x smaller (typescript backend)`
+        : `  vectors   full-precision (typescript backend)`,
+    );
+  } else {
+    const { LocalEmbeddingProvider } = await import(
+      "../embedding/local-embedding.js"
+    );
+    const avail = await LocalEmbeddingProvider.isAvailable();
+    console.log(
+      avail
+        ? `  semantic  ✓ embedding runtime installed (daemon down — from local check)`
+        : `  semantic  ✗ embedding runtime not installed — 'memwarden up' installs it`,
+    );
+  }
+
+  // per-tool wiring, from each tool's actual config file — not assumptions
+  console.log(`\n  tools (from each tool's own config):`);
+  for (const t of TOOLS) {
+    const detected = t.detect(home);
+    const state = toolWireState(t, home);
+    const mark = state === "wired" ? "✓" : state === "unknown" ? "?" : "-";
+    console.log(
+      `    ${mark} ${t.label.padEnd(13)} ${state}${detected ? "" : " (tool not detected)"}`,
+    );
+  }
+
+  // Claude hooks + this project's AGENTS.md
+  const settingsPath = join(home, ".claude", "settings.json");
+  let hooksOn = false;
+  try {
+    hooksOn =
+      existsSync(settingsPath) &&
+      readFileSync(settingsPath, "utf8").includes("# memwarden-managed");
+  } catch {
+    // treated as off
+  }
+  console.log(`\n  hooks     ${hooksOn ? "✓ Claude Code auto inject/capture" : "- none"}`);
+  const agentsPath = join(process.cwd(), "AGENTS.md");
+  let agentsOn = false;
+  try {
+    agentsOn =
+      existsSync(agentsPath) &&
+      readFileSync(agentsPath, "utf8").includes("<!-- memwarden:start -->");
+  } catch {
+    // treated as off
+  }
+  console.log(
+    `  AGENTS.md ${agentsOn ? "✓ memwarden block present (this project)" : "- no memwarden block (this project)"}\n`,
+  );
 }
 
 async function main(): Promise<void> {
@@ -767,7 +950,9 @@ async function main(): Promise<void> {
     case "up":
       return up(rest);
     case "down":
-      return down();
+      return down(rest);
+    case "status":
+      return status();
     case "connect":
       return connect(rest);
     case "hook":
@@ -792,7 +977,8 @@ async function main(): Promise<void> {
       console.log(
         "usage:\n" +
           "  memwarden up [--all] [--url URL] [--secret S]   # start daemon + wire every installed tool\n" +
-          "  memwarden down                                  # stop + remove the daemon service\n" +
+          "  memwarden down [--all] [--data]                 # stop service; --all unwires every tool, --data deletes the brain\n" +
+          "  memwarden status                                # daemon, semantic recall, per-tool wiring — measured, not assumed\n" +
           "  memwarden connect [claude-code|cursor|cline|windsurf] [--with-hooks] [--url URL] [--secret S]\n" +
           "  memwarden doctor [path] [--all-projects]        # audit this project (or the whole brain)\n" +
           "  memwarden audit <store> [--root repo] [--json] [--html [out.html]]  # audit a FOREIGN store (claude-mem db, CLAUDE.md, Mem0 json)\n" +

@@ -14,7 +14,7 @@
 //   opencode     ~/.config/opencode/opencode.json     (mcp -> {type,command[],environment})
 //   openclaw     ~/.openclaw/openclaw.json            (mcp.servers)
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 /** How the memwarden MCP server is launched (stdio). */
@@ -41,6 +41,12 @@ export interface ToolAdapter {
    * rather than clobber a config it cannot understand.
    */
   merge(existing: string | null, launch: LaunchInfo): string;
+  /**
+   * Remove the memwarden MCP server from the tool's config text. Returns the
+   * new file text, or null when there is nothing of ours in it. Throws on
+   * unparseable input (caller skips, never clobbers).
+   */
+  unmerge(existing: string): string | null;
   /** How recall/capture happens for this tool, for the summary + wiring. */
   auto: AutoMode;
 }
@@ -134,6 +140,48 @@ function mergeCodexToml(existing: string | null, launch: LaunchInfo): string {
   return stripped ? stripped + "\n\n" + block : block;
 }
 
+// --- per-schema unmerges --------------------------------------------
+// Mirrors of the merges: delete exactly our entry, leave everything else
+// byte-for-byte (JSON reserializes; TOML is surgically stripped). Returning
+// null means "nothing of ours here" so callers can report honestly.
+
+function unmergeMcpServers(existing: string): string | null {
+  const base = parseOrEmpty(existing);
+  const servers = asObject(base["mcpServers"]);
+  if (!("memwarden" in servers)) return null;
+  delete servers["memwarden"];
+  base["mcpServers"] = servers;
+  return serialize(base);
+}
+
+function unmergeOpencode(existing: string): string | null {
+  const base = parseOrEmpty(existing);
+  const mcp = asObject(base["mcp"]);
+  if (!("memwarden" in mcp)) return null;
+  delete mcp["memwarden"];
+  base["mcp"] = mcp;
+  return serialize(base);
+}
+
+function unmergeOpenclaw(existing: string): string | null {
+  const base = parseOrEmpty(existing);
+  const mcp = asObject(base["mcp"]);
+  const servers = asObject(mcp["servers"]);
+  if (!("memwarden" in servers)) return null;
+  delete servers["memwarden"];
+  mcp["servers"] = servers;
+  base["mcp"] = mcp;
+  return serialize(base);
+}
+
+function unmergeCodexToml(existing: string): string | null {
+  if (!/\[mcp_servers\.memwarden\]/.test(existing)) return null;
+  const stripped = existing
+    .replace(/\[mcp_servers\.memwarden\][\s\S]*?(?=\n\[|$)/, "")
+    .replace(/\s*$/, "");
+  return stripped ? stripped + "\n" : "";
+}
+
 // --- the registry --------------------------------------------------
 
 export const TOOLS: ToolAdapter[] = [
@@ -144,6 +192,7 @@ export const TOOLS: ToolAdapter[] = [
     detect: (home) =>
       existsSync(join(home, ".claude.json")) || existsSync(join(home, ".claude")),
     merge: mergeMcpServers,
+    unmerge: unmergeMcpServers,
     auto: "hooks", // also gets SessionStart/PostToolUse hooks (true auto)
   },
   {
@@ -152,6 +201,7 @@ export const TOOLS: ToolAdapter[] = [
     configPath: (home) => join(home, ".codex", "config.toml"),
     detect: (home) => existsSync(join(home, ".codex")),
     merge: mergeCodexToml,
+    unmerge: unmergeCodexToml,
     auto: "agents-md",
   },
   {
@@ -160,6 +210,7 @@ export const TOOLS: ToolAdapter[] = [
     configPath: (home) => join(home, ".cursor", "mcp.json"),
     detect: (home) => existsSync(join(home, ".cursor")),
     merge: mergeMcpServers,
+    unmerge: unmergeMcpServers,
     auto: "agents-md",
   },
   {
@@ -168,6 +219,7 @@ export const TOOLS: ToolAdapter[] = [
     configPath: (home) => join(home, ".kiro", "settings", "mcp.json"),
     detect: (home) => existsSync(join(home, ".kiro")),
     merge: mergeMcpServers,
+    unmerge: unmergeMcpServers,
     auto: "agents-md",
   },
   {
@@ -176,6 +228,7 @@ export const TOOLS: ToolAdapter[] = [
     configPath: (home) => join(home, ".gemini", "config", "mcp_config.json"),
     detect: (home) => existsSync(join(home, ".gemini")),
     merge: mergeMcpServers,
+    unmerge: unmergeMcpServers,
     auto: "agents-md",
   },
   {
@@ -186,6 +239,7 @@ export const TOOLS: ToolAdapter[] = [
       existsSync(join(home, ".config", "opencode")) ||
       existsSync(join(home, ".opencode")),
     merge: mergeOpencode,
+    unmerge: unmergeOpencode,
     auto: "agents-md",
   },
   {
@@ -194,6 +248,7 @@ export const TOOLS: ToolAdapter[] = [
     configPath: (home) => join(home, ".openclaw", "openclaw.json"),
     detect: (home) => existsSync(join(home, ".openclaw")),
     merge: mergeOpenclaw,
+    unmerge: unmergeOpenclaw,
     auto: "agents-md",
   },
 ];
@@ -302,4 +357,110 @@ export function writeTool(
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, next, "utf8");
   return { id: adapter.id, label: adapter.label, path, status: "wired" };
+}
+
+export interface UnwireResult {
+  id: string;
+  label: string;
+  path: string;
+  status: "removed" | "skipped";
+  reason?: string;
+}
+
+/**
+ * Remove the memwarden MCP server from one tool's config. Same safety rule
+ * as writeTool: an unparseable config is left untouched and reported, never
+ * clobbered.
+ */
+export function unwireTool(adapter: ToolAdapter, home: string): UnwireResult {
+  const path = adapter.configPath(home);
+  const base = { id: adapter.id, label: adapter.label, path };
+  if (!existsSync(path)) {
+    return { ...base, status: "skipped", reason: "no config file" };
+  }
+  let existing: string;
+  try {
+    existing = readFileSync(path, "utf8");
+  } catch (err) {
+    return {
+      ...base,
+      status: "skipped",
+      reason: `could not read (${err instanceof Error ? err.message : err})`,
+    };
+  }
+  let next: string | null;
+  try {
+    next = adapter.unmerge(existing);
+  } catch {
+    return {
+      ...base,
+      status: "skipped",
+      reason: "existing config is not valid JSON — left untouched",
+    };
+  }
+  if (next === null) {
+    return { ...base, status: "skipped", reason: "not wired" };
+  }
+  writeFileSync(path, next, "utf8");
+  return { ...base, status: "removed" };
+}
+
+/**
+ * Is memwarden present in this tool's config right now? "unknown" means the
+ * config exists but cannot be parsed.
+ */
+export function toolWireState(
+  adapter: ToolAdapter,
+  home: string,
+): "wired" | "not wired" | "unknown" {
+  const path = adapter.configPath(home);
+  if (!existsSync(path)) return "not wired";
+  try {
+    return adapter.unmerge(readFileSync(path, "utf8")) === null
+      ? "not wired"
+      : "wired";
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
+ * Strip the memwarden block from an AGENTS.md body. Returns the remaining
+ * text, "" when nothing meaningful remains (the file was effectively ours —
+ * caller may delete it), or null when there is no memwarden block.
+ */
+export function stripAgentsMd(existing: string): string | null {
+  const start = existing.indexOf(AGENTS_START);
+  const end = existing.indexOf(AGENTS_END);
+  if (start === -1 || end === -1 || end < start) return null;
+  const rest = (
+    existing.slice(0, start) + existing.slice(end + AGENTS_END.length)
+  )
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (rest === "" || rest === "# AGENTS.md") return "";
+  return rest + "\n";
+}
+
+/** Remove the memwarden block from <dir>/AGENTS.md (delete if it was ours). */
+export function removeAgentsMd(dir: string): {
+  path: string;
+  action: "deleted" | "cleaned" | "none";
+} {
+  const path = join(dir, "AGENTS.md");
+  if (!existsSync(path)) return { path, action: "none" };
+  let existing: string;
+  try {
+    existing = readFileSync(path, "utf8");
+  } catch {
+    return { path, action: "none" };
+  }
+  const rest = stripAgentsMd(existing);
+  if (rest === null) return { path, action: "none" };
+  if (rest === "") {
+    rmSync(path, { force: true });
+    return { path, action: "deleted" };
+  }
+  writeFileSync(path, rest, "utf8");
+  return { path, action: "cleaned" };
 }

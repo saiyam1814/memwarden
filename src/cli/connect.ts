@@ -127,6 +127,45 @@ export function writeClaudeHooks(
   return { path: settingsPath, created };
 }
 
+/**
+ * Remove memwarden's hook groups from a Claude settings file (marker-matched,
+ * so a user's own hook that merely mentions memwarden survives). Unparseable
+ * files are left untouched.
+ */
+export function removeClaudeHooks(settingsPath: string): {
+  path: string;
+  changed: boolean;
+} {
+  if (!existsSync(settingsPath)) return { path: settingsPath, changed: false };
+  let existing: ClaudeSettings;
+  try {
+    existing = JSON.parse(readFileSync(settingsPath, "utf8")) as ClaudeSettings;
+  } catch {
+    return { path: settingsPath, changed: false };
+  }
+  if (!existing || typeof existing !== "object" || !existing.hooks) {
+    return { path: settingsPath, changed: false };
+  }
+  const hooks: Record<string, HookGroup[]> = { ...existing.hooks };
+  let changed = false;
+  for (const event of Object.keys(hooks)) {
+    const groups = hooks[event] ?? [];
+    const kept = groups.filter((g) => !isMemwardenHookGroup(g));
+    if (kept.length !== groups.length) {
+      changed = true;
+      if (kept.length > 0) hooks[event] = kept;
+      else delete hooks[event];
+    }
+  }
+  if (!changed) return { path: settingsPath, changed: false };
+  writeFileSync(
+    settingsPath,
+    JSON.stringify({ ...existing, hooks }, null, 2) + "\n",
+    "utf8",
+  );
+  return { path: settingsPath, changed: true };
+}
+
 type McpConfig = { mcpServers?: Record<string, unknown> };
 
 /**

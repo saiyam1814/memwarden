@@ -18,8 +18,12 @@ import {
   TOOLS,
   toolById,
   writeTool,
+  unwireTool,
+  toolWireState,
   writeAgentsMd,
+  removeAgentsMd,
   mergeAgentsMd,
+  stripAgentsMd,
   type LaunchInfo,
 } from "../src/cli/tools.js";
 
@@ -162,5 +166,84 @@ describe("AGENTS.md auto-recall block", () => {
     expect(r.created).toBe(true);
     expect(r.path).toBe(join(dir, "AGENTS.md"));
     expect(readFileSync(r.path, "utf8")).toContain("memwarden:start");
+  });
+});
+
+describe("unwire (memwarden down --all)", () => {
+  it("unmerge removes exactly our entry and keeps other servers, per schema", () => {
+    for (const id of ["cursor", "kiro", "antigravity", "claude-code"]) {
+      const withBoth = toolById(id)!.merge(
+        JSON.stringify({ mcpServers: { github: { command: "gh" } } }),
+        launch,
+      );
+      const out = toolById(id)!.unmerge(withBoth)!;
+      const o = JSON.parse(out);
+      expect(o.mcpServers.memwarden).toBeUndefined();
+      expect(o.mcpServers.github.command).toBe("gh");
+      // nothing of ours -> null (honest "not wired")
+      expect(toolById(id)!.unmerge(out)).toBeNull();
+    }
+  });
+
+  it("unmerge strips only Codex's memwarden TOML table", () => {
+    const existing = '[model]\nname = "gpt-5"\n';
+    const withOurs = toolById("codex")!.merge(existing, launch);
+    const out = toolById("codex")!.unmerge(withOurs)!;
+    expect(out).toContain("[model]");
+    expect(out).not.toContain("memwarden");
+    expect(toolById("codex")!.unmerge(out)).toBeNull();
+  });
+
+  it("unmerge handles opencode and openclaw nesting", () => {
+    const oc = toolById("opencode")!;
+    const out = JSON.parse(oc.unmerge(oc.merge(null, launch))!);
+    expect(out.mcp.memwarden).toBeUndefined();
+    const ow = toolById("openclaw")!;
+    const out2 = JSON.parse(ow.unmerge(ow.merge(null, launch))!);
+    expect(out2.mcp.servers.memwarden).toBeUndefined();
+  });
+
+  it("unwireTool round-trips writeTool and toolWireState tracks it", () => {
+    const home = tmp();
+    const t = toolById("cursor")!;
+    expect(toolWireState(t, home)).toBe("not wired");
+    writeTool(t, home, launch);
+    expect(toolWireState(t, home)).toBe("wired");
+    const u = unwireTool(t, home);
+    expect(u.status).toBe("removed");
+    expect(toolWireState(t, home)).toBe("not wired");
+    // second run reports honestly instead of pretending
+    expect(unwireTool(t, home).reason).toBe("not wired");
+  });
+
+  it("unwireTool never clobbers an unparseable config", () => {
+    const home = tmp();
+    const t = toolById("cursor")!;
+    const p = t.configPath(home);
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, "{ this is not json ");
+    const u = unwireTool(t, home);
+    expect(u.status).toBe("skipped");
+    expect(readFileSync(p, "utf8")).toBe("{ this is not json ");
+  });
+
+  it("stripAgentsMd removes our block, keeps user content, deletes when file was ours", () => {
+    // user content survives
+    const mixed = mergeAgentsMd("# My Project\n\nHouse rules.\n");
+    const rest = stripAgentsMd(mixed)!;
+    expect(rest).toContain("House rules.");
+    expect(rest).not.toContain("memwarden");
+    // a file we created from scratch reduces to "" (delete signal)
+    expect(stripAgentsMd(mergeAgentsMd(null))).toBe("");
+    // no block -> null
+    expect(stripAgentsMd("# Plain\n")).toBeNull();
+  });
+
+  it("removeAgentsMd deletes the file when it was entirely ours", () => {
+    const dir = tmp();
+    writeAgentsMd(dir);
+    const r = removeAgentsMd(dir);
+    expect(r.action).toBe("deleted");
+    expect(removeAgentsMd(dir).action).toBe("none");
   });
 });
