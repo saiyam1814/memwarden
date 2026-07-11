@@ -1,0 +1,43 @@
+{
+  "name": "@memwarden/turbovec",
+  "version": "0.1.0",
+  "description": "Node bindings for the turbovec crate (IdMapIndex): optional native vector backend for memwarden. memwarden itself has zero native dependencies; it dynamic-imports this package and falls back to its TypeScript index when absent.",
+  "license": "MIT",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "napi": {
+    "name": "memwarden-turbovec",
+    "triples": {
+      "defaults": false,
+      "additional": [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu"
+      ]
+    }
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "*.node",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "napi build --release --platform",
+    "build:debug": "napi build --platform",
+    "artifacts": "napi artifacts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/saiyam1814/memwarden.git",
+    "directory": "native/turbovec-node"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.4"
+  }
+}

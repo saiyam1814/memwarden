@@ -1,0 +1,28 @@
+# napi-rs binding around the turbovec crate's IdMapIndex. Built as a Node
+# addon (cdylib); see README.md for the build command. This crate is a thin
+# FFI shim: all vector math lives in turbovec, all id-string mapping lives in
+# memwarden's TypeScript loader (src/functions/turbovec-backend.ts).
+
+[package]
+name = "memwarden-turbovec"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Node bindings for turbovec::IdMapIndex (memwarden's optional native vector backend)"
+repository = "https://github.com/saiyam1814/memwarden"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# napi6 is required for BigInt <-> u64 argument conversion (external ids).
+napi = { version = "2", default-features = false, features = ["napi6"] }
+napi-derive = "2"
+turbovec = "0.9"
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+lto = true
+strip = "symbols"

@@ -1,0 +1,5 @@
+# Build artifacts. The .node binary is platform-specific and rebuilt from
+# source (npm run build); prebuilds ship via CI, never via git.
+target/
+node_modules/
+*.node
