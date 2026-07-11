@@ -25,6 +25,36 @@ export interface HookDeps {
   secret?: string;
   fetchFn?: typeof fetch;
   now?: () => string;
+  /** Per-call deadlines (ms); tests and callers may override. */
+  timeouts?: Partial<HookTimeouts>;
+}
+
+interface HookTimeouts {
+  inject: number;
+  capture: number;
+  dejafix: number;
+}
+
+// Hooks run inside the agent's turn: a slow daemon must degrade to "no
+// injection", never to a stalled agent. SessionStart gets the most headroom
+// (once per session, and the daemon may still be warming its embedding
+// model); Déjà Fix gets the least (it fires on every error-looking tool
+// output).
+const DEFAULT_TIMEOUTS: HookTimeouts = {
+  inject: 2000,
+  capture: 1500,
+  dejafix: 800,
+};
+
+function timeoutMs(kind: keyof HookTimeouts, deps: HookDeps): number {
+  const fromDeps = deps.timeouts?.[kind];
+  if (fromDeps !== undefined && fromDeps > 0) return fromDeps;
+  const raw = process.env["MEMWARDEN_HOOK_TIMEOUT_MS"];
+  if (raw) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return DEFAULT_TIMEOUTS[kind];
 }
 
 interface HookEvent {
@@ -69,6 +99,7 @@ export async function handleSessionStart(
     const res = await doFetch(`${deps.baseUrl}/memwarden/search`, {
       method: "POST",
       headers: headers(deps),
+      signal: AbortSignal.timeout(timeoutMs("inject", deps)),
       body: JSON.stringify({
         query: "recent work and decisions in this project",
         cwd,
@@ -124,6 +155,7 @@ export async function handleCapture(
     await doFetch(`${deps.baseUrl}/memwarden/observe`, {
       method: "POST",
       headers: headers(deps),
+      signal: AbortSignal.timeout(timeoutMs("capture", deps)),
       body: JSON.stringify({
         hookType: "post_tool_use",
         sessionId: evt.session_id ?? "hook",
@@ -176,6 +208,7 @@ async function dejaFixInjection(
     const res = await doFetch(`${deps.baseUrl}/memwarden/dejafix/lookup`, {
       method: "POST",
       headers: headers(deps),
+      signal: AbortSignal.timeout(timeoutMs("dejafix", deps)),
       body: JSON.stringify({ error_text: text, cwd }),
     });
     if (!res.ok) return "";

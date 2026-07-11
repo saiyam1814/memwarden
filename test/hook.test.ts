@@ -50,9 +50,56 @@ describe("handleSessionStart", () => {
     }) as unknown as typeof fetch;
     expect(await handleSessionStart("{}", { baseUrl: "http://d", fetchFn })).toBe("");
   });
+
+  it("passes an abort signal and degrades to no-op when the daemon stalls", async () => {
+    // A daemon that accepts the connection but never answers must not stall
+    // the agent's turn: the hook aborts at its deadline and injects nothing.
+    const fetchFn = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(init.signal?.reason ?? new Error("aborted")),
+          );
+        }),
+    ) as unknown as typeof fetch;
+
+    const t0 = Date.now();
+    const out = await handleSessionStart("{}", {
+      baseUrl: "http://d",
+      fetchFn,
+      timeouts: { inject: 50 },
+    });
+    expect(out).toBe("");
+    expect(Date.now() - t0).toBeLessThan(1500);
+    const init = (fetchFn as unknown as { mock: { calls: unknown[][] } }).mock
+      .calls[0]![1] as RequestInit;
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
 });
 
 describe("handleCapture", () => {
+  it("degrades to no-op when the daemon stalls (capture and Déjà Fix both deadline)", async () => {
+    const fetchFn = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(init.signal?.reason ?? new Error("aborted")),
+          );
+        }),
+    ) as unknown as typeof fetch;
+
+    const out = await handleCapture(
+      JSON.stringify({
+        session_id: "s9",
+        cwd: "/work/stall",
+        tool_name: "Bash",
+        tool_response: "error: something failed", // triggers the Déjà Fix lookup too
+      }),
+      { baseUrl: "http://d", fetchFn, timeouts: { capture: 50, dejafix: 50 } },
+    );
+    expect(out).toBe("");
+  });
+
   it("forwards a well-formed observe payload and injects nothing", async () => {
     const fetchFn = vi.fn(async () => jsonResponse({ observationId: "obs_x" })) as unknown as typeof fetch;
     const out = await handleCapture(
