@@ -23,7 +23,7 @@
 // as withKeyedLock).
 
 import { createClient, type Client, type InStatement } from "@libsql/client";
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import {
   applyUpdateOps,
@@ -73,6 +73,8 @@ export class StoreLibsql implements StateStore {
   private writeChain: Promise<unknown> = Promise.resolve();
   private ready: Promise<void> | null = null;
   private closed = false;
+  /** Local db path (file: URL) so init() can tighten its mode post-create. */
+  private readonly dbPath: string | null = null;
 
   constructor(options: StoreLibsqlOptions) {
     // For a local `file:` URL, ensure the parent directory exists first.
@@ -81,11 +83,19 @@ export class StoreLibsql implements StateStore {
     // on boot. Create it here so every caller (daemon, tests, tools) is safe.
     const fileMatch = /^file:(.+)$/.exec(options.url);
     if (fileMatch) {
-      const dir = dirname(fileMatch[1] as string);
+      this.dbPath = fileMatch[1] as string;
+      const dir = dirname(this.dbPath);
       try {
         mkdirSync(dir, { recursive: true });
       } catch {
         // best-effort; createClient below surfaces a real open error
+      }
+      // The brain is private data: owner-only directory (default is 0755).
+      // Best-effort — some filesystems reject chmod; the data still writes.
+      try {
+        chmodSync(dir, 0o700);
+      } catch {
+        // best-effort
       }
     }
     this.client = createClient(
@@ -101,6 +111,15 @@ export class StoreLibsql implements StateStore {
       this.ready = (async () => {
         for (const stmt of SCHEMA) {
           await this.client.execute(stmt);
+        }
+        // The db file exists after the first execute; tighten it from the
+        // default 0644 (memories are private data). Best-effort.
+        if (this.dbPath) {
+          try {
+            chmodSync(this.dbPath, 0o600);
+          } catch {
+            // best-effort
+          }
         }
       })();
     }

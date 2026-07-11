@@ -7,7 +7,7 @@
 //
 // The merge logic is pure and testable; the filesystem wrapper is thin.
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { chmodSync, readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 
 export interface ConnectOptions {
@@ -218,6 +218,12 @@ export function writeMcpConfig(
   const merged = mergeMcpConfig(existing, buildMcpServerEntry(opts));
   mkdirSync(dirname(configPath), { recursive: true });
   writeFileSync(configPath, JSON.stringify(merged, null, 2) + "\n", "utf8");
+  // The server entry's env carries the daemon bearer secret — owner-only.
+  try {
+    chmodSync(configPath, 0o600);
+  } catch {
+    // best-effort; some filesystems reject chmod
+  }
   return { path: configPath, config: merged, created };
 }
 

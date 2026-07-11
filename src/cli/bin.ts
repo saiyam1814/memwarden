@@ -120,6 +120,8 @@ function readPersistedSecret(dataDir: string): string | undefined {
 function persistSecret(dataDir: string, secret: string): void {
   try {
     mkdirSync(dataDir, { recursive: true });
+    // The brain dir holds memories, the secret, and the oplog — owner-only.
+    chmodSync(dataDir, 0o700);
   } catch {
     // best-effort; the write below surfaces a real error
   }

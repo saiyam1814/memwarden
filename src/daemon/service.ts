@@ -49,6 +49,36 @@ function xmlEscape(s: string): string {
     .replace(/'/g, "&apos;");
 }
 
+// Tuning env vars the managed daemon must inherit from the `up` invocation —
+// without this, `MEMWARDEN_VECTOR_BACKEND=turbovec memwarden up` installs a
+// service that silently runs the default backend. Values are restricted to a
+// safe charset since they land inside a plist/systemd unit.
+const TUNING_ENV_KEYS = [
+  "MEMWARDEN_VECTOR_BACKEND",
+  "MEMWARDEN_EMBED_DTYPE",
+  "MEMWARDEN_EMBEDDING_PROVIDER",
+  "MEMWARDEN_QUANT_VECTOR",
+  "MEMWARDEN_QUANT_BITS",
+  "MEMWARDEN_QUANT_RESCORE",
+  "MEMWARDEN_QUANT_SEED",
+  "MEMWARDEN_PROXY_PORT",
+  "MEMWARDEN_REST_PORT",
+] as const;
+
+/** Test-only export: the tuning-env passthrough with its charset guard. */
+export function __tuningEnvForTests(): Array<[string, string]> {
+  return tuningEnv();
+}
+
+function tuningEnv(): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  for (const key of TUNING_ENV_KEYS) {
+    const v = process.env[key];
+    if (v && /^[A-Za-z0-9._:/-]+$/.test(v)) out.push([key, v]);
+  }
+  return out;
+}
+
 function macPlist(node: string, dataDir: string, secret?: string): string {
   const log = join(dataDir, "daemon.log");
   // The managed daemon resolves its auth secret from MEMWARDEN_SECRET, so it
@@ -69,7 +99,9 @@ function macPlist(node: string, dataDir: string, secret?: string): string {
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>MEMWARDEN_DATA_DIR</key><string>${dataDir}</string>${secretEntry}
+    <key>MEMWARDEN_DATA_DIR</key><string>${dataDir}</string>${secretEntry}${tuningEnv()
+      .map(([k, v]) => `\n    <key>${k}</key><string>${xmlEscape(v)}</string>`)
+      .join("")}
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key>
@@ -87,13 +119,16 @@ function systemdUnit(node: string, dataDir: string, secret?: string): string {
   const secretEnv = secret
     ? `\nEnvironment=MEMWARDEN_SECRET=${secret}`
     : "";
+  const tuning = tuningEnv()
+    .map(([k, v]) => `\nEnvironment=${k}=${v}`)
+    .join("");
   return `[Unit]
 Description=memwarden memory daemon
 After=network.target
 
 [Service]
 ExecStart=${node} ${DAEMON_ENTRY}
-Environment=MEMWARDEN_DATA_DIR=${dataDir}${secretEnv}
+Environment=MEMWARDEN_DATA_DIR=${dataDir}${secretEnv}${tuning}
 Restart=on-failure
 RestartSec=2
 

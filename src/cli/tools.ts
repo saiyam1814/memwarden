@@ -14,7 +14,14 @@
 //   opencode     ~/.config/opencode/opencode.json     (mcp -> {type,command[],environment})
 //   openclaw     ~/.openclaw/openclaw.json            (mcp.servers)
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 
 /** How the memwarden MCP server is launched (stdio). */
@@ -387,6 +394,13 @@ export function writeTool(
   }
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, next, "utf8");
+  // The launch env we merged in carries the daemon bearer secret — keep the
+  // config owner-only (default 0644 would expose it to other local users).
+  try {
+    chmodSync(path, 0o600);
+  } catch {
+    // best-effort; some filesystems reject chmod
+  }
   return { id: adapter.id, label: adapter.label, path, status: "wired" };
 }
 
