@@ -2,27 +2,86 @@
 // Extract provenance from an observe payload — the evidence trail that
 // lets the doctor judge a memory's trustworthiness later. Pure, no I/O.
 
+import { isAbsolute, relative, sep } from "node:path";
 import type { Provenance } from "./types.js";
 
-const FILE_KEYS = ["file_path", "filePath", "file", "path", "notebook_path"];
+// Keys whose string values are treated as file references wherever they
+// appear in tool_input (hosts nest them: Kiro fsReplace uses
+// tool_input.operations[].path, patch tools wrap changes[].file_path, …).
+const FILE_KEYS = [
+  "file_path",
+  "filePath",
+  "file",
+  "path",
+  "notebook_path",
+  "notebookPath",
+];
 // Looks like a path: has a slash or a dotted extension.
 const PATH_RE = /(^|\/)[\w.\-/]+\.\w{1,8}$|\//;
+// Bounded, best-effort extraction: hosts can nest arbitrarily deep and wide;
+// provenance only needs the referenced files, not a full input walk.
+const MAX_FILE_DEPTH = 4;
+const MAX_FILES = 20;
 
 function collectFiles(toolInput: unknown): string[] {
-  if (!toolInput || typeof toolInput !== "object") return [];
-  const obj = toolInput as Record<string, unknown>;
   const files = new Set<string>();
-  for (const k of FILE_KEYS) {
-    const v = obj[k];
-    if (typeof v === "string" && v.trim()) files.add(v.trim());
-  }
-  // Also catch path-shaped string values in any field (e.g. globs, targets).
-  for (const v of Object.values(obj)) {
-    if (typeof v === "string" && v.length < 400 && PATH_RE.test(v) && !v.includes(" ")) {
-      files.add(v.trim());
+  const visit = (node: unknown, depth: number): void => {
+    if (files.size >= MAX_FILES || depth > MAX_FILE_DEPTH) return;
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        if (files.size >= MAX_FILES) return;
+        visit(item, depth + 1);
+      }
+      return;
     }
-  }
+    const obj = node as Record<string, unknown>;
+    for (const k of FILE_KEYS) {
+      const v = obj[k];
+      if (typeof v === "string" && v.trim() && files.size < MAX_FILES) {
+        files.add(v.trim());
+      }
+    }
+    for (const [k, v] of Object.entries(obj)) {
+      if (typeof v === "string") {
+        // Also catch path-shaped string values in any TOP-LEVEL field (e.g.
+        // globs, targets) — the pre-recursion behavior, kept verbatim so
+        // shallow hosts extract exactly what they always did. Nested levels
+        // only trust the explicit FILE_KEYS above, so arbitrary nested prose
+        // containing a "/" is not misread as a file reference.
+        if (
+          depth === 0 &&
+          !FILE_KEYS.includes(k) &&
+          v.length < 400 &&
+          PATH_RE.test(v) &&
+          !v.includes(" ") &&
+          files.size < MAX_FILES
+        ) {
+          files.add(v.trim());
+        }
+      } else {
+        visit(v, depth + 1);
+      }
+    }
+  };
+  visit(toolInput, 0);
   return Array.from(files);
+}
+
+/**
+ * Give a captured file its portable identity: a file UNDER the capture cwd is
+ * stored repo-relative, so Verified Recall from another checkout of the same
+ * project (worktree, moved clone) re-roots it correctly. Files outside the
+ * cwd keep their absolute path — re-rooting those would point a cross-project
+ * memory at the wrong repo. Pure string logic, no fs.
+ */
+export function relativizeUnder(cwd: string | undefined, file: string): string {
+  if (!cwd || !isAbsolute(cwd) || !isAbsolute(file)) return file;
+  const rel = relative(cwd, file);
+  if (!rel || rel === "." || rel.startsWith(`..${sep}`) || rel === ".." || isAbsolute(rel)) {
+    return file;
+  }
+  return rel;
 }
 
 export function extractProvenance(payload: {
@@ -34,7 +93,9 @@ export function extractProvenance(payload: {
   const data = (payload.data ?? {}) as Record<string, unknown>;
   const toolName = typeof data["tool_name"] === "string" ? data["tool_name"] : undefined;
   const toolInput = data["tool_input"];
-  const files = collectFiles(toolInput);
+  const files = Array.from(
+    new Set(collectFiles(toolInput).map((f) => relativizeUnder(payload.cwd, f))),
+  );
 
   let command = toolName;
   // For shell tools, capture the actual command for a sharper source.

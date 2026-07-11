@@ -17,7 +17,7 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { Provenance } from "./types.js";
 import { isUnsourced } from "./provenance.js";
 
@@ -100,12 +100,26 @@ export function classifyProvenance(
     !opts?.verifyAgainstRoot && prov?.cwd && isAbsolute(prov.cwd)
       ? prov.cwd
       : root;
+  const captureCwd = prov?.cwd && isAbsolute(prov.cwd) ? prov.cwd : undefined;
   const deleted: string[] = [];
   const changed: string[] = [];
   let hashMatched = 0; // existing files whose captured hash still matches
   let unchecked = 0; // existing files we could not content-check
   for (const f of files) {
-    const abs = resolveUnder(base, f);
+    let abs = resolveUnder(base, f);
+    // ABSOLUTE files recorded inside the capture checkout must follow the
+    // same re-rooting as relative ones when the caller proved same-project
+    // identity — otherwise recall from worktree B silently verifies against
+    // worktree A's (possibly diverged, possibly deleted) copy and reports a
+    // false "verified". Absolute files OUTSIDE the capture cwd keep their
+    // own identity: re-rooting those would point a cross-project reference
+    // at the wrong repo.
+    if (opts?.verifyAgainstRoot && captureCwd && isAbsolute(f)) {
+      const rel = relative(captureCwd, f);
+      if (rel && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) {
+        abs = resolve(root, rel);
+      }
+    }
     if (!existsSync(abs)) {
       deleted.push(f);
       continue;

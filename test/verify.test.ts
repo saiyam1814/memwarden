@@ -82,6 +82,64 @@ describe("classifyProvenance", () => {
     expect(classifyProvenance(prov, b).status).toBe("verified");
   });
 
+  it("verifyAgainstRoot re-roots ABSOLUTE files captured under the capture cwd (worktree false-verified)", () => {
+    // F1 repro: capture in worktree A recorded an ABSOLUTE path into A. When
+    // recall proves same-project identity and asks to verify against worktree
+    // B, the absolute path must be re-rooted onto B — otherwise B's diverged
+    // copy still reports "verified" because the check silently reads A.
+    const a = repo();
+    const b = repo();
+    writeFileSync(join(a, "auth.ts"), "const ttl = 900;\n");
+    const absFile = join(a, "auth.ts");
+    const prov: Provenance = {
+      cwd: a,
+      files: [absFile],
+      fileHashes: hashFiles([absFile], a),
+    };
+
+    // B lacks the file -> stale FOR B (was: false "verified" against A).
+    expect(
+      classifyProvenance(prov, b, { verifyAgainstRoot: true }).status,
+    ).toBe("stale");
+
+    // B has identical content -> verified for B.
+    writeFileSync(join(b, "auth.ts"), "const ttl = 900;\n");
+    expect(
+      classifyProvenance(prov, b, { verifyAgainstRoot: true }).status,
+    ).toBe("verified");
+
+    // B diverged -> stale for B even though A still matches (the F1 bug).
+    writeFileSync(join(b, "auth.ts"), "const ttl = 60;\n");
+    expect(
+      classifyProvenance(prov, b, { verifyAgainstRoot: true }).status,
+    ).toBe("stale");
+
+    // Without proven identity: still verified against the capture checkout.
+    expect(classifyProvenance(prov, b).status).toBe("verified");
+  });
+
+  it("verifyAgainstRoot leaves absolute files OUTSIDE the capture cwd alone (cross-project protection)", () => {
+    const a = repo();
+    const b = repo();
+    const elsewhere = repo();
+    writeFileSync(join(elsewhere, "lib.ts"), "shared\n");
+    const absFile = join(elsewhere, "lib.ts");
+    const prov: Provenance = {
+      cwd: a,
+      files: [absFile],
+      fileHashes: hashFiles([absFile], a),
+    };
+    // The file is not under the capture cwd, so re-rooting must NOT apply:
+    // it verifies where it actually lives, regardless of the caller's root.
+    expect(
+      classifyProvenance(prov, b, { verifyAgainstRoot: true }).status,
+    ).toBe("verified");
+    writeFileSync(join(elsewhere, "lib.ts"), "changed\n");
+    expect(
+      classifyProvenance(prov, b, { verifyAgainstRoot: true }).status,
+    ).toBe("stale");
+  });
+
   it("unsourced when there is no evidence", () => {
     expect(classifyProvenance(undefined, "/r").status).toBe("unsourced");
     expect(classifyProvenance({ userConfirmed: false }, "/r").status).toBe("unsourced");
