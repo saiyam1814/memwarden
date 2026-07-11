@@ -2,8 +2,9 @@
 // Native lifecycle-hook adapters — the per-host knowledge that makes memory
 // capture + injection mechanical (no instruction-file dependence). Each
 // adapter knows one host's hook config file and schema and merges memwarden's
-// two hooks (session-start inject, capture) into it without disturbing the
-// user's own hooks. Formats verified against each host's docs (July 2026):
+// hooks (session-start inject, capture, prompt, session-end handoff) into it
+// without disturbing the user's own hooks. Formats verified against each
+// host's docs (July 2026):
 //
 //   claude-code  ~/.claude/settings.json          hooks: {Event:[{matcher?,hooks:[{type,command}]}]}
 //   codex        ~/.codex/hooks.json              same Claude-style schema; SessionStart/PostToolUse
@@ -33,13 +34,20 @@ import { writeClaudeHooks, removeClaudeHooks } from "./connect.js";
 // A command is ours iff it runs the memwarden hook subcommands we have ever
 // written. Precise on purpose: NOT a loose `includes("memwarden")` that would
 // also match (and then delete) a user's own wrapper script.
-export const MEMWARDEN_CMD_RE = /\bhook (?:session-start|capture)\b/;
+export const MEMWARDEN_CMD_RE =
+  /\bhook (?:session-start|session-end|capture|prompt)\b/;
 
 function sessionStartCmd(hookBase: string, host: HookHost): string {
   return `${hookBase} hook session-start --host ${host}`;
 }
 function captureCmd(hookBase: string, host: HookHost): string {
   return `${hookBase} hook capture --host ${host}`;
+}
+function promptCmd(hookBase: string, host: HookHost): string {
+  return `${hookBase} hook prompt --host ${host}`;
+}
+function sessionEndCmd(hookBase: string, host: HookHost): string {
+  return `${hookBase} hook session-end --host ${host}`;
 }
 
 type Json = Record<string, unknown>;
@@ -149,12 +157,17 @@ function removeFlatHooks(hooks: Json): { hooks: Json; changed: boolean } {
 
 // --- per-host pure merges/removes ------------------------------------
 
-/** Codex: ~/.codex/hooks.json, Claude-style. No SessionEnd — capture rides
- * PostToolUse. Hooks must be trust-pinned via /hooks inside Codex. */
+/** Codex: ~/.codex/hooks.json, Claude-style. Codex has UserPromptSubmit and
+ * Stop but no SessionEnd (July 2026), so the handoff rides Stop — it fires
+ * at the end of every agent turn, and the daemon's dedup window collapses
+ * per-turn repeats while a later Stop refreshes the handoff with the newest
+ * state. Hooks must be trust-pinned via /hooks inside Codex. */
 export function mergeCodexHooks(existing: string | null, hookBase: string): string {
   return mergeClaudeStyleHooks(existing, {
     SessionStart: [claudeStyleGroup(sessionStartCmd(hookBase, "codex"))],
     PostToolUse: [claudeStyleGroup(captureCmd(hookBase, "codex"))],
+    UserPromptSubmit: [claudeStyleGroup(promptCmd(hookBase, "codex"))],
+    Stop: [claudeStyleGroup(sessionEndCmd(hookBase, "codex"))],
   });
 }
 export function removeCodexHooks(existing: string): string | null {
@@ -162,11 +175,15 @@ export function removeCodexHooks(existing: string): string | null {
 }
 
 /** Gemini CLI: hooks key in ~/.gemini/settings.json, PascalCase events.
- * Matcher "" is the documented match-everything form. */
+ * Matcher "" is the documented match-everything form. BeforeAgent fires
+ * after a user submits a prompt (payload carries `prompt`); SessionEnd on
+ * exit/clear — both verified against the July 2026 hook reference. */
 export function mergeGeminiHooks(existing: string | null, hookBase: string): string {
   return mergeClaudeStyleHooks(existing, {
     SessionStart: [claudeStyleGroup(sessionStartCmd(hookBase, "gemini"), "")],
     AfterTool: [claudeStyleGroup(captureCmd(hookBase, "gemini"), "")],
+    BeforeAgent: [claudeStyleGroup(promptCmd(hookBase, "gemini"), "")],
+    SessionEnd: [claudeStyleGroup(sessionEndCmd(hookBase, "gemini"), "")],
   });
 }
 export function removeGeminiHooks(existing: string): string | null {
@@ -182,6 +199,12 @@ export function mergeCursorHooks(existing: string | null, hookBase: string): str
   base["hooks"] = mergeFlatHooks(asObject(base["hooks"]), {
     sessionStart: [{ command: sessionStartCmd(hookBase, "cursor") }],
     postToolUse: [{ command: captureCmd(hookBase, "cursor") }],
+    // beforeSubmitPrompt gates submission on the hook's reply — our handler
+    // always answers {"continue": true} (capture is observe-only, never a
+    // block). sessionEnd is fire-and-forget (no cwd; workspace_roots[0] is
+    // the fallback). Both verified against the July 2026 Cursor hook docs.
+    beforeSubmitPrompt: [{ command: promptCmd(hookBase, "cursor") }],
+    sessionEnd: [{ command: sessionEndCmd(hookBase, "cursor") }],
   });
   return serialize(base);
 }
@@ -200,6 +223,12 @@ export function mergeKiroAgentHooks(existing: string, hookBase: string): string 
   base["hooks"] = mergeFlatHooks(asObject(base["hooks"]), {
     agentSpawn: [{ command: sessionStartCmd(hookBase, "kiro") }],
     postToolUse: [{ matcher: "*", command: captureCmd(hookBase, "kiro") }],
+    // Kiro has no sessionEnd; `stop` (end of each agent loop) is the closest
+    // handoff point — the daemon's dedup window collapses per-turn repeats.
+    // Event names + payload assumed Claude-style (no published field
+    // reference to verify against; see parseHostEvent).
+    userPromptSubmit: [{ command: promptCmd(hookBase, "kiro") }],
+    stop: [{ command: sessionEndCmd(hookBase, "kiro") }],
   });
   return serialize(base);
 }
@@ -225,8 +254,11 @@ export function opencodePluginSource(nodeBin: string, cliBin: string): string {
   return `${OPENCODE_PLUGIN_SENTINEL} — written by \`memwarden up\`, removed by \`memwarden down --all\`.
 // Bridges OpenCode's plugin hooks to the local memwarden daemon via the
 // memwarden CLI (which resolves the daemon URL and secret itself). Capture
-// rides tool.execute.after; injection rides the first chat message of a
-// session. Everything is best-effort: a downed daemon never breaks a turn.
+// rides tool.execute.after; user prompts ride chat.message (the message's
+// text parts); injection rides the first chat message of a session; the
+// session handoff rides the session.idle event (fires per idle — the
+// daemon's dedup window collapses repeats, a later idle refreshes the
+// handoff). Everything is best-effort: a downed daemon never breaks a turn.
 
 import { spawn } from "node:child_process";
 
@@ -286,19 +318,40 @@ export const MemwardenPlugin = async ({ directory }: { directory?: string }) => 
         });
       } catch {}
     },
-    // Inject: once per session, append this project's verified memory to the
-    // first message's parts. Defensive on shape — if OpenCode's payload
-    // differs, this silently does nothing rather than breaking chat.
+    // Prompts + inject. Capture: a user message's text parts are the prompt
+    // (skip synthetic parts we pushed ourselves). Inject: once per session,
+    // append this project's verified memory to the first message's parts.
+    // Defensive on shape — if OpenCode's payload differs, this silently
+    // does nothing rather than breaking chat.
     "chat.message": async (_input: any, output: any) => {
       try {
         const sessionId =
           output?.message?.sessionID ?? output?.message?.sessionId ?? "session";
+        const role = output?.message?.role;
+        if ((role === undefined || role === "user") && Array.isArray(output?.parts)) {
+          const prompt = output.parts
+            .filter((p: any) => p?.type === "text" && typeof p?.text === "string" && !p?.synthetic)
+            .map((p: any) => p.text)
+            .join("\\n")
+            .trim();
+          if (prompt) await runHook("prompt", { sessionId, cwd, prompt });
+        }
         if (injectedSessions.has(sessionId)) return;
         injectedSessions.add(sessionId);
         const ctx = await runHook("session-start", { sessionId, cwd });
         if (ctx && Array.isArray(output?.parts)) {
           output.parts.push({ type: "text", text: ctx, synthetic: true });
         }
+      } catch {}
+    },
+    // Handoff: session.idle is OpenCode's "the agent finished" signal (there
+    // is no session-end plugin event); the daemon builds the handoff summary.
+    event: async ({ event }: { event: any }) => {
+      try {
+        if (event?.type !== "session.idle") return;
+        const sessionId =
+          event?.properties?.sessionID ?? event?.properties?.sessionId ?? "session";
+        await runHook("session-end", { sessionId, cwd, reason: "idle" });
       } catch {}
     },
   };

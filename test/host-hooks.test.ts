@@ -47,6 +47,19 @@ describe("codex hooks (Claude-style schema in ~/.codex/hooks.json)", () => {
     expect(out.hooks.PostToolUse[0].hooks[0].type).toBe("command");
   });
 
+  it("writes the session journal events: UserPromptSubmit + Stop (no SessionEnd in Codex)", () => {
+    const out = JSON.parse(mergeCodexHooks(null, BASE));
+    expect(out.hooks.UserPromptSubmit[0].hooks[0].command).toContain("hook prompt --host codex");
+    expect(out.hooks.Stop[0].hooks[0].command).toContain("hook session-end --host codex");
+    expect(out.hooks.SessionEnd).toBeUndefined();
+  });
+
+  it("removal strips the journal events too", () => {
+    const removed = JSON.parse(removeCodexHooks(mergeCodexHooks(null, BASE))!);
+    expect(removed.hooks?.UserPromptSubmit).toBeUndefined();
+    expect(removed.hooks?.Stop).toBeUndefined();
+  });
+
   it("preserves user hooks and is idempotent", () => {
     const user = JSON.stringify({
       hooks: { PostToolUse: [{ matcher: "shell", hooks: [{ type: "command", command: "my-audit" }] }] },
@@ -99,6 +112,17 @@ describe("cursor hooks (~/.cursor/hooks.json, version 1, camelCase events)", () 
     const twice = JSON.parse(mergeCursorHooks(mergeCursorHooks(null, BASE), BASE));
     expect(twice.hooks.sessionStart).toHaveLength(1);
     expect(twice.hooks.postToolUse).toHaveLength(1);
+    expect(twice.hooks.beforeSubmitPrompt).toHaveLength(1);
+    expect(twice.hooks.sessionEnd).toHaveLength(1);
+  });
+
+  it("writes the session journal events: beforeSubmitPrompt + sessionEnd", () => {
+    const out = JSON.parse(mergeCursorHooks(null, BASE));
+    expect(out.hooks.beforeSubmitPrompt[0].command).toContain("hook prompt --host cursor");
+    expect(out.hooks.sessionEnd[0].command).toContain("hook session-end --host cursor");
+    const removed = JSON.parse(removeCursorHooks(mergeCursorHooks(null, BASE))!);
+    expect(removed.hooks.beforeSubmitPrompt).toBeUndefined();
+    expect(removed.hooks.sessionEnd).toBeUndefined();
   });
 });
 
@@ -108,6 +132,12 @@ describe("gemini hooks (hooks key in ~/.gemini/settings.json, PascalCase)", () =
     expect(out.hooks.SessionStart[0].matcher).toBe("");
     expect(out.hooks.SessionStart[0].hooks[0].command).toContain("--host gemini");
     expect(out.hooks.AfterTool[0].hooks[0].command).toContain("hook capture --host gemini");
+  });
+
+  it("writes the session journal events: BeforeAgent + SessionEnd", () => {
+    const out = JSON.parse(mergeGeminiHooks(null, BASE));
+    expect(out.hooks.BeforeAgent[0].hooks[0].command).toContain("hook prompt --host gemini");
+    expect(out.hooks.SessionEnd[0].hooks[0].command).toContain("hook session-end --host gemini");
   });
 
   it("leaves the user's other settings.json keys alone", () => {
@@ -141,6 +171,14 @@ describe("kiro hooks (per custom-agent config)", () => {
     expect(removed.hooks.postToolUse).toEqual([{ matcher: "fs_write", command: "cargo fmt --all" }]);
     expect(removed.hooks.agentSpawn).toBeUndefined();
   });
+
+  it("writes the session journal events: userPromptSubmit + stop; removal strips them", () => {
+    const out = JSON.parse(mergeKiroAgentHooks("{}", BASE));
+    expect(out.hooks.userPromptSubmit[0].command).toContain("hook prompt --host kiro");
+    expect(out.hooks.stop[0].command).toContain("hook session-end --host kiro");
+    const removed = JSON.parse(removeKiroAgentHooks(mergeKiroAgentHooks("{}", BASE))!);
+    expect(removed.hooks).toBeUndefined(); // everything was ours
+  });
 });
 
 describe("opencode plugin", () => {
@@ -151,6 +189,15 @@ describe("opencode plugin", () => {
     expect(src).toContain('"/abs/dist/cli/bin.js"');
     expect(src).toContain('"--host", "opencode"');
     expect(src).toContain("tool.execute.after");
+  });
+
+  it("bridges the session journal: prompt capture on chat.message, handoff on session.idle", () => {
+    const src = opencodePluginSource("/usr/bin/node", "/abs/dist/cli/bin.js");
+    expect(src).toContain('runHook("prompt"');
+    expect(src).toContain('runHook("session-end"');
+    expect(src).toContain("session.idle");
+    // capture must skip the synthetic part our own injection pushes
+    expect(src).toContain("!p?.synthetic");
   });
 
   it("write refuses to clobber a foreign file at the plugin path", () => {
@@ -245,6 +292,28 @@ describe("adapter registry round-trips against a fake $HOME", () => {
     expect(ids).toContain("gemini");
     expect(ids).toContain("kiro");
     expect(ids).toContain("opencode");
+  });
+});
+
+describe("recognizer regex (MEMWARDEN_CMD_RE)", () => {
+  it("matches all four subcommands and nothing loose", async () => {
+    const { MEMWARDEN_CMD_RE } = await import("../src/cli/host-hooks.js");
+    for (const sub of ["session-start", "session-end", "capture", "prompt"]) {
+      expect(MEMWARDEN_CMD_RE.test(`"node" "/x/bin.js" hook ${sub} --host codex`)).toBe(true);
+    }
+    // a user's own wrapper that merely mentions memwarden is NOT ours
+    expect(MEMWARDEN_CMD_RE.test("my-memwarden-logger.sh")).toBe(false);
+    expect(MEMWARDEN_CMD_RE.test("echo hook promptly")).toBe(false);
+  });
+});
+
+describe("claude hooks (connect.ts) — session journal events", () => {
+  it("mergeClaudeHooks writes UserPromptSubmit + SessionEnd; unmerge strips them", () => {
+    const merged = mergeClaudeHooks(null, BASE);
+    const cmd = (event: string) => merged.hooks![event]![0]!.hooks[0]!.command;
+    expect(cmd("UserPromptSubmit")).toContain("hook prompt");
+    expect(cmd("SessionEnd")).toContain("hook session-end");
+    expect(unmergeClaudeHooks(merged)).toEqual({});
   });
 });
 
