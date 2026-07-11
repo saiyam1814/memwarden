@@ -40,3 +40,16 @@ jobs:
           npm install "$GITHUB_WORKSPACE"/memwarden-*.tgz --no-fund --no-audit
           ./node_modules/.bin/memwarden status
           ./node_modules/.bin/memwarden audit /nonexistent.db 2>&1 | grep -q ENOENT
+
+  firewall-eval:
+    # The launch claims, measured on every push: stale-refusal, fresh
+    # retention, project isolation, label accuracy — all must hold at 100%.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run eval

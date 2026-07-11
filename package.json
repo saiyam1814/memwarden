@@ -43,7 +43,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "demo:firewall": "tsx demo/firewall.ts"
+    "demo:firewall": "tsx demo/firewall.ts",
+    "eval": "tsx eval/firewall-eval.ts"
   },
   "license": "Apache-2.0",
   "dependencies": {
