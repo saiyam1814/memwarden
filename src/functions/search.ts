@@ -26,6 +26,7 @@ import {
   getQuantBits,
   getQuantRescoreDepth,
   getQuantSeed,
+  getVectorBackend,
 } from "./config.js";
 import { memoryToObservation } from "./memory-utils.js";
 import { canonicalizePath } from "./paths.js";
@@ -67,6 +68,26 @@ export function makeVectorIndex(dims: number): VectorIndexLike {
     });
   }
   return new VectorIndex();
+}
+
+/**
+ * Async variant that honors MEMWARDEN_VECTOR_BACKEND. "turbovec" tries the
+ * optional native '@memwarden/turbovec' binding; when it cannot be loaded
+ * the failure is logged (never silent) and the TypeScript index from
+ * makeVectorIndex serves instead — so the returned index's backendLabel is
+ * always the truth. The default backend is "typescript" until the
+ * benchmark gate passes (see config.ts getVectorBackend). The import is
+ * dynamic so the turbovec module stays out of every boot that doesn't ask
+ * for it.
+ */
+export async function makeConfiguredVectorIndex(dims: number): Promise<VectorIndexLike> {
+  if (getVectorBackend() === "turbovec") {
+    const { createTurbovecBackend } = await import("./turbovec-backend.js");
+    const backend = await createTurbovecBackend(dims, getQuantBits());
+    if (backend) return backend;
+    // createTurbovecBackend already logged the concrete reason.
+  }
+  return makeVectorIndex(dims);
 }
 
 export function setEmbeddingProvider(provider: EmbeddingProvider | null): void {

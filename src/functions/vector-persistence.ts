@@ -11,6 +11,7 @@
 import { KV } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
 import { QuantizedVectorIndex } from "./quantized-vector-index.js";
+import { TurbovecBackend } from "./turbovec-backend.js";
 import { getVectorIndex, setVectorIndex, getEmbeddingProvider } from "./search.js";
 import { isQuantizedVectorEnabled, getQuantRescoreDepth } from "./config.js";
 import { logger } from "./logger.js";
@@ -18,14 +19,18 @@ import { logger } from "./logger.js";
 const BLOB_KEY = "index-blob";
 
 /**
- * Persists the current quantized index. No-op (false) when quantization is
- * disabled or the active index is not a QuantizedVectorIndex.
+ * Persists the current vector index. Supports the TS quantized index and
+ * the native turbovec backend (whose blob embeds the .tvim bytes plus the
+ * obsId <-> u64 mapping and its monotonic counter). No-op (false) for the
+ * full-precision index (rebuilt from KV embeddings, never persisted) or
+ * when quantization is disabled.
  */
 export async function persistVectorIndex(kv: StateKV): Promise<boolean> {
   const idx = getVectorIndex();
-  if (!isQuantizedVectorEnabled() || !(idx instanceof QuantizedVectorIndex)) {
-    return false;
-  }
+  const persistable =
+    idx instanceof TurbovecBackend ||
+    (isQuantizedVectorEnabled() && idx instanceof QuantizedVectorIndex);
+  if (!persistable) return false;
   try {
     await kv.set(KV.quantParams, BLOB_KEY, idx.serialize());
     return true;
@@ -45,6 +50,30 @@ export async function persistVectorIndex(kv: StateKV): Promise<boolean> {
  * place and returns false so the caller can rebuild.
  */
 export async function loadVectorIndex(kv: StateKV): Promise<boolean> {
+  // Native turbovec backend: the instance was installed at boot (it owns
+  // the loaded native module), so restore happens IN PLACE. A blob the
+  // backend rejects (params drift, corrupt .tvim, id-table mismatch)
+  // leaves it empty and returns false — the caller rebuilds.
+  const active = getVectorIndex();
+  if (active instanceof TurbovecBackend) {
+    try {
+      const blob = await kv.get<string>(KV.quantParams, BLOB_KEY);
+      if (typeof blob !== "string" || !blob) return false;
+      const ok = active.restoreFromBlob(blob);
+      if (!ok) {
+        logger.warn(
+          "vector-persistence: stored turbovec blob no longer valid — rebuild required",
+        );
+      }
+      return ok;
+    } catch (err) {
+      logger.warn("vector-persistence: turbovec load failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+  }
+
   if (!isQuantizedVectorEnabled()) return false;
   try {
     const blob = await kv.get<string>(KV.quantParams, BLOB_KEY);
