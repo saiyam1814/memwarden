@@ -1,0 +1,55 @@
+name: release
+
+# Publish memwarden to npm with provenance when a v* tag is pushed. The full
+# test suite and a fresh-tarball install must pass first — a release that
+# skipped the gates is not a release.
+#
+# Setup (one time): configure npm Trusted Publishing for `memwarden`
+# (npmjs.com -> package Settings -> Trusted Publisher -> this repo + this
+# workflow file), or add an NPM_TOKEN secret. Trusted publishing is preferred:
+# no long-lived token, and consumers get source-linked provenance.
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npx vitest run
+      - name: fresh tarball must work
+        run: |
+          npm pack
+          mkdir /tmp/fresh && cd /tmp/fresh && npm init -y
+          npm install "$GITHUB_WORKSPACE"/memwarden-*.tgz --no-fund --no-audit
+          ./node_modules/.bin/memwarden status
+      - name: tag must match package.json version
+        run: |
+          PKG=$(node -p "require('./package.json').version")
+          TAG="${GITHUB_REF_NAME#v}"
+          test "$PKG" = "$TAG" || { echo "tag v$TAG != package.json $PKG"; exit 1; }
+
+  publish:
+    needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

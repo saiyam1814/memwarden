@@ -1,0 +1,92 @@
+name: turbovec-release
+
+# Prebuild @memwarden/turbovec for every supported platform and publish ONE
+# npm package containing all binaries (the package.json files field includes
+# *.node; memwarden's loader picks the right one via napi's index.js).
+#
+# Trigger: push a tag like turbovec-v0.1.0, or run manually. Publishing needs
+# either npm Trusted Publishing configured for @memwarden/turbovec (preferred:
+# repo Settings on npmjs.com -> Trusted Publisher -> this repo + this workflow
+# file) or an NPM_TOKEN secret with publish rights to the @memwarden scope.
+
+on:
+  push:
+    tags: ["turbovec-v*"]
+  workflow_dispatch: {}
+
+defaults:
+  run:
+    working-directory: native/turbovec-node
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS links Accelerate (in the OS); Linux links OpenBLAS, so the
+          # runners install it and we build natively per-arch — GitHub's arm64
+          # runners avoid the OpenBLAS cross-compile swamp entirely.
+          - host: macos-14
+            target: aarch64-apple-darwin
+          - host: macos-13
+            target: x86_64-apple-darwin
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            setup: sudo apt-get update && sudo apt-get install -y libopenblas-dev
+          - host: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            setup: sudo apt-get update && sudo apt-get install -y libopenblas-dev
+    runs-on: ${{ matrix.host }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/turbovec-node
+      - name: platform deps
+        if: matrix.setup
+        run: ${{ matrix.setup }}
+      - run: npm ci
+      - run: npx napi build --release --platform --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binding-${{ matrix.target }}
+          path: native/turbovec-node/*.node
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # id-token for npm provenance; contents read for checkout.
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binding-*
+          merge-multiple: true
+          path: native/turbovec-node
+      - run: ls -la *.node && npm ci
+      - name: smoke the binding on this runner
+        run: node -e "const b = require('./index.js'); console.log('loaded:', Object.keys(b));"
+      - name: publish (dry run on manual dispatch, real on tag)
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            npm publish --provenance --access public
+          else
+            npm publish --dry-run --access public
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
