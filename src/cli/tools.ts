@@ -309,6 +309,37 @@ export function writeAgentsMd(dir: string): { path: string; created: boolean } {
   return { path, created };
 }
 
+/** Strip the memwarden block from an AGENTS.md body. Pure; null = no block. */
+export function unmergeAgentsMd(existing: string): string | null {
+  const start = existing.indexOf(AGENTS_START);
+  const end = existing.indexOf(AGENTS_END);
+  if (start === -1 || end === -1 || end <= start) return null;
+  const before = existing.slice(0, start).replace(/\n+$/, "\n");
+  const after = existing.slice(end + AGENTS_END.length).replace(/^\n+/, "\n");
+  const merged = (before + after).replace(/\n{3,}/g, "\n\n");
+  return merged.trim() ? merged : "";
+}
+
+/**
+ * Remove the memwarden block from AGENTS.md. Only the sentinel-marked block
+ * is touched; a file that becomes empty is deleted (we created it).
+ */
+export function removeAgentsMd(dir: string): { path: string; removed: boolean } {
+  const path = join(dir, "AGENTS.md");
+  if (!existsSync(path)) return { path, removed: false };
+  const existing = readFileSync(path, "utf8");
+  const next = unmergeAgentsMd(existing);
+  if (next === null) return { path, removed: false };
+  // "# AGENTS.md" alone is the header we wrote around our block — treat a
+  // header-only remainder as empty too.
+  if (!next || next.trim() === "# AGENTS.md") {
+    rmSync(path);
+  } else {
+    writeFileSync(path, next, "utf8");
+  }
+  return { path, removed: true };
+}
+
 export interface WireResult {
   id: string;
   label: string;
@@ -424,43 +455,4 @@ export function toolWireState(
   }
 }
 
-/**
- * Strip the memwarden block from an AGENTS.md body. Returns the remaining
- * text, "" when nothing meaningful remains (the file was effectively ours —
- * caller may delete it), or null when there is no memwarden block.
- */
-export function stripAgentsMd(existing: string): string | null {
-  const start = existing.indexOf(AGENTS_START);
-  const end = existing.indexOf(AGENTS_END);
-  if (start === -1 || end === -1 || end < start) return null;
-  const rest = (
-    existing.slice(0, start) + existing.slice(end + AGENTS_END.length)
-  )
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-  if (rest === "" || rest === "# AGENTS.md") return "";
-  return rest + "\n";
-}
 
-/** Remove the memwarden block from <dir>/AGENTS.md (delete if it was ours). */
-export function removeAgentsMd(dir: string): {
-  path: string;
-  action: "deleted" | "cleaned" | "none";
-} {
-  const path = join(dir, "AGENTS.md");
-  if (!existsSync(path)) return { path, action: "none" };
-  let existing: string;
-  try {
-    existing = readFileSync(path, "utf8");
-  } catch {
-    return { path, action: "none" };
-  }
-  const rest = stripAgentsMd(existing);
-  if (rest === null) return { path, action: "none" };
-  if (rest === "") {
-    rmSync(path, { force: true });
-    return { path, action: "deleted" };
-  }
-  writeFileSync(path, rest, "utf8");
-  return { path, action: "cleaned" };
-}

@@ -38,7 +38,14 @@ import {
   removeAgentsMd,
   type LaunchInfo,
 } from "./tools.js";
-import { handleSessionStart, handleCapture, readStdin } from "./hook.js";
+import { HOST_HOOKS, hostHookById, hooklessToolIds } from "./host-hooks.js";
+import {
+  handleSessionStart,
+  handleCapture,
+  readStdin,
+  isHookHost,
+  type HookHost,
+} from "./hook.js";
 import { ensureDaemon, daemonAlive, DAEMON_ENTRY } from "../daemon/ensure.js";
 import { installService, uninstallService } from "../daemon/service.js";
 import { getSecret } from "../functions/config.js";
@@ -205,10 +212,21 @@ function connect(rest: string[]): void {
 
 async function hook(rest: string[]): Promise<void> {
   const event = rest[0];
+  // --host <id> selects the host dialect (stdin parsing + reply schema).
+  // An unknown host degrades to the claude-code dialect rather than failing:
+  // a hook must never be the thing that breaks an agent's turn.
+  const hostIdx = rest.indexOf("--host");
+  const hostArg = hostIdx >= 0 ? rest[hostIdx + 1] : undefined;
+  const host: HookHost =
+    hostArg && isHookHost(hostArg) ? hostArg : "claude-code";
+  if (hostArg && !isHookHost(hostArg)) {
+    console.error(`[memwarden] unknown hook host '${hostArg}' — using claude-code dialect`);
+  }
   const raw = await readStdin();
   const secret = getSecret();
   const deps = {
     baseUrl: DAEMON_URL,
+    host,
     ...(secret ? { secret } : {}),
   };
   let out = "";
@@ -724,39 +742,74 @@ async function up(rest: string[]): Promise<void> {
       "  no supported tools detected. Re-run with --all to wire them all anyway.",
     );
   } else {
-    console.log(`  wiring ${targets.length} tool(s):`);
+    console.log(`  wiring ${targets.length} tool(s) (MCP):`);
     for (const t of targets) {
       const r = writeTool(t, home, launch);
       if (r.status === "skipped") {
         console.log(`    - ${t.label.padEnd(13)} skipped (${r.reason})`);
         continue;
       }
-      // Claude Code also gets real hooks: SessionStart auto-inject +
-      // PostToolUse auto-capture (true automatic memory, no agent needed).
-      let how = "agent recalls/saves via MCP + AGENTS.md";
-      if (t.id === "claude-code") {
-        writeClaudeHooks(join(home, ".claude", "settings.json"), HOOK_BASE);
-        how = "hooks — auto inject + auto capture";
-      }
       console.log(`    ✓ ${t.label.padEnd(13)} ${r.path}`);
-      console.log(`      ${" ".repeat(13)} ${how}`);
     }
   }
 
-  // 3. AGENTS.md in this project: tells the hook-less tools to use memory
-  //    at task boundaries (the cross-tool auto-recall lever).
-  const agents = writeAgentsMd(process.cwd());
-  console.log("");
-  console.log(
-    `  AGENTS.md ✓ ${agents.created ? "wrote" : "updated"} ${agents.path}`,
-  );
+  // 3. native lifecycle hooks — mechanical auto inject + auto capture for
+  //    every host with a hook (or plugin) system, not just Claude Code.
+  const hookHosts = all ? HOST_HOOKS : HOST_HOOKS.filter((h) => h.detect(home));
+  if (hookHosts.length > 0) {
+    console.log("");
+    console.log("  hooks (mechanical auto inject + auto capture):");
+    for (const h of hookHosts) {
+      const results = h.write(home, HOOK_BASE);
+      for (const r of results) {
+        if (r.status === "wired") {
+          console.log(`    ✓ ${h.label.padEnd(13)} ${r.path}`);
+        } else {
+          console.log(`    - ${h.label.padEnd(13)} skipped (${r.reason ?? "no change"})`);
+        }
+      }
+      if (h.note && results.some((r) => r.status === "wired")) {
+        console.log(`      ${" ".repeat(13)} note: ${h.note}`);
+      }
+    }
+  }
+
+  // 4. AGENTS.md fallback: ONLY for detected tools that got no hook adapter
+  //    (instruction-following is the last resort, hooks are the mechanism).
+  //    --agents-md forces it for every tool.
+  const wantAgentsMd = rest.includes("--agents-md");
+  const hooklessIds = hooklessToolIds(targets.map((t) => t.id));
+  const hookless = targets.filter((t) => hooklessIds.includes(t.id));
+  if (wantAgentsMd || hookless.length > 0) {
+    const agents = writeAgentsMd(process.cwd());
+    console.log("");
+    console.log(
+      `  AGENTS.md ✓ ${agents.created ? "wrote" : "updated"} ${agents.path}` +
+        (wantAgentsMd
+          ? ""
+          : ` (fallback for ${hookless.map((t) => t.label).join(", ")} — no hook system)`),
+    );
+  }
 
   console.log(
-    `\n  Done. Restart each tool once so it loads the memwarden MCP server.\n` +
-      `  Recall in any tool: type /recall, or just ask. Claude Code captures\n` +
-      `  and recalls automatically; for global auto-capture on other tools,\n` +
-      `  point them at the memory proxy (see README).\n`,
+    `\n  Done. Restart each tool once so it loads the memwarden MCP server\n` +
+      `  and hooks. Capture and recall are mechanical wherever hooks were\n` +
+      `  written above; type /recall in any tool to force it. Check what is\n` +
+      `  actually flowing with: memwarden status\n`,
   );
+}
+
+// Relative-time formatting for the heartbeat column of `memwarden status`.
+function relativeTime(iso: string): string {
+  const ms = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(ms) || ms < 5_000) return "just now";
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
 }
 
 function down(rest: string[]): void {
@@ -777,7 +830,7 @@ function down(rest: string[]): void {
 
   if (!all) {
     console.log(
-      `[memwarden] MCP entries, Claude hooks, and AGENTS.md blocks were left in\n` +
+      `[memwarden] MCP entries, hooks, and AGENTS.md blocks were left in\n` +
         `place (so 'memwarden up' restores instantly). Remove everything with:\n` +
         `  memwarden down --all          # also unwire every tool\n` +
         `  memwarden down --all --data   # and delete the brain at ${dataDir}`,
@@ -791,22 +844,27 @@ function down(rest: string[]): void {
   for (const t of TOOLS) {
     const u = unwireTool(t, home);
     if (u.status === "removed") {
-      console.log(`    ✓ ${t.label.padEnd(13)} removed from ${u.path}`);
+      console.log(`    \u2713 ${t.label.padEnd(13)} MCP removed from ${u.path}`);
     } else if (u.reason !== "no config file" && u.reason !== "not wired") {
-      console.log(`    ⚠ ${t.label.padEnd(13)} skipped (${u.reason})`);
+      console.log(`    \u26a0 ${t.label.padEnd(13)} skipped (${u.reason})`);
     }
   }
 
-  const hooksResult = removeClaudeHooks(join(home, ".claude", "settings.json"));
-  if (hooksResult.changed) {
-    console.log(`    ✓ Claude hooks   removed from ${hooksResult.path}`);
+  // Strip memwarden's hooks from every host config (only entries whose
+  // command is recognizably ours are touched — user hooks survive).
+  for (const h of HOST_HOOKS) {
+    for (const res of h.remove(home)) {
+      if (res.status === "removed") {
+        console.log(`    \u2713 ${h.label.padEnd(13)} hooks removed from ${res.path}`);
+      } else if (res.status === "skipped" && res.reason) {
+        console.log(`    \u26a0 ${h.label.padEnd(13)} ${res.reason}`);
+      }
+    }
   }
 
   const agents = removeAgentsMd(process.cwd());
-  if (agents.action !== "none") {
-    console.log(
-      `    ✓ AGENTS.md      ${agents.action === "deleted" ? "deleted" : "memwarden block removed"} (${agents.path})`,
-    );
+  if (agents.removed) {
+    console.log(`    \u2713 AGENTS.md      memwarden block removed (${agents.path})`);
   }
   console.log(
     `[memwarden] note: AGENTS.md blocks in OTHER projects are per-project — run\n` +
@@ -827,6 +885,24 @@ function down(rest: string[]): void {
 }
 
 // --- `memwarden status` --------------------------------------------
+//
+// One honest snapshot: daemon + live stats, semantic recall, the vector
+// backend ACTUALLY serving search, and per tool Detected -> Configured ->
+// Live. "Configured" is read straight from the config files on disk (MCP
+// entry, hook command); "Live" is the daemon's per-host heartbeat — a hook
+// that actually ran and reached the daemon. Wired-but-never-live is the
+// interesting failure this surfaces (tool needs a restart, or Codex hooks
+// not yet trust-pinned).
+
+interface StatsBody {
+  memories?: number;
+  sessions?: number;
+  vectors?: number;
+  vectorBackend?: string | null;
+  embedding?: { provider: string; dimensions: number } | null;
+  compression?: { algorithm: string; bits: number; ratio: number } | null;
+  hosts?: Array<{ host?: string; lastSeen?: string }>;
+}
 
 async function status(rest: string[]): Promise<void> {
   const home = homedir();
@@ -841,19 +917,9 @@ async function status(rest: string[]): Promise<void> {
       return "unknown";
     }
   })();
-
   const asJson = rest.includes("--json");
-  if (!asJson) console.log(`\nmemwarden status  (v${version})\n`);
 
   // daemon + live stats (livez is unauthenticated; stats needs the secret)
-  interface StatsBody {
-    memories?: number;
-    sessions?: number;
-    vectors?: number;
-    vectorBackend?: string | null;
-    embedding?: { provider: string; dimensions: number } | null;
-    compression?: { algorithm: string; bits: number; ratio: number } | null;
-  }
   let stats: StatsBody | null = null;
   let daemonUp = false;
   try {
@@ -875,20 +941,43 @@ async function status(rest: string[]): Promise<void> {
       // stats stay null; daemon line still prints
     }
   }
+  const lastSeen = new Map<string, string>();
+  for (const h of stats?.hosts ?? []) {
+    if (h.host && h.lastSeen) lastSeen.set(h.host, h.lastSeen);
+  }
+
+  // Per-tool rows: MCP state comes from the schema-exact unmerge check, the
+  // hook column from each host adapter's own config file, live from the
+  // daemon heartbeat. Antigravity rides the ~/.gemini family's hooks.
+  const toolRows = TOOLS.map((t) => {
+    const hookAdapter =
+      hostHookById(t.id) ??
+      (t.id === "antigravity" ? hostHookById("gemini") : undefined);
+    const heartbeatId = hookAdapter ? hookAdapter.id : t.id;
+    return {
+      id: t.id,
+      label: t.label,
+      detected: t.detect(home),
+      mcp: toolWireState(t, home),
+      hooks: hookAdapter
+        ? hookAdapter.wired(home)
+          ? t.id === "antigravity"
+            ? "via gemini"
+            : "wired"
+          : "—"
+        : "AGENTS.md",
+      lastSeen: lastSeen.get(heartbeatId) ?? null,
+    };
+  });
+
   if (asJson) {
-    // Machine-readable snapshot: the daemon's live stats plus per-tool wired
-    // state (read from each tool's config, not assumed).
     console.log(
       JSON.stringify(
         {
           version,
           daemon: { up: daemonUp, url: DAEMON_URL, dataDir },
           stats,
-          tools: TOOLS.map((t) => ({
-            id: t.id,
-            detected: t.detect(home),
-            state: toolWireState(t, home),
-          })),
+          tools: toolRows,
         },
         null,
         2,
@@ -896,6 +985,8 @@ async function status(rest: string[]): Promise<void> {
     );
     return;
   }
+
+  console.log(`\nmemwarden status  (v${version})\n`);
   console.log(
     `  daemon    ${daemonUp ? "✓ running" : "✗ not running"}  ${DAEMON_URL}  brain: ${dataDir}` +
       (daemonUp && !stats ? "  (stats unavailable — secret mismatch?)" : ""),
@@ -904,11 +995,6 @@ async function status(rest: string[]): Promise<void> {
     console.log(
       `  memory    ${stats.memories ?? 0} memories, ${stats.sessions ?? 0} sessions, ${stats.vectors ?? 0} vectors`,
     );
-  }
-
-  // semantic recall — the daemon's live answer when up, a local resolution
-  // check otherwise. Never claim semantic without evidence.
-  if (stats) {
     console.log(
       stats.embedding
         ? `  semantic  ✓ ${stats.embedding.provider} (${stats.embedding.dimensions}d)`
@@ -934,28 +1020,23 @@ async function status(rest: string[]): Promise<void> {
     );
   }
 
-  // per-tool wiring, from each tool's actual config file — not assumptions
-  console.log(`\n  tools (from each tool's own config):`);
-  for (const t of TOOLS) {
-    const detected = t.detect(home);
-    const state = toolWireState(t, home);
-    const mark = state === "wired" ? "✓" : state === "unknown" ? "?" : "-";
+  console.log("");
+  console.log(
+    `  ${"tool".padEnd(13)} ${"detected".padEnd(9)} ${"mcp".padEnd(10)} ${"hooks".padEnd(12)} live`,
+  );
+  for (const r of toolRows) {
+    // Without a reachable daemon there is no heartbeat to consult — "never
+    // seen" would be a claim we can't back.
+    const live = r.lastSeen
+      ? `live (${relativeTime(r.lastSeen)})`
+      : r.hooks !== "AGENTS.md" && daemonUp
+        ? "never seen"
+        : "—";
     console.log(
-      `    ${mark} ${t.label.padEnd(13)} ${state}${detected ? "" : " (tool not detected)"}`,
+      `  ${r.label.padEnd(13)} ${(r.detected ? "yes" : "no").padEnd(9)} ${r.mcp.padEnd(10)} ${r.hooks.padEnd(12)} ${live}`,
     );
   }
 
-  // Claude hooks + this project's AGENTS.md
-  const settingsPath = join(home, ".claude", "settings.json");
-  let hooksOn = false;
-  try {
-    hooksOn =
-      existsSync(settingsPath) &&
-      readFileSync(settingsPath, "utf8").includes("# memwarden-managed");
-  } catch {
-    // treated as off
-  }
-  console.log(`\n  hooks     ${hooksOn ? "✓ Claude Code auto inject/capture" : "- none"}`);
   const agentsPath = join(process.cwd(), "AGENTS.md");
   let agentsOn = false;
   try {
@@ -966,7 +1047,12 @@ async function status(rest: string[]): Promise<void> {
     // treated as off
   }
   console.log(
-    `  AGENTS.md ${agentsOn ? "✓ memwarden block present (this project)" : "- no memwarden block (this project)"}\n`,
+    `\n  AGENTS.md ${agentsOn ? "✓ memwarden block present (this project)" : "- no memwarden block (this project)"}`,
+  );
+  console.log(
+    `\n  wired = config on disk points at memwarden; live = a hook from that\n` +
+      `  host actually reached the daemon. Wired but never live usually means\n` +
+      `  the tool needs a restart (or, for Codex, /hooks trust-pinning).\n`,
   );
 }
 
@@ -1002,9 +1088,9 @@ async function main(): Promise<void> {
     default:
       console.log(
         "usage:\n" +
-          "  memwarden up [--all] [--url URL] [--secret S]   # start daemon + wire every installed tool\n" +
-          "  memwarden down [--all] [--data]                 # stop service; --all unwires every tool, --data deletes the brain\n" +
-          "  memwarden status [--json]                       # daemon, semantic recall, vector backend, per-tool wiring — measured, not assumed\n" +
+          "  memwarden up [--all] [--agents-md] [--url URL] [--secret S]   # start daemon + wire every installed tool\n" +
+          "  memwarden down [--all] [--data]                 # stop service; --all unwires every tool + hooks, --data deletes the brain\n" +
+          "  memwarden status [--json]                       # daemon, semantic, vector backend, per-tool detected/mcp/hooks/live\n" +
           "  memwarden connect [claude-code|cursor|cline|windsurf] [--with-hooks] [--url URL] [--secret S]\n" +
           "  memwarden doctor [path] [--all-projects]        # audit this project (or the whole brain)\n" +
           "  memwarden audit <store> [--root repo] [--json] [--html [out.html]]  # audit a FOREIGN store (claude-mem db, CLAUDE.md, Mem0 json)\n" +

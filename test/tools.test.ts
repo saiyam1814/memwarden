@@ -23,7 +23,7 @@ import {
   writeAgentsMd,
   removeAgentsMd,
   mergeAgentsMd,
-  stripAgentsMd,
+  unmergeAgentsMd,
   type LaunchInfo,
 } from "../src/cli/tools.js";
 
@@ -227,23 +227,24 @@ describe("unwire (memwarden down --all)", () => {
     expect(readFileSync(p, "utf8")).toBe("{ this is not json ");
   });
 
-  it("stripAgentsMd removes our block, keeps user content, deletes when file was ours", () => {
+  it("unmergeAgentsMd removes our block, keeps user content", () => {
     // user content survives
     const mixed = mergeAgentsMd("# My Project\n\nHouse rules.\n");
-    const rest = stripAgentsMd(mixed)!;
+    const rest = unmergeAgentsMd(mixed)!;
     expect(rest).toContain("House rules.");
     expect(rest).not.toContain("memwarden");
-    // a file we created from scratch reduces to "" (delete signal)
-    expect(stripAgentsMd(mergeAgentsMd(null))).toBe("");
+    // a file we created from scratch reduces to just our header (removeAgentsMd
+    // treats a header-only remainder as ours and deletes the file)
+    expect(unmergeAgentsMd(mergeAgentsMd(null))!.trim()).toBe("# AGENTS.md");
     // no block -> null
-    expect(stripAgentsMd("# Plain\n")).toBeNull();
+    expect(unmergeAgentsMd("# Plain\n")).toBeNull();
   });
 
   it("removeAgentsMd deletes the file when it was entirely ours", () => {
     const dir = tmp();
     writeAgentsMd(dir);
     const r = removeAgentsMd(dir);
-    expect(r.action).toBe("deleted");
-    expect(removeAgentsMd(dir).action).toBe("none");
+    expect(r.removed).toBe(true);
+    expect(removeAgentsMd(dir).removed).toBe(false);
   });
 });

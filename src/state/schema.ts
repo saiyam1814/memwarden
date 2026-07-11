@@ -57,6 +57,9 @@ export const KV = {
   state: "mem:state",
   commits: "mem:commits",
   recentSearches: "mem:recent-searches",
+  // Liveness: last-seen timestamp per agent host, updated by every hook
+  // invocation that reaches the daemon (`memwarden status` reads it back).
+  hostHeartbeats: "mem:hosts",
 } as const;
 
 export const STREAM = {

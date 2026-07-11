@@ -5,7 +5,12 @@
 // PostToolUse forwards a well-formed observe payload.
 
 import { describe, expect, it, vi } from "vitest";
-import { handleSessionStart, handleCapture } from "../src/cli/hook.js";
+import {
+  handleSessionStart,
+  handleCapture,
+  parseHostEvent,
+  formatInjection,
+} from "../src/cli/hook.js";
 
 function jsonResponse(body: unknown, ok = true): Response {
   return {
@@ -226,5 +231,200 @@ describe("handleCapture — Déjà Fix injection", () => {
     await expect(
       handleCapture(errorEvent, { baseUrl: "http://d", fetchFn }),
     ).resolves.toBe("");
+  });
+});
+
+// --- canonical event layer: per-host parsing + output shaping ---------
+//
+// Fixture events mirror each host's documented stdin shape (July 2026 docs)
+// so a host renaming a field breaks a test here, not a user's session.
+
+describe("parseHostEvent", () => {
+  it("claude-code / codex / gemini / kiro: session_id + tool_response dialect", () => {
+    const raw = JSON.stringify({
+      session_id: "s1",
+      cwd: "/w/a",
+      hook_event_name: "PostToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "ls" },
+      tool_response: "ok",
+    });
+    for (const host of ["claude-code", "codex", "gemini", "kiro"] as const) {
+      expect(parseHostEvent(raw, host)).toEqual({
+        sessionId: "s1",
+        cwd: "/w/a",
+        toolName: "Bash",
+        toolInput: { command: "ls" },
+        toolOutput: "ok",
+      });
+    }
+  });
+
+  it("cursor: postToolUse uses tool_output and cwd", () => {
+    const raw = JSON.stringify({
+      conversation_id: "conv1",
+      hook_event_name: "postToolUse",
+      workspace_roots: ["/w/root"],
+      cwd: "/w/root/sub",
+      tool_name: "Shell",
+      tool_input: { command: "npm test" },
+      tool_output: '"FAIL"',
+    });
+    expect(parseHostEvent(raw, "cursor")).toEqual({
+      sessionId: "conv1",
+      cwd: "/w/root/sub",
+      toolName: "Shell",
+      toolInput: { command: "npm test" },
+      toolOutput: '"FAIL"',
+    });
+  });
+
+  it("cursor: sessionStart falls back to session_id and workspace_roots[0]", () => {
+    const raw = JSON.stringify({
+      conversation_id: "conv1",
+      session_id: "sess1",
+      hook_event_name: "sessionStart",
+      workspace_roots: ["/w/root"],
+    });
+    const evt = parseHostEvent(raw, "cursor");
+    expect(evt.sessionId).toBe("sess1");
+    expect(evt.cwd).toBe("/w/root");
+  });
+
+  it("opencode: our plugin sends the canonical field names directly", () => {
+    const raw = JSON.stringify({
+      sessionId: "oc1",
+      cwd: "/w/oc",
+      toolName: "bash",
+      toolInput: { cmd: "ls" },
+      toolOutput: "done",
+    });
+    expect(parseHostEvent(raw, "opencode")).toEqual({
+      sessionId: "oc1",
+      cwd: "/w/oc",
+      toolName: "bash",
+      toolInput: { cmd: "ls" },
+      toolOutput: "done",
+    });
+  });
+
+  it("returns an empty event on malformed JSON for every host", () => {
+    for (const host of ["claude-code", "codex", "cursor", "gemini", "kiro", "opencode"] as const) {
+      expect(parseHostEvent("not json", host)).toEqual({});
+    }
+  });
+});
+
+describe("formatInjection", () => {
+  it("claude-code and codex wrap in hookSpecificOutput with the event name", () => {
+    for (const host of ["claude-code", "codex"] as const) {
+      const start = JSON.parse(formatInjection(host, "session-start", "ctx"));
+      expect(start.hookSpecificOutput).toEqual({
+        hookEventName: "SessionStart",
+        additionalContext: "ctx",
+      });
+      const cap = JSON.parse(formatInjection(host, "capture", "fix"));
+      expect(cap.hookSpecificOutput.hookEventName).toBe("PostToolUse");
+    }
+  });
+
+  it("gemini wraps in hookSpecificOutput.additionalContext (no event name)", () => {
+    const out = JSON.parse(formatInjection("gemini", "session-start", "ctx"));
+    expect(out).toEqual({ hookSpecificOutput: { additionalContext: "ctx" } });
+  });
+
+  it("cursor uses top-level additional_context", () => {
+    const out = JSON.parse(formatInjection("cursor", "session-start", "ctx"));
+    expect(out).toEqual({ additional_context: "ctx" });
+  });
+
+  it("kiro and opencode print the raw text (stdout is the context)", () => {
+    expect(formatInjection("kiro", "session-start", "ctx")).toBe("ctx");
+    expect(formatInjection("opencode", "session-start", "ctx")).toBe("ctx");
+  });
+
+  it("empty text is a no-op for every host", () => {
+    for (const host of ["claude-code", "codex", "cursor", "gemini", "kiro", "opencode"] as const) {
+      expect(formatInjection(host, "session-start", "")).toBe("");
+    }
+  });
+});
+
+describe("host-aware handlers", () => {
+  it("cursor session start replies with additional_context and heartbeats its host", async () => {
+    const fetchFn = vi.fn(async () =>
+      jsonResponse({ text: "<memory>cursor knows</memory>" }),
+    ) as unknown as typeof fetch;
+    const out = await handleSessionStart(
+      JSON.stringify({ conversation_id: "c1", workspace_roots: ["/w/cur"] }),
+      { baseUrl: "http://d", fetchFn, host: "cursor" },
+    );
+    const calls = (fetchFn as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    const body = JSON.parse((calls[0]![1] as { body: string }).body);
+    expect(body.cwd).toBe("/w/cur");
+    expect(body.agent).toBe("cursor"); // liveness heartbeat rides the search call
+    const parsed = JSON.parse(out);
+    expect(parsed.additional_context).toContain("cursor knows");
+    expect(parsed.hookSpecificOutput).toBeUndefined();
+  });
+
+  it("gemini capture forwards tool_response and stamps agent on observe", async () => {
+    const fetchFn = vi.fn(async () => jsonResponse({ observationId: "obs_1" })) as unknown as typeof fetch;
+    const out = await handleCapture(
+      JSON.stringify({
+        session_id: "g1",
+        cwd: "/w/gem",
+        tool_name: "run_shell_command",
+        tool_input: { command: "ls" },
+        tool_response: "ok",
+      }),
+      { baseUrl: "http://d", fetchFn, host: "gemini", now: () => "2026-01-01T00:00:00.000Z" },
+    );
+    expect(out).toBe("");
+    const calls = (fetchFn as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    const body = JSON.parse((calls[0]![1] as { body: string }).body);
+    expect(body).toMatchObject({
+      sessionId: "g1",
+      project: "/w/gem",
+      agent: "gemini",
+    });
+    expect(body.data.tool_name).toBe("run_shell_command");
+    expect(body.data.tool_output).toBe("ok");
+  });
+
+  it("kiro Déjà Fix injection is plain text (stdout is the context)", async () => {
+    const fetchFn = vi.fn(async (url: string) => {
+      if (typeof url === "string" && url.includes("/dejafix/lookup")) {
+        return jsonResponse({
+          signature: "sig",
+          fixes: [{ fix: "pin the dep", status: "verified", timestamp: "2026-06-01T00:00:00.000Z" }],
+        });
+      }
+      return jsonResponse({ observationId: "obs_1" });
+    }) as unknown as typeof fetch;
+    const out = await handleCapture(
+      JSON.stringify({
+        session_id: "k1",
+        cwd: "/w/kiro",
+        tool_name: "execute_bash",
+        tool_input: { command: "npm test" },
+        tool_response: "Error: dep mismatch",
+      }),
+      { baseUrl: "http://d", fetchFn, host: "kiro" },
+    );
+    expect(out).toContain("Déjà Fix");
+    expect(out).toContain("pin the dep");
+    expect(() => JSON.parse(out)).toThrow(); // plain text, not JSON
+  });
+
+  it("defaults to the claude-code dialect when host is omitted (back-compat)", async () => {
+    const fetchFn = vi.fn(async () =>
+      jsonResponse({ text: "remembered" }),
+    ) as unknown as typeof fetch;
+    const out = await handleSessionStart(
+      JSON.stringify({ session_id: "s", cwd: "/w" }),
+      { baseUrl: "http://d", fetchFn },
+    );
+    expect(JSON.parse(out).hookSpecificOutput.hookEventName).toBe("SessionStart");
   });
 });

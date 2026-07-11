@@ -38,6 +38,10 @@ export interface Session {
   id: string;
   project: string;
   cwd: string;
+  /** Stable project identity (normalized git remote / main repo root) that
+   * survives worktrees and moved checkouts. Additive: recall uses it only
+   * to widen path scoping; key-less rows behave exactly as before. */
+  projectKey?: string;
   startedAt: string;
   endedAt?: string;
   status: "active" | "completed" | "abandoned";
@@ -64,6 +68,8 @@ export interface RawObservation {
   modality?: "text" | "image" | "mixed";
   imageData?: string;
   agentId?: string;
+  /** Stable project identity at capture time (see Session.projectKey). */
+  projectKey?: string;
 }
 
 export type ObservationType =

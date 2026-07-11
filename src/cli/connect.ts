@@ -128,42 +128,49 @@ export function writeClaudeHooks(
 }
 
 /**
- * Remove memwarden's hook groups from a Claude settings file (marker-matched,
- * so a user's own hook that merely mentions memwarden survives). Unparseable
- * files are left untouched.
+ * Remove memwarden's hook entries from a Claude settings object, leaving the
+ * user's own hooks byte-identical. Pure; returns null when nothing of ours
+ * is present (no write needed).
+ */
+export function unmergeClaudeHooks(existing: ClaudeSettings): ClaudeSettings | null {
+  if (!existing.hooks || typeof existing.hooks !== "object") return null;
+  let changed = false;
+  const hooks: Record<string, HookGroup[]> = {};
+  for (const [event, groups] of Object.entries(existing.hooks)) {
+    const kept = (groups ?? []).filter((g) => !isMemwardenHookGroup(g));
+    if (kept.length !== (groups ?? []).length) changed = true;
+    if (kept.length > 0) hooks[event] = kept;
+  }
+  if (!changed) return null;
+  const next: ClaudeSettings = { ...existing };
+  if (Object.keys(hooks).length > 0) next.hooks = hooks;
+  else delete next.hooks;
+  return next;
+}
+
+/**
+ * Strip memwarden's hooks from the Claude settings file. Never touches an
+ * absent or unparseable file (an unparseable settings.json is not ours to
+ * rewrite).
  */
 export function removeClaudeHooks(settingsPath: string): {
   path: string;
-  changed: boolean;
+  removed: boolean;
 } {
-  if (!existsSync(settingsPath)) return { path: settingsPath, changed: false };
+  if (!existsSync(settingsPath)) return { path: settingsPath, removed: false };
   let existing: ClaudeSettings;
   try {
     existing = JSON.parse(readFileSync(settingsPath, "utf8")) as ClaudeSettings;
   } catch {
-    return { path: settingsPath, changed: false };
+    return { path: settingsPath, removed: false };
   }
-  if (!existing || typeof existing !== "object" || !existing.hooks) {
-    return { path: settingsPath, changed: false };
+  if (!existing || typeof existing !== "object") {
+    return { path: settingsPath, removed: false };
   }
-  const hooks: Record<string, HookGroup[]> = { ...existing.hooks };
-  let changed = false;
-  for (const event of Object.keys(hooks)) {
-    const groups = hooks[event] ?? [];
-    const kept = groups.filter((g) => !isMemwardenHookGroup(g));
-    if (kept.length !== groups.length) {
-      changed = true;
-      if (kept.length > 0) hooks[event] = kept;
-      else delete hooks[event];
-    }
-  }
-  if (!changed) return { path: settingsPath, changed: false };
-  writeFileSync(
-    settingsPath,
-    JSON.stringify({ ...existing, hooks }, null, 2) + "\n",
-    "utf8",
-  );
-  return { path: settingsPath, changed: true };
+  const next = unmergeClaudeHooks(existing);
+  if (next === null) return { path: settingsPath, removed: false };
+  writeFileSync(settingsPath, JSON.stringify(next, null, 2) + "\n", "utf8");
+  return { path: settingsPath, removed: true };
 }
 
 type McpConfig = { mcpServers?: Record<string, unknown> };

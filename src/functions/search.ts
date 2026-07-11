@@ -30,6 +30,7 @@ import {
 } from "./config.js";
 import { memoryToObservation } from "./memory-utils.js";
 import { canonicalizePath } from "./paths.js";
+import { gitProjectKey } from "./git-identity.js";
 import { classifyProvenance } from "./verify.js";
 import { recordAccessBatch } from "./access-tracker.js";
 import { loadVectorIndex, persistVectorIndex } from "./vector-persistence.js";
@@ -329,6 +330,12 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         typeof data.cwd === "string" && data.cwd.trim().length > 0
           ? canonicalizePath(data.cwd)
           : undefined;
+      // Stable project identity for each filter directory (git remote / main
+      // repo root). Used below to WIDEN the path filters — same key at a
+      // different path (another worktree, a moved checkout) still matches.
+      const projectFilterKey =
+        projectFilter !== undefined ? gitProjectKey(projectFilter) : null;
+      const cwdFilterKey = cwdFilter !== undefined ? gitProjectKey(cwdFilter) : null;
       // Verified Recall firewall: when on (recall surfaces default it on),
       // drop results that reference files now deleted or content-changed, so
       // stale memory is never injected. It needs a cwd to check against — and
@@ -478,9 +485,23 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         if (filtering) {
           const s = await loadSession(r.sessionId);
           if (s) {
-            if (projectFilter && canonicalizePath(s.project) !== projectFilter)
+            // Project identity WIDENS (never replaces) the path filters: a
+            // session whose stored projectKey matches the query directory's
+            // key is the same project even at a different path (another git
+            // worktree, a moved checkout). Sessions without a key — all
+            // pre-existing data — keep the exact path-match behavior.
+            if (
+              projectFilter &&
+              !(s.projectKey !== undefined && s.projectKey === projectFilterKey) &&
+              canonicalizePath(s.project) !== projectFilter
+            )
               continue;
-            if (cwdFilter && canonicalizePath(s.cwd) !== cwdFilter) continue;
+            if (
+              cwdFilter &&
+              !(s.projectKey !== undefined && s.projectKey === cwdFilterKey) &&
+              canonicalizePath(s.cwd) !== cwdFilter
+            )
+              continue;
           } else if (projectFilter) {
             // Synthetic/memory entry: a null memProject means "unknown" and is
             // let through for backward-compatibility; cwd filter doesn't apply.
