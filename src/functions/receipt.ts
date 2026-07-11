@@ -47,6 +47,13 @@ export interface DeleteReceipt {
   createEntry: ChainEntry | null;
   /** Whole-chain verification at receipt time. */
   chainIntact: boolean;
+  /**
+   * Honest scope of the deletion: forget removes the record from the active
+   * store, search, recall, and every index — but the original content stays
+   * inside the local append-only oplog (that is what makes the chain
+   * tamper-evident). False until oplog compaction/erasure ships.
+   */
+  contentErased: false;
   /** SHA-256 over the canonical receipt fields above — offline-checkable. */
   receiptHash: string;
 }
@@ -67,6 +74,7 @@ function receiptHash(fields: Omit<DeleteReceipt, "receiptHash">): string {
     deleteEntry: fields.deleteEntry,
     createEntry: fields.createEntry,
     chainIntact: fields.chainIntact,
+    contentErased: fields.contentErased,
   });
   return createHash("sha256").update(canonical).digest("hex");
 }
@@ -136,6 +144,7 @@ export function registerReceiptFunction(sdk: ISdk, kv: StateKV): void {
         deleteEntry,
         createEntry,
         chainIntact: verdict.ok === true,
+        contentErased: false as const,
       };
       const receipt: DeleteReceipt = { ...base, receiptHash: receiptHash(base) };
       logger.info("memory forgotten with receipt", {

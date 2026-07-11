@@ -349,6 +349,12 @@ async function forget(rest: string[]): Promise<void> {
   }
   const rec = r.receipt!;
   console.log(`\n  Deleted "${rec.title}" (${rec.obsId})\n`);
+  console.log(
+    `  Removed from the active store, search, recall, and every index.\n` +
+      `  Honest scope: the original content remains inside the local append-only\n` +
+      `  oplog (that is what makes the history tamper-evident). Full erasure\n` +
+      `  requires oplog compaction, which is not built yet.\n`,
+  );
   console.log(`  delete receipt`);
   if (rec.createEntry) {
     console.log(`    written   oplog #${rec.createEntry.id} at ${rec.createEntry.ts}`);

@@ -149,11 +149,15 @@ It is **tamper-evident, not tamper-proof.** There is no signing. The chain detec
 reorders, but it does **not** detect tail-truncation — dropping the newest entries leaves a
 shorter, still-valid chain. We say "tamper-evident" and mean exactly that.
 
-**Deletion comes with a receipt.** `memwarden forget <id>` removes a memory from the store and
-every index, and prints a receipt citing the oplog entries that recorded the original write and
-the deletion, plus whole-chain verification — proof the delete actually happened, without
-re-disclosing the deleted content. An unknown id reports failure honestly; there is no
-`{deleted: 0, success: true}` theater here.
+**Deletion comes with a receipt — and an honest scope.** `memwarden forget <id>` removes a
+memory from the active store, search, recall, and every index, and prints a receipt citing the
+oplog entries that recorded the original write and the deletion, plus whole-chain verification.
+An unknown id reports failure honestly; there is no `{deleted: 0, success: true}` theater here.
+What forget does **not** do (and the receipt says so, `contentErased: false`): the original
+content remains inside the local append-only oplog — the same property that makes the history
+tamper-evident. Treat forget as "never surfaces again", not forensic erasure; oplog compaction
+with receipt-preserving erasure is on the roadmap, and until it ships the honest full-erasure
+path is `memwarden down --all --data` (deletes the whole brain).
 
 ## Start here: audit the memory you already have
 
