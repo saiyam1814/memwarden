@@ -16,6 +16,7 @@ import {
 } from "./store.js";
 import {
   GENESIS_PREV_HASH,
+  buildEraseRecord,
   hashOplogEntryV2,
   hashPayload,
   planCompaction,
@@ -132,15 +133,32 @@ export class StoreMemory implements StateStore {
       (e) => e.v !== 2 && e.payload !== null && e.payload !== undefined,
     ).length;
     if (v1Count > 0) return { erased: 0, refused: "v1-entries", v1Count };
-    let erased = 0;
+    const erased: Array<{ id: number; payload_hash: string }> = [];
     for (let i = 0; i < this.oplog.length; i++) {
       const e = this.oplog[i]!;
       if (e.scope !== scope || e.key !== key) continue;
       if (e.payload === null || e.payload === undefined) continue;
       this.oplog[i] = { ...e, payload: null };
-      erased++;
+      erased.push({ id: e.id, payload_hash: String(e.payload_hash) });
     }
-    return { erased };
+    if (erased.length > 0) {
+      // Chain-recorded authorization: verifyChain rejects any null payload
+      // not vouched for by a later erase/compact record (parity with
+      // StoreLibsql — see its eraseOplogPayloads).
+      const prev_hash =
+        this.oplog.length === 0
+          ? GENESIS_PREV_HASH
+          : this.oplog[this.oplog.length - 1]!.hash;
+      this.oplog.push(
+        buildEraseRecord({
+          id: this.nextOplogId++,
+          ts: new Date().toISOString(),
+          prev_hash,
+          payload: { scope, key, erased },
+        }),
+      );
+    }
+    return { erased: erased.length };
   }
 
   async compactOplog(opts?: { dryRun?: boolean }): Promise<OplogCompactResult> {

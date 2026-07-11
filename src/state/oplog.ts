@@ -107,12 +107,68 @@ export interface CompactRecordPayload {
   previousHeadHash: string;
   entriesRewritten: number;
   erasedCount: number;
+  /**
+   * EVERY content-committed null payload in the post-compaction chain (both
+   * the payloads this pass erased and any erased earlier) — the compact
+   * record is the universal erasure authorization, so verifyChain accepts
+   * exactly these nulls and rejects any other. This is also the one-time
+   * migration for chains erased before erase records existed: their nulls
+   * fail verification until a compact re-anchors them.
+   */
+  erasedIds: number[];
   compactedAt: string;
 }
 
 /** Scope/key under which compact records are logged (never a kv scope). */
 export const COMPACT_SCOPE = "mem:oplog";
 export const COMPACT_KEY = "compact";
+
+/** Scope/key under which erase-authorization records are logged. */
+export const ERASE_SCOPE = COMPACT_SCOPE;
+export const ERASE_KEY = "erase";
+
+/**
+ * The payload of the `erase` record appended by eraseOplogPayloads: the
+ * (scope, key) whose history was erased plus the exact entries nulled. The
+ * ids + payload_hashes are the authorization verifyChain checks a null
+ * payload against — content is never included (an erasure must not
+ * re-disclose what it erased).
+ */
+export interface EraseRecordPayload {
+  scope: string;
+  key: string;
+  erased: Array<{ id: number; payload_hash: string }>;
+}
+
+/** Build the chain-recorded `erase` entry for an in-place payload erasure. */
+export function buildEraseRecord(fields: {
+  id: number;
+  ts: string;
+  prev_hash: string;
+  payload: EraseRecordPayload;
+}): OplogEntry {
+  const payload_hash = hashPayload(fields.payload);
+  return {
+    id: fields.id,
+    ts: fields.ts,
+    op: "erase",
+    scope: ERASE_SCOPE,
+    key: ERASE_KEY,
+    payload: fields.payload,
+    v: 2,
+    payload_hash,
+    prev_hash: fields.prev_hash,
+    hash: hashOplogEntryV2({
+      id: fields.id,
+      ts: fields.ts,
+      op: "erase",
+      scope: ERASE_SCOPE,
+      key: ERASE_KEY,
+      payload_hash,
+      prev_hash: fields.prev_hash,
+    }),
+  };
+}
 
 export interface CompactPlan {
   /** Every pre-existing entry, rewritten as v2 and re-chained from genesis. */
@@ -210,10 +266,21 @@ export function planCompaction(
 
   const previousHeadHash =
     entries.length > 0 ? entries[entries.length - 1]!.hash : GENESIS_PREV_HASH;
+  // Authorize every content-committed null in the rewritten chain: payloads
+  // erased by THIS pass, by earlier erase records, or by a pre-authorization
+  // memwarden (the migration case) — the compact record is the re-anchor.
+  const erasedIds = rewritten
+    .filter(
+      (e) =>
+        (e.payload === null || e.payload === undefined) &&
+        e.payload_hash !== NULL_PAYLOAD_HASH,
+    )
+    .map((e) => e.id);
   const compactPayload: CompactRecordPayload = {
     previousHeadHash,
     entriesRewritten,
     erasedCount,
+    erasedIds,
     compactedAt,
   };
   const compactId =
@@ -250,17 +317,65 @@ export function planCompaction(
 }
 
 /**
+ * Collect erasure authorizations from `erase` and `compact` records: which
+ * entry ids a later chain record vouches for having been legitimately nulled.
+ * erase records additionally pin the payload_hash they nulled, so a record
+ * cannot be repurposed to bless a different entry's erasure.
+ */
+function collectEraseAuthorizations(
+  entries: readonly OplogEntry[],
+): Map<number, Array<{ byId: number; payloadHash?: string }>> {
+  const authorized = new Map<number, Array<{ byId: number; payloadHash?: string }>>();
+  const add = (id: number, byId: number, payloadHash?: string): void => {
+    const list = authorized.get(id) ?? [];
+    list.push({ byId, ...(payloadHash === undefined ? {} : { payloadHash }) });
+    authorized.set(id, list);
+  };
+  for (const entry of entries) {
+    if (!entry.payload || typeof entry.payload !== "object") continue;
+    if (entry.op === "erase") {
+      const erased = (entry.payload as { erased?: unknown }).erased;
+      if (!Array.isArray(erased)) continue;
+      for (const item of erased) {
+        if (!item || typeof item !== "object") continue;
+        const id = (item as { id?: unknown }).id;
+        const ph = (item as { payload_hash?: unknown }).payload_hash;
+        if (typeof id === "number") {
+          add(id, entry.id, typeof ph === "string" ? ph : undefined);
+        }
+      }
+    } else if (entry.op === "compact") {
+      const ids = (entry.payload as { erasedIds?: unknown }).erasedIds;
+      if (!Array.isArray(ids)) continue;
+      for (const id of ids) {
+        if (typeof id === "number") add(id, entry.id);
+      }
+    }
+  }
+  return authorized;
+}
+
+/**
  * Walk an ordered list of oplog entries and confirm the chain is intact:
  * ids strictly increasing, each entry's prev_hash equal to the prior entry's
  * hash (genesis links to GENESIS_PREV_HASH), and each entry's hash matching a
  * fresh recomputation under that entry's version. For v2 entries a present
  * (non-null) payload must additionally match payload_hash — otherwise an
  * in-place payload edit would go undetected (the entry hash only commits to
- * payload_hash). A null v2 payload is legitimate (erased, or null at write
- * time) and is NOT recomputed. Returns the id of the first broken entry or
- * null.
+ * payload_hash).
+ *
+ * A null v2 payload is only legitimate when either (a) it was null at write
+ * time (payload_hash is the null sentinel — deletes), or (b) a LATER chain
+ * record authorizes the erasure: an `erase` record listing this entry's
+ * id + payload_hash, or a `compact` record whose erasedIds include it. An
+ * unauthorized null — an attacker with db access silently destroying a
+ * payload — breaks the chain at that entry. Chains erased by a pre-
+ * authorization memwarden fail verification for the same reason; a one-time
+ * `memwarden compact` re-anchors them (its record lists every erased id).
+ * Returns the id of the first broken entry or null.
  */
 export function verifyChain(entries: readonly OplogEntry[]): number | null {
+  const authorized = collectEraseAuthorizations(entries);
   let expectedPrev = GENESIS_PREV_HASH;
   let lastId = -Infinity;
   for (const entry of entries) {
@@ -275,6 +390,17 @@ export function verifyChain(entries: readonly OplogEntry[]): number | null {
         hashPayload(entry.payload) !== entry.payload_hash
       ) {
         return entry.id;
+      }
+      if (
+        (entry.payload === null || entry.payload === undefined) &&
+        entry.payload_hash !== NULL_PAYLOAD_HASH &&
+        !(authorized.get(entry.id) ?? []).some(
+          (a) =>
+            a.byId > entry.id &&
+            (a.payloadHash === undefined || a.payloadHash === entry.payload_hash),
+        )
+      ) {
+        return entry.id; // erased with no authorizing erase/compact record
       }
       recomputed = hashOplogEntryV2({
         id: entry.id,

@@ -29,6 +29,8 @@ import { StoreLibsql } from "../src/state/store-libsql.js";
 import {
   COMPACT_KEY,
   COMPACT_SCOPE,
+  ERASE_KEY,
+  ERASE_SCOPE,
   GENESIS_PREV_HASH,
   NULL_PAYLOAD_HASH,
   hashOplogEntry,
@@ -95,11 +97,58 @@ describe("chain v2: pure verification", () => {
     expect(verifyChain([e1, e2, e3, e4])).toBeNull();
   });
 
-  it("an ERASED v2 entry (payload null, payload_hash kept) still verifies", () => {
+  it("an UNAUTHORIZED null v2 payload BREAKS the chain (F4: silent nulling detected)", () => {
+    // Pre-F4 this verified unconditionally: anyone with db access could null
+    // any payload and the chain stayed green. Now a content-committed null
+    // needs a later erase/compact record that authorizes it.
     const e1 = v2Entry(1, "set", "s", "a", { secret: "needle" }, GENESIS_PREV_HASH);
     const e2 = v2Entry(2, "delete", "s", "a", null, e1.hash);
     const erased: OplogEntry = { ...e1, payload: null }; // payload_hash intact
-    expect(verifyChain([erased, e2])).toBeNull();
+    expect(verifyChain([erased, e2])).toBe(1);
+    // ... while a write-time null (delete: sentinel payload_hash) is fine.
+    expect(verifyChain([e1, e2])).toBeNull();
+  });
+
+  it("an ERASED v2 entry verifies when a LATER erase record authorizes it (id + payload_hash)", () => {
+    const e1 = v2Entry(1, "set", "s", "a", { secret: "needle" }, GENESIS_PREV_HASH);
+    const e2 = v2Entry(2, "delete", "s", "a", null, e1.hash);
+    const authorize = (erased: Array<{ id: number; payload_hash: string }>) =>
+      v2Entry(3, "erase", ERASE_SCOPE, ERASE_KEY, { scope: "s", key: "a", erased }, e2.hash);
+
+    const ok = authorize([{ id: 1, payload_hash: e1.payload_hash as string }]);
+    expect(verifyChain([{ ...e1, payload: null }, e2, ok])).toBeNull();
+
+    // an erase record naming a DIFFERENT id authorizes nothing
+    const wrongId = authorize([{ id: 99, payload_hash: e1.payload_hash as string }]);
+    expect(verifyChain([{ ...e1, payload: null }, e2, wrongId])).toBe(1);
+
+    // a mismatched payload_hash in the erase list is rejected too
+    const wrongHash = authorize([{ id: 1, payload_hash: NULL_PAYLOAD_HASH }]);
+    expect(verifyChain([{ ...e1, payload: null }, e2, wrongHash])).toBe(1);
+  });
+
+  it("a compact record's erasedIds authorize nulls (the one-time migration re-anchor)", () => {
+    const e1 = v2Entry(1, "set", "s", "a", { secret: "needle" }, GENESIS_PREV_HASH);
+    const e2 = v2Entry(2, "delete", "s", "a", null, e1.hash);
+    const rec = v2Entry(
+      3,
+      "compact",
+      COMPACT_SCOPE,
+      COMPACT_KEY,
+      { previousHeadHash: e2.hash, entriesRewritten: 1, erasedCount: 1, erasedIds: [1], compactedAt: "2026-01-05T00:00:00.000Z" },
+      e2.hash,
+    );
+    expect(verifyChain([{ ...e1, payload: null }, e2, rec])).toBeNull();
+    // a LEGACY compact record without erasedIds does not authorize
+    const legacyRec = v2Entry(
+      3,
+      "compact",
+      COMPACT_SCOPE,
+      COMPACT_KEY,
+      { previousHeadHash: e2.hash, entriesRewritten: 1, erasedCount: 1, compactedAt: "2026-01-05T00:00:00.000Z" },
+      e2.hash,
+    );
+    expect(verifyChain([{ ...e1, payload: null }, e2, legacyRec])).toBe(1);
   });
 
   it("nulling a v1 payload BREAKS the chain at that entry (why erase refuses v1)", () => {
@@ -207,6 +256,42 @@ for (const { name, make } of factories) {
         expect(await s.eraseOplogPayloads(SCOPE, "a")).toEqual({ erased: 1 });
         expect(await s.eraseOplogPayloads(SCOPE, "a")).toEqual({ erased: 0 });
         expect(await s.verifyOplog()).toEqual({ ok: true });
+      } finally {
+        await s.close();
+      }
+    });
+
+    it("appends a chain-recorded erase entry authorizing exactly the nulled ids", async () => {
+      const s = make();
+      try {
+        await s.set(SCOPE, "a", { secret: "auth-needle" });
+        await s.set(SCOPE, "keep", { live: true });
+        await s.delete(SCOPE, "a");
+        const before = await s.readOplog();
+        expect(await s.eraseOplogPayloads(SCOPE, "a")).toEqual({ erased: 1 });
+
+        const log = await s.readOplog();
+        expect(log.length).toBe(before.length + 1);
+        const rec = log.at(-1)!;
+        expect(rec.op).toBe("erase");
+        expect(rec.scope).toBe(ERASE_SCOPE);
+        expect(rec.key).toBe(ERASE_KEY);
+        const p = rec.payload as {
+          scope: string;
+          key: string;
+          erased: Array<{ id: number; payload_hash: string }>;
+        };
+        expect(p.scope).toBe(SCOPE);
+        expect(p.key).toBe("a");
+        expect(p.erased).toEqual([
+          { id: before[0]!.id, payload_hash: before[0]!.payload_hash },
+        ]);
+        // the erase record never re-discloses content
+        expect(JSON.stringify(rec)).not.toContain("auth-needle");
+        expect(await s.verifyOplog()).toEqual({ ok: true });
+        // a SECOND erase (nothing left to null) appends no record
+        expect(await s.eraseOplogPayloads(SCOPE, "a")).toEqual({ erased: 0 });
+        expect((await s.readOplog()).length).toBe(log.length);
       } finally {
         await s.close();
       }
@@ -535,6 +620,33 @@ describe("StoreLibsql file db: legacy v1 migration and byte-level erasure", () =
       expect(bytes).toContain("stay-bytes");
     } finally {
       await s.close();
+    }
+  });
+
+  it("an attacker nulling a payload with raw SQL is DETECTED (unauthorized erasure fails verification)", async () => {
+    const path = join(dir, "tamper.db");
+    const s = new StoreLibsql({ url: `file:${path}` });
+    await s.set(SCOPE, "victim", { secret: "silently-nulled" });
+    await s.delete(SCOPE, "victim"); // even a deleted pair: nulling without the store is unauthorized
+    expect(await s.verifyOplog()).toEqual({ ok: true });
+    await s.close();
+
+    const c = createClient({ url: `file:${path}` });
+    await c.execute({
+      sql: `UPDATE oplog SET payload = NULL WHERE scope = ? AND key = ? AND payload IS NOT NULL`,
+      args: [SCOPE, "victim"],
+    });
+    c.close();
+
+    const s2 = new StoreLibsql({ url: `file:${path}` });
+    try {
+      const v = await s2.verifyOplog();
+      expect(v.ok).toBe(false);
+      // a subsequent compact re-anchors the chain (erasedIds authorize the null)
+      await s2.compactOplog();
+      expect(await s2.verifyOplog()).toEqual({ ok: true });
+    } finally {
+      await s2.close();
     }
   });
 

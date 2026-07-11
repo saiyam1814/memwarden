@@ -162,9 +162,15 @@ memory from the active store, search, recall, and every index, and prints a rece
 oplog entries that recorded the original write and the deletion, plus whole-chain verification.
 An unknown id reports failure honestly; there is no `{deleted: 0, success: true}` theater here.
 
-**Erasure without breaking the chain.** Oplog entries commit to the SHA-256 *of* their content
-(chain v2), not the content itself — so the content can be nulled in place and every hash still
-verifies. `memwarden forget <id> --erase` deletes the memory AND erases its content from the
+**Erasure without breaking the chain — and only *authorized* erasure.** Oplog entries commit to
+the SHA-256 *of* their content (chain v2), not the content itself — so the content can be nulled
+in place and every hash still verifies. Every erasure is itself chain-recorded: the store appends
+an `erase` entry listing exactly which entry ids (and their content hashes) were nulled, and
+verification **rejects any nulled payload that no later `erase`/`compact` record vouches for** —
+someone with database access who silently nulls a payload breaks the chain instead of hiding
+behind it. (Chains erased by memwarden versions before this rule fail verification for the same
+reason; a one-time `memwarden compact` re-anchors them — its record authorizes every erased id.)
+`memwarden forget <id> --erase` deletes the memory AND erases its content from the
 oplog; the receipt says `contentErased: true` and you can grep the database file yourself to
 confirm the bytes are gone (SQLite `secure_delete` is on, and the WAL is checkpointed).
 `memwarden compact [--dry-run]` erases every *already-forgotten* memory in one pass, migrates

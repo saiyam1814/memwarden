@@ -39,6 +39,7 @@ import {
 } from "./store.js";
 import {
   GENESIS_PREV_HASH,
+  buildEraseRecord,
   hashOplogEntryV2,
   hashPayload,
   planCompaction,
@@ -276,15 +277,63 @@ export class StoreLibsql implements StateStore {
       const v1Count = Number(v1.rows[0]?.n ?? 0);
       if (v1Count > 0) return { erased: 0, refused: "v1-entries", v1Count };
 
-      const res = await this.client.execute({
-        sql: `UPDATE oplog SET payload = NULL
-              WHERE scope = ? AND key = ? AND payload IS NOT NULL`,
+      // Which rows are about to be nulled — their ids + payload_hashes go
+      // into a chain-recorded `erase` entry so verifyChain can tell THIS
+      // authorized erasure from an attacker silently nulling a payload.
+      const targets = await this.client.execute({
+        sql: `SELECT id, payload_hash FROM oplog
+              WHERE scope = ? AND key = ? AND payload IS NOT NULL ORDER BY id ASC`,
         args: [scope, key],
       });
+      if (targets.rows.length === 0) return { erased: 0 };
+      const erased = targets.rows.map((r) => ({
+        id: Number(r.id),
+        payload_hash: String(r.payload_hash),
+      }));
+
+      const tail = await this.client.execute(
+        `SELECT id, hash FROM oplog ORDER BY id DESC LIMIT 1`,
+      );
+      const tailRow = tail.rows[0]!; // targets exist, so the log is non-empty
+      const rec = buildEraseRecord({
+        id: Number(tailRow.id) + 1,
+        ts: new Date().toISOString(),
+        prev_hash: String(tailRow.hash),
+        payload: { scope, key, erased },
+      });
+
+      // One batch = one transaction: the nulling and its authorization record
+      // land together, or neither does — a crash can never leave the chain
+      // with unauthorized (verification-breaking) nulls.
+      await this.client.batch(
+        [
+          {
+            sql: `UPDATE oplog SET payload = NULL
+                  WHERE scope = ? AND key = ? AND payload IS NOT NULL`,
+            args: [scope, key],
+          },
+          {
+            sql: `INSERT INTO oplog (id, ts, op, scope, key, payload, prev_hash, hash, v, payload_hash)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, 2, ?)`,
+            args: [
+              rec.id,
+              rec.ts,
+              rec.op,
+              rec.scope,
+              rec.key,
+              encode(rec.payload),
+              rec.prev_hash,
+              rec.hash,
+              rec.payload_hash,
+            ],
+          },
+        ],
+        "write",
+      );
       // Flush the WAL so the erased bytes do not linger in the -wal file
       // (secure_delete handles the freed bytes inside the main db pages).
       await this.checkpointWal();
-      return { erased: Number(res.rowsAffected ?? 0) };
+      return { erased: erased.length };
     });
   }
 
