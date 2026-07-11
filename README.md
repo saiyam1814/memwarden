@@ -298,24 +298,26 @@ Once it is up, you never touch it.
 
 ## The numbers
 
-Measured on this machine with the real on-device model (`all-MiniLM-L6-v2`), 30 coding
-memories, 14 **paraphrased** queries (worded differently than the answers). Reproduce with
-`npm run benchmark`:
+Measured on this machine with the real on-device model (`all-MiniLM-L6-v2`): 30 labelled
+coding memories buried in **2,000 plausible distractor memories** (2,030 total), 14
+**paraphrased** queries (worded differently than the answers), and the compressed index
+running with **no exact rescoring** — pure quantized codes, nothing retained to fall back
+on. Reproduce with `npm run benchmark`:
 
-| Retrieval (gold answer in top-k) | R@5 | R@10 |
-| --- | --- | --- |
-| Full-precision vectors | 100% | 100% |
-| **TurboQuant (4-bit, compressed)** | **100%** | **100%** |
-| Keyword search (lexical baseline) | 71% | 79% |
+| Retrieval (gold answer in top-k) | R@1 | R@5 | R@10 |
+| --- | --- | --- | --- |
+| Full-precision vectors | 57% | 79% | 86% |
+| **TurboQuant (4-bit, no rescore)** | **57%** | **79%** | **86%** |
+| Keyword search (lexical baseline) | 7% | 57% | 57% |
 
-- **Compression costs zero recall** — TurboQuant matches full-precision exactly.
-- **Meaning beats keywords by ~25 points** — paraphrased questions that share no words with
-  the answer still resolve.
-- **5.9× smaller** vectors (384-dim @ 4-bit; ~11× at 2-bit), **~1ms** per search.
-
-> The 100% figures are on a small, clean corpus. The point is that compression is free
-> (quantized == full-precision) and semantic recall beats lexical. Larger, noisier corpora
-> land below 100%, but the relationship holds.
+- **At this scale, compression costs nothing** — pure 4-bit codes match full precision on
+  every metric, at 5.9× smaller vectors (384-dim @ 4-bit; ~11× at 2-bit).
+- **Meaning beats keywords** — +22 points R@5, +50 points R@1, on questions that share no
+  words with the answer.
+- Scaling honestly: at 10,000 distractors the pure-code index gives up ~7 points of R@10
+  versus full precision; enabling top-32 exact rescoring restores exact parity but keeps
+  full vectors resident (accuracy back, memory saving gone). Run
+  `npx tsx benchmark/recall.ts --distractors 10000` to see it yourself.
 
 ## What it does
 

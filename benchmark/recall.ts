@@ -1,16 +1,22 @@
 //
 // memwarden recall benchmark. Runs the REAL on-device embedding model
-// (all-MiniLM-L6-v2) over a small coding-memory corpus whose queries are
-// phrased with DIFFERENT words than the answers, so it measures semantic
-// recall, not keyword overlap. Reports:
+// (all-MiniLM-L6-v2) over a coding-memory corpus whose queries are phrased
+// with DIFFERENT words than the answers, so it measures semantic recall,
+// not keyword overlap. The 30 labelled memories are buried in thousands of
+// synthetic-but-plausible distractor memories, so recall is measured under
+// competition — a 30-doc corpus would make every method look perfect.
 //
-//   - recall@k for full-precision vs TurboQuant (does compression hurt?)
-//   - recall@k for a lexical baseline (does meaning-search beat keywords?)
-//   - compression ratio and search latency
+// Reports, per configuration:
+//   - full-precision vectors (the accuracy ceiling)
+//   - TurboQuant 4-bit, NO rescoring — pure codes, the honest compressed
+//     number (this is what "16x smaller" actually costs)
+//   - TurboQuant 4-bit + top-32 exact rescore — keeps full vectors around,
+//     so it trades the memory saving back for accuracy
+//   - lexical baseline (does meaning-search beat keywords?)
 //
-// Run: npx tsx benchmark/recall.ts
+// Run: npx tsx benchmark/recall.ts [--distractors N]   (default 2000)
 // Honest by construction: same embeddings feed every index; ground truth is
-// the labelled gold answer per query.
+// the labelled gold answer per query; distractors are deterministic.
 
 import { VectorIndex } from "../src/functions/vector-index.js";
 import { QuantizedVectorIndex } from "../src/functions/quantized-vector-index.js";
@@ -73,11 +79,26 @@ const QUERIES: Array<{ q: string; gold: string }> = [
   { q: "keep continuous integration installs quick", gold: "ci-cache" },
 ];
 
-function recallAtK(
-  ranked: string[][],
-  golds: string[],
-  k: number,
-): number {
+// Deterministic distractor memories: plausible engineering notes assembled
+// combinatorially. They share vocabulary and register with the gold corpus
+// (that is the point — easy distractors prove nothing) but none states a
+// gold answer's fact.
+const D_VERBS = ["bumped", "pinned", "renamed", "refactored", "documented", "deprecated", "profiled", "instrumented", "containerized", "parallelized"];
+const D_NOUNS = ["the billing worker", "the notification service", "the search indexer", "the image resizer", "the export pipeline", "the admin dashboard", "the metrics collector", "the session store", "the email templater", "the feature-flag client", "the audit logger", "the retry wrapper", "the sitemap generator", "the avatar uploader", "the changelog script", "the geo lookup", "the pdf renderer", "the cron runner", "the tag suggester", "the currency converter"];
+const D_TAILS = ["after the quarterly dependency sweep", "to unblock the staging deploy", "while chasing a flaky alert", "as part of the monorepo split", "before the compliance review", "to cut cold-start time", "during the on-call handoff", "for the multi-region rollout", "when the vendor changed their SLA", "after profiling showed it was hot"];
+
+function distractors(n: number): Doc[] {
+  const docs: Doc[] = [];
+  for (let i = 0; i < n; i++) {
+    const v = D_VERBS[i % D_VERBS.length]!;
+    const s = D_NOUNS[Math.floor(i / D_VERBS.length) % D_NOUNS.length]!;
+    const t = D_TAILS[Math.floor(i / (D_VERBS.length * D_NOUNS.length)) % D_TAILS.length]!;
+    docs.push({ id: `x-${i}`, text: `${v} ${s} ${t} (note ${i})` });
+  }
+  return docs;
+}
+
+function recallAtK(ranked: string[][], golds: string[], k: number): number {
   let hits = 0;
   for (let i = 0; i < ranked.length; i++) {
     if (ranked[i]!.slice(0, k).includes(golds[i]!)) hits++;
@@ -86,73 +107,116 @@ function recallAtK(
 }
 
 // Crude lexical baseline: rank by shared lowercased word count.
-function lexicalRank(query: string, k: number): string[] {
+function lexicalRank(docs: Doc[], query: string, k: number): string[] {
   const qWords = new Set(query.toLowerCase().split(/\W+/).filter(Boolean));
-  return CORPUS.map((d) => {
-    const dWords = d.text.toLowerCase().split(/\W+/);
-    let overlap = 0;
-    for (const w of dWords) if (qWords.has(w)) overlap++;
-    return { id: d.id, overlap };
-  })
+  return docs
+    .map((d) => {
+      const dWords = d.text.toLowerCase().split(/\W+/);
+      let overlap = 0;
+      for (const w of dWords) if (qWords.has(w)) overlap++;
+      return { id: d.id, overlap };
+    })
     .sort((a, b) => b.overlap - a.overlap)
     .slice(0, k)
     .map((x) => x.id);
 }
 
 async function main(): Promise<void> {
+  const flagIdx = process.argv.indexOf("--distractors");
+  const nDistract =
+    flagIdx >= 0 ? Math.max(0, parseInt(process.argv[flagIdx + 1] ?? "", 10) || 0) : 2000;
+  const docs: Doc[] = [...CORPUS, ...distractors(nDistract)];
+
   const provider = new LocalEmbeddingProvider();
   process.stdout.write("loading embedding model (first run downloads ~23MB)… ");
   const t0 = Date.now();
   await provider.warmup();
   console.log(`ready in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 
+  process.stdout.write(`embedding ${docs.length} memories + ${QUERIES.length} queries… `);
   const tEmbed = Date.now();
-  const docVecs = await provider.embedBatch(CORPUS.map((d) => d.text));
+  const docVecs: Float32Array[] = [];
+  for (let i = 0; i < docs.length; i += 256) {
+    docVecs.push(...(await provider.embedBatch(docs.slice(i, i + 256).map((d) => d.text))));
+  }
   const queryVecs = await provider.embedBatch(QUERIES.map((q) => q.q));
   const embedMs = Date.now() - tEmbed;
   const dims = provider.dimensions;
+  console.log(`${(embedMs / 1000).toFixed(1)}s`);
 
   const full = new VectorIndex();
-  const quant = new QuantizedVectorIndex({
+  // The honest compressed configuration: codes only, nothing retained to
+  // rescore against. This is the number the compression claim must survive.
+  const quantPure = new QuantizedVectorIndex({
     dims,
     bits: 4,
     seed: "memwarden-tq-v1",
-    rescoreDepth: 100,
+    rescoreDepth: 0,
   });
-  CORPUS.forEach((d, i) => {
+  // The hybrid configuration: quantized candidate scan + exact top-32
+  // rescore. Full vectors stay resident, so it buys accuracy, not memory.
+  const quantRescore = new QuantizedVectorIndex({
+    dims,
+    bits: 4,
+    seed: "memwarden-tq-v1",
+    rescoreDepth: 32,
+  });
+  docs.forEach((d, i) => {
     full.add(d.id, "s", docVecs[i]!);
-    quant.add(d.id, "s", docVecs[i]!);
+    quantPure.add(d.id, "s", docVecs[i]!);
+    quantRescore.add(d.id, "s", docVecs[i]!);
   });
 
   const golds = QUERIES.map((q) => q.gold);
-  const fullRanked: string[][] = [];
-  const quantRanked: string[][] = [];
-  const lexRanked: string[][] = [];
-  let searchMs = 0;
+  const ranked = {
+    full: [] as string[][],
+    pure: [] as string[][],
+    rescore: [] as string[][],
+    lex: [] as string[][],
+  };
+  let fullMs = 0;
+  let pureMs = 0;
   queryVecs.forEach((qv, i) => {
-    fullRanked.push(full.search(qv, 10).map((r) => r.obsId));
-    const tq = Date.now();
-    quantRanked.push(quant.search(qv, 10).map((r) => r.obsId));
-    searchMs += Date.now() - tq;
-    lexRanked.push(lexicalRank(QUERIES[i]!.q, 10));
+    let t = Date.now();
+    ranked.full.push(full.search(qv, 10).map((r) => r.obsId));
+    fullMs += Date.now() - t;
+    t = Date.now();
+    ranked.pure.push(quantPure.search(qv, 10).map((r) => r.obsId));
+    pureMs += Date.now() - t;
+    ranked.rescore.push(quantRescore.search(qv, 10).map((r) => r.obsId));
+    ranked.lex.push(lexicalRank(docs, QUERIES[i]!.q, 10));
   });
 
-  // Compression ratio for the quant index.
-  const p = quant.params;
+  // Compression ratio for the pure-code index.
+  const p = quantPure.params;
   const fullBytes = p.dims * 4;
   const codeBytes = Math.ceil((p.paddedDims * p.bits) / 8) + 4;
 
   const pct = (x: number) => (x * 100).toFixed(1) + "%";
-  console.log("\n  memwarden recall benchmark — all-MiniLM-L6-v2, " + CORPUS.length + " memories, " + QUERIES.length + " paraphrased queries\n");
+  const row = (name: string, r: string[][]) =>
+    console.log(
+      `    ${name.padEnd(30)} R@1 ${pct(recallAtK(r, golds, 1)).padStart(6)}   R@5 ${pct(recallAtK(r, golds, 5)).padStart(6)}   R@10 ${pct(recallAtK(r, golds, 10)).padStart(6)}`,
+    );
+
+  console.log(
+    `\n  memwarden recall benchmark — all-MiniLM-L6-v2, ${CORPUS.length} labelled memories buried in ${nDistract} distractors (${docs.length} total), ${QUERIES.length} paraphrased queries\n`,
+  );
   console.log("  retrieval (gold answer in top-k):");
-  console.log(`    full-precision   R@5 ${pct(recallAtK(fullRanked, golds, 5))}   R@10 ${pct(recallAtK(fullRanked, golds, 10))}`);
-  console.log(`    TurboQuant 4-bit R@5 ${pct(recallAtK(quantRanked, golds, 5))}   R@10 ${pct(recallAtK(quantRanked, golds, 10))}`);
-  console.log(`    lexical baseline R@5 ${pct(recallAtK(lexRanked, golds, 5))}   R@10 ${pct(recallAtK(lexRanked, golds, 10))}`);
-  console.log("\n  compression:");
-  console.log(`    ${fullBytes}B full -> ${codeBytes}B TurboQuant per vector  (${(fullBytes / codeBytes).toFixed(1)}x smaller, ${dims} dims @ 4-bit)`);
+  row("full-precision f32", ranked.full);
+  row("TurboQuant 4-bit, no rescore", ranked.pure);
+  row("TurboQuant 4-bit + rescore 32", ranked.rescore);
+  row("lexical baseline", ranked.lex);
+  console.log("\n  compression (no-rescore config; the rescore config keeps full vectors resident):");
+  console.log(
+    `    ${fullBytes}B full -> ${codeBytes}B per vector  (${(fullBytes / codeBytes).toFixed(1)}x smaller, ${dims} dims @ 4-bit)`,
+  );
   console.log("\n  latency:");
-  console.log(`    embed ${CORPUS.length + QUERIES.length} texts in ${embedMs}ms  (${Math.round((CORPUS.length + QUERIES.length) / (embedMs / 1000))}/s)`);
-  console.log(`    search ${QUERIES.length} queries in ${searchMs}ms  (${(searchMs / QUERIES.length).toFixed(2)}ms each)\n`);
+  console.log(
+    `    embed ${docs.length + QUERIES.length} texts in ${(embedMs / 1000).toFixed(1)}s  (${Math.round((docs.length + QUERIES.length) / (embedMs / 1000))}/s)`,
+  );
+  console.log(
+    `    search ${docs.length} vectors: full ${(fullMs / QUERIES.length).toFixed(2)}ms/query, quantized ${(pureMs / QUERIES.length).toFixed(2)}ms/query\n`,
+  );
 }
 
 main().catch((err) => {

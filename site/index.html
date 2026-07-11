@@ -305,16 +305,20 @@ npm test 2>&1 | npx memwarden <span class="a">dejafix lookup</span></pre>
 
   <section id="proof">
     <h2>Measured, not claimed</h2>
-    <p class="lead">Real on-device model (all-MiniLM-L6-v2), 14 paraphrased queries worded
-      differently than the answers. Reproduce with <code>npm run benchmark</code>.</p>
+    <p class="lead">Real on-device model (all-MiniLM-L6-v2), 30 labelled memories buried in
+      2,000 plausible distractors, 14 paraphrased queries worded differently than the answers,
+      and the compressed index running with <b>no exact rescoring</b> — pure quantized codes.
+      Reproduce with <code>npm run benchmark</code>.</p>
     <table>
-      <tr><th>Retrieval — gold answer in top-k</th><th>R@5</th><th>R@10</th></tr>
-      <tr><td>Full-precision vectors</td><td>100%</td><td>100%</td></tr>
-      <tr><td><b>TurboQuant (4-bit, compressed)</b></td><td class="ok">100%</td><td class="ok">100%</td></tr>
-      <tr><td>Keyword search (lexical baseline)</td><td>71%</td><td>79%</td></tr>
+      <tr><th>Retrieval — gold answer in top-k</th><th>R@1</th><th>R@5</th><th>R@10</th></tr>
+      <tr><td>Full-precision vectors</td><td>57%</td><td>79%</td><td>86%</td></tr>
+      <tr><td><b>TurboQuant (4-bit, no rescore)</b></td><td class="ok">57%</td><td class="ok">79%</td><td class="ok">86%</td></tr>
+      <tr><td>Keyword search (lexical baseline)</td><td>7%</td><td>57%</td><td>57%</td></tr>
     </table>
-    <p class="note">100% is on a small, clean corpus. The point: compression is free (quantized
-      == full-precision) and semantic recall beats lexical. 303 tests, including a Verified Recall
+    <p class="note">At this scale pure 4-bit codes match full precision on every metric at 5.9×
+      smaller vectors; at 10,000 distractors they give up ~7 points of R@10 unless exact
+      rescoring is enabled (which keeps full vectors resident) — run the benchmark with
+      <code>--distractors 10000</code> to see both sides. 303 tests, including a Verified Recall
       suite, the Déjà Fix engine, HTTP security (auth / host firewall / content-type), and a
       cross-tool reliability harness that proves memory captured in one tool is recalled in
       another.</p>
