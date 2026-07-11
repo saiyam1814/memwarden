@@ -261,6 +261,107 @@ describe("Verified Recall firewall (safe_only)", () => {
     expect(r.results.length).toBe(1);
   });
 
+  it("labels every balanced-recall result with its trust verdict (narrative)", async () => {
+    // Balanced recall injects sourced/unsourced memory BY DESIGN — but the
+    // promise (README, SECURITY.md) is that it arrives LABELED. Every item
+    // must carry the verdict the firewall already computed.
+    const root = repo();
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "src", "auth.ts"), "// bearer auth tokens, 1h TTL\n");
+    // verified: file-backed, hash still matches
+    await observe(root, "src/auth.ts", "auth uses bearer auth tokens with a 1h TTL");
+    // sourced (unverified): command-only evidence, no files
+    await sdk.trigger({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "post_tool_use",
+        sessionId: "s1",
+        project: root,
+        cwd: root,
+        timestamp: new Date().toISOString(),
+        data: {
+          tool_name: "Bash",
+          tool_input: { command: "true" },
+          tool_output: "ops said bearer auth tokens rotate weekly",
+        },
+      },
+    });
+    // unsourced: a bare prompt, no evidence at all
+    await sdk.trigger({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "prompt_submit",
+        sessionId: "s1",
+        project: root,
+        cwd: root,
+        timestamp: new Date().toISOString(),
+        data: { prompt: "please investigate the bearer auth tokens setup" },
+      },
+    });
+
+    const r = (await sdk.trigger({
+      function_id: "mem::search",
+      payload: {
+        query: "bearer auth tokens",
+        cwd: root,
+        project: root,
+        limit: 10,
+        safe_only: true,
+        format: "narrative",
+      },
+    })) as { results: Array<{ trust?: string }>; text: string };
+
+    expect(r.results.length).toBe(3);
+    for (const item of r.results) {
+      expect(["verified", "sourced", "unsourced"]).toContain(item.trust);
+    }
+    // The packed narrative text — what actually gets injected — carries the
+    // labels inline.
+    expect(r.text).toContain("[verified]");
+    expect(r.text).toContain("[sourced]");
+    expect(r.text).toContain("[unsourced]");
+  });
+
+  it("labels compact-format balanced recall too", async () => {
+    const root = repo();
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "src", "auth.ts"), "// bearer auth tokens\n");
+    await observe(root, "src/auth.ts", "auth uses bearer auth tokens");
+    const r = (await sdk.trigger({
+      function_id: "mem::search",
+      payload: {
+        query: "bearer auth tokens",
+        cwd: root,
+        project: root,
+        limit: 10,
+        safe_only: true,
+        format: "compact",
+      },
+    })) as { results: Array<{ trust?: string }> };
+    expect(r.results.length).toBe(1);
+    expect(r.results[0]!.trust).toBe("verified");
+  });
+
+  it("plain (non-safe_only) search stays unlabeled — no verdict was computed", async () => {
+    const root = repo();
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "src", "auth.ts"), "// bearer auth tokens\n");
+    await observe(root, "src/auth.ts", "auth uses bearer auth tokens");
+    const r = (await sdk.trigger({
+      function_id: "mem::search",
+      payload: {
+        query: "bearer auth tokens",
+        cwd: root,
+        project: root,
+        limit: 10,
+        format: "narrative",
+      },
+    })) as { results: Array<{ trust?: string }>; text: string };
+    expect(r.results.length).toBe(1);
+    expect(r.results[0]!.trust).toBeUndefined();
+    expect(r.text).not.toContain("[verified]");
+  });
+
   it("does NOT silently drop conflicting memories from safe recall (both are kept, no conflicts_dropped)", async () => {
     // A trust tool must never lose a correct fact on a fuzzy contradiction
     // heuristic. safe_only only firewalls STALE memory; conflicting-but-fresh

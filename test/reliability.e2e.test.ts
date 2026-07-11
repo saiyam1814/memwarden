@@ -179,16 +179,27 @@ describe("cross-door: hook capture -> proxy recall", () => {
     });
 
     // Door A: a later model call through the proxy should get that memory
-    // injected as a system message.
+    // injected — into the USER turn with untrusted-data framing, never a
+    // system message (memory must not carry instruction-level authority).
     const up = await mockUpstream("ok");
     const proxyPort = await startProxy(up.port);
     await chat(proxyPort, "how do deploys work?");
 
-    const systems = (JSON.parse(up.saw()).messages as Array<{ role: string; content: string }>)
+    const messages = JSON.parse(up.saw()).messages as Array<{
+      role: string;
+      content: string;
+    }>;
+    const systems = messages
       .filter((m) => m.role === "system")
       .map((m) => m.content)
       .join("\n");
-    expect(systems.toLowerCase()).toContain("canary");
+    expect(systems.toLowerCase()).not.toContain("canary");
+    const users = messages
+      .filter((m) => m.role === "user")
+      .map((m) => m.content)
+      .join("\n");
+    expect(users.toLowerCase()).toContain("canary");
+    expect(users).toContain("<memwarden-memory>");
   });
 });
 

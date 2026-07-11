@@ -8,7 +8,6 @@
 
 import type { ISdk } from "../kernel/index.js";
 import type {
-  CompactSearchResult,
   CompressedObservation,
   Memory,
   SearchResult,
@@ -33,7 +32,7 @@ import {
 import { memoryToObservation } from "./memory-utils.js";
 import { canonicalizePath } from "./paths.js";
 import { gitProjectKey } from "./git-identity.js";
-import { classifyProvenance } from "./verify.js";
+import { classifyProvenance, type Verdict } from "./verify.js";
 import { recordAccessBatch } from "./access-tracker.js";
 import { loadVectorIndex, persistVectorIndex } from "./vector-persistence.js";
 import { logger } from "./logger.js";
@@ -443,6 +442,83 @@ export async function buildScopedAllowedIds(
   return { allowed, sessions };
 }
 
+// --- recall serialization (labeled) ---------------------------------
+//
+// Balanced recall injects sourced/unsourced memory BY DESIGN, and the
+// promise (README, SECURITY.md) is that it arrives LABELED. This is the ONE
+// serializer for recall output — compact and narrative both go through it —
+// and it attaches the trust verdict the safe_only firewall pass already
+// computed (never reclassified a second time). `trust` is absent only when
+// no verdict exists, i.e. a plain non-safe_only search.
+
+export type TrustLabel = "verified" | "sourced" | "unsourced" | "stale";
+
+export function trustLabelOf(verdict: Verdict): TrustLabel {
+  switch (verdict.status) {
+    case "verified":
+      return "verified";
+    case "sourced_unverified":
+      return "sourced";
+    case "stale":
+      return "stale";
+    case "unsourced":
+      return "unsourced";
+  }
+}
+
+interface RecallItemBase {
+  obsId: string;
+  sessionId: string;
+  title: string;
+  score: number;
+  timestamp: string;
+  trust?: TrustLabel;
+}
+export interface CompactRecallItem extends RecallItemBase {
+  type: CompressedObservation["type"];
+}
+export interface NarrativeRecallItem extends RecallItemBase {
+  narrative: string;
+}
+
+export function serializeRecallItem(
+  r: SearchResult,
+  format: "compact",
+  verdict?: Verdict,
+): CompactRecallItem;
+export function serializeRecallItem(
+  r: SearchResult,
+  format: "narrative",
+  verdict?: Verdict,
+): NarrativeRecallItem;
+export function serializeRecallItem(
+  r: SearchResult,
+  format: "compact" | "narrative",
+  verdict?: Verdict,
+): CompactRecallItem | NarrativeRecallItem {
+  const base: RecallItemBase = {
+    obsId: r.observation.id,
+    sessionId: r.sessionId,
+    title: r.observation.title,
+    score: r.score,
+    timestamp: r.observation.timestamp,
+    ...(verdict ? { trust: trustLabelOf(verdict) } : {}),
+  };
+  return format === "compact"
+    ? { ...base, type: r.observation.type }
+    : { ...base, narrative: r.observation.narrative };
+}
+
+/** One narrative line, label first — the text surfaces (hooks, proxy, MCP
+ * resume) inject exactly this, so the label travels with the memory. */
+export function formatNarrativeItem(
+  item: NarrativeRecallItem,
+  idx: number,
+): string {
+  const label = item.trust ? `[${item.trust}] ` : "";
+  return `${idx + 1}. ${label}${item.title}\n${item.narrative}`;
+}
+
 export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction(
     "mem::search",
@@ -673,6 +749,9 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         ? Math.min(fetchLimit, Math.max(effectiveLimit * 3, effectiveLimit + 20))
         : effectiveLimit;
       const candidates: typeof results = [];
+      // Verdicts computed by the firewall pass, kept so the serializer can
+      // label recall output without classifying twice.
+      const verdictByObs = new Map<string, Verdict>();
       let staleDropped = 0;
       for (const r of results) {
         if (candidates.length >= candidateTarget) break;
@@ -732,10 +811,11 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
             verdict.status === "stale" ||
             (getRecallPolicy() === "verified-only" &&
               verdict.status !== "verified");
-          if (dropUnderPolicy) {
+          if (dropUnderPolicy || !verdict) {
             staleDropped++;
             continue;
           }
+          verdictByObs.set(r.obsId, verdict);
         }
         candidates.push(r);
       }
@@ -812,14 +892,9 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       };
 
       if (format === "compact") {
-        const compactResults: CompactSearchResult[] = recallResults.map((r) => ({
-          obsId: r.observation.id,
-          sessionId: r.sessionId,
-          title: r.observation.title,
-          type: r.observation.type,
-          score: r.score,
-          timestamp: r.observation.timestamp,
-        }));
+        const compactResults: CompactRecallItem[] = recallResults.map((r) =>
+          serializeRecallItem(r, "compact", verdictByObs.get(r.observation.id)),
+        );
         const packed = applyTokenBudget(compactResults);
         return {
           format,
@@ -831,18 +906,11 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       }
 
       if (format === "narrative") {
-        const narrativeResults = recallResults.map((r) => ({
-          obsId: r.observation.id,
-          sessionId: r.sessionId,
-          title: r.observation.title,
-          narrative: r.observation.narrative,
-          score: r.score,
-          timestamp: r.observation.timestamp,
-        }));
+        const narrativeResults = recallResults.map((r) =>
+          serializeRecallItem(r, "narrative", verdictByObs.get(r.observation.id)),
+        );
         const packed = applyTokenBudget(narrativeResults);
-        const text = packed.items
-          .map((r, idxN) => `${idxN + 1}. ${r.title}\n${r.narrative}`)
-          .join("\n\n");
+        const text = packed.items.map(formatNarrativeItem).join("\n\n");
         return {
           format,
           results: packed.items,
