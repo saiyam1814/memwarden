@@ -123,6 +123,11 @@ export class QuantizedVectorIndex {
     lloydMaxLevels(opts.bits);
   }
 
+  /** See VectorBackend.backendLabel: the portable TS TurboQuant fallback. */
+  get backendLabel(): string {
+    return `typescript/turboquant-${this.params.bits}bit`;
+  }
+
   add(obsId: string, sessionId: string, embedding: Float32Array): void {
     if (embedding.length !== this.params.dims) return; // soft-skip, guarded upstream
     const rotated = rotate(

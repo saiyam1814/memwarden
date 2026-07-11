@@ -38,6 +38,7 @@
     "build": "tsc",
     "prepack": "npm run build",
     "benchmark": "tsx benchmark/recall.ts",
+    "benchmark:backends": "tsx benchmark/backends.ts",
     "demo:trust": "tsx demo/trust.ts",
     "test": "vitest run",
     "test:watch": "vitest",

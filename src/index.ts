@@ -20,10 +20,9 @@ import {
   registerCoreFunctions,
   setEmbeddingProvider,
   setVectorIndex,
-  makeVectorIndex,
+  makeConfiguredVectorIndex,
 } from "./functions/index.js";
 import {
-  isQuantizedVectorEnabled,
   isProxyEnabled,
   getUpstreamUrl,
   getUpstreamKey,
@@ -230,11 +229,14 @@ async function main(): Promise<void> {
     const available = await LocalEmbeddingProvider.isAvailable();
     if (available) {
       setEmbeddingProvider(embProvider);
-      setVectorIndex(makeVectorIndex(embProvider.dimensions));
-      const quantized = isQuantizedVectorEnabled();
+      // Honors MEMWARDEN_VECTOR_BACKEND (default typescript); a failed
+      // native load logs and falls back, so the label printed below is
+      // always the engine that will actually serve search.
+      const vectorIndex = await makeConfiguredVectorIndex(embProvider.dimensions);
+      setVectorIndex(vectorIndex);
       console.log(
         `[memwarden] semantic memory: ${embProvider.name} (${embProvider.dimensions}d), ` +
-          `storage=${quantized ? "TurboQuant-compressed" : "full-precision"} (loading in background)`,
+          `vector backend=${vectorIndex.backendLabel} (loading in background)`,
       );
       const warmable = embProvider as { warmup?: () => Promise<void> };
       if (typeof warmable.warmup === "function") {

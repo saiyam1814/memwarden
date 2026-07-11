@@ -200,6 +200,24 @@ export function getQuantSeed(): string {
   return env("MEMWARDEN_QUANT_SEED") ?? "memwarden-tq-v1";
 }
 
+/**
+ * Which vector engine serves search: "typescript" (the portable TS
+ * TurboQuant/full-precision indexes) or "turbovec" (the optional native
+ * '@memwarden/turbovec' binding around the turbovec crate).
+ *
+ * THE DEFAULT STAYS "typescript" DELIBERATELY: it only flips to native
+ * once the benchmark gate (benchmark/backends.ts — recall drop <= 2 points
+ * vs FP32, allowlist correctness, add/remove/save/load id-set parity)
+ * passes on CI-built prebuilds for every supported platform. Opting in
+ * early is safe — a failed native load logs and falls back to the
+ * TypeScript backend (see search.ts makeConfiguredVectorIndex) — but an
+ * unproven native path must never be the silent default.
+ */
+export function getVectorBackend(): "turbovec" | "typescript" {
+  const raw = (env("MEMWARDEN_VECTOR_BACKEND") ?? "").trim().toLowerCase();
+  return raw === "turbovec" ? "turbovec" : "typescript";
+}
+
 // --- memory proxy (the universal cross-tool layer) -----------------
 //
 // The OpenAI-compatible gateway. Any tool that lets you point at a custom

@@ -6,6 +6,9 @@
 // kept the stable wire contract so existing connectors can
 // talk to memwarden unchanged.
 
+import type { VectorBackend } from "./vector-backend.js";
+export type { VectorBackend, VectorBackendHit } from "./vector-backend.js";
+
 export type HookType =
   | "session_start"
   | "prompt_submit"
@@ -235,25 +238,13 @@ export interface VectorSearchHit {
 }
 
 /**
- * The vector-index surface consumed by search.ts and hybrid-search.ts.
- * Satisfied structurally by both VectorIndex (full-precision, the default)
- * and QuantizedVectorIndex (TurboQuant codes, behind MEMWARDEN_QUANT_VECTOR).
+ * The vector-index surface consumed by search.ts and vector-persistence.ts.
+ * The contract itself lives in vector-backend.ts (VectorBackend); this alias
+ * keeps the historical name that callers and tests import. Satisfied by
+ * VectorIndex (full-precision), QuantizedVectorIndex (TS TurboQuant codes)
+ * and TurbovecBackend (optional native turbovec crate).
  */
-export interface VectorIndexLike {
-  add(obsId: string, sessionId: string, embedding: Float32Array): void;
-  remove(obsId: string): void;
-  has(obsId: string): boolean;
-  /** Snapshot of the stored obsIds; used for restore reconciliation. */
-  ids(): string[];
-  search(query: Float32Array, limit?: number): VectorSearchHit[];
-  readonly size: number;
-  clear(): void;
-  validateDimensions(expected: number): {
-    mismatches: Array<{ obsId: string; dim: number }>;
-    seenDimensions: Set<number>;
-  };
-  serialize(): string;
-}
+export interface VectorIndexLike extends VectorBackend {}
 
 export interface HybridSearchResult {
   observation: CompressedObservation;

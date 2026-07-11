@@ -354,6 +354,9 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
         memories: memories.length,
         sessions: sessions.length,
         vectors: vec?.size ?? 0,
+        // Which engine actually serves vector search (VectorBackend label);
+        // null when the vector stream is off (BM25-only).
+        vectorBackend: vec?.backendLabel ?? null,
         embedding: provider
           ? { provider: provider.name, dimensions: provider.dimensions }
           : null,

@@ -42,9 +42,20 @@ export {
   rebuildIndex,
   vectorIndexAddGuarded,
   makeVectorIndex,
+  makeConfiguredVectorIndex,
 } from "./search.js";
 export { QuantizedVectorIndex } from "./quantized-vector-index.js";
 export type { QuantParams } from "./quantized-vector-index.js";
+export type { VectorBackend, VectorBackendHit } from "./vector-backend.js";
+export {
+  TurbovecBackend,
+  createTurbovecBackend,
+  loadNativeTurbovec,
+} from "./turbovec-backend.js";
+export type {
+  NativeTurbovecModule,
+  NativeTurbovecIndex,
+} from "./turbovec-backend.js";
 export { persistVectorIndex, loadVectorIndex } from "./vector-persistence.js";
 export { DedupMap } from "./dedup.js";
 

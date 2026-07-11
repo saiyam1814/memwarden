@@ -828,7 +828,7 @@ function down(rest: string[]): void {
 
 // --- `memwarden status` --------------------------------------------
 
-async function status(): Promise<void> {
+async function status(rest: string[]): Promise<void> {
   const home = homedir();
   const dataDir = process.env.MEMWARDEN_DATA_DIR ?? join(home, ".memwarden");
   const version = (() => {
@@ -842,13 +842,15 @@ async function status(): Promise<void> {
     }
   })();
 
-  console.log(`\nmemwarden status  (v${version})\n`);
+  const asJson = rest.includes("--json");
+  if (!asJson) console.log(`\nmemwarden status  (v${version})\n`);
 
   // daemon + live stats (livez is unauthenticated; stats needs the secret)
   interface StatsBody {
     memories?: number;
     sessions?: number;
     vectors?: number;
+    vectorBackend?: string | null;
     embedding?: { provider: string; dimensions: number } | null;
     compression?: { algorithm: string; bits: number; ratio: number } | null;
   }
@@ -873,6 +875,27 @@ async function status(): Promise<void> {
       // stats stay null; daemon line still prints
     }
   }
+  if (asJson) {
+    // Machine-readable snapshot: the daemon's live stats plus per-tool wired
+    // state (read from each tool's config, not assumed).
+    console.log(
+      JSON.stringify(
+        {
+          version,
+          daemon: { up: daemonUp, url: DAEMON_URL, dataDir },
+          stats,
+          tools: TOOLS.map((t) => ({
+            id: t.id,
+            detected: t.detect(home),
+            state: toolWireState(t, home),
+          })),
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
   console.log(
     `  daemon    ${daemonUp ? "✓ running" : "✗ not running"}  ${DAEMON_URL}  brain: ${dataDir}` +
       (daemonUp && !stats ? "  (stats unavailable — secret mismatch?)" : ""),
@@ -891,10 +914,13 @@ async function status(): Promise<void> {
         ? `  semantic  ✓ ${stats.embedding.provider} (${stats.embedding.dimensions}d)`
         : `  semantic  ✗ lexical-only (BM25) — run 'memwarden up' to install local embeddings`,
     );
+    // The backend label comes from the daemon's live VectorBackend — never a
+    // guess, so a native backend that failed to load shows its TS fallback.
+    const backend = stats.vectorBackend ?? "typescript";
     console.log(
       stats.compression
-        ? `  vectors   ${stats.compression.algorithm} ${stats.compression.bits}-bit, ${stats.compression.ratio}x smaller (typescript backend)`
-        : `  vectors   full-precision (typescript backend)`,
+        ? `  vectors   ${stats.compression.algorithm} ${stats.compression.bits}-bit, ${stats.compression.ratio}x smaller (${backend})`
+        : `  vectors   ${backend}`,
     );
   } else {
     const { LocalEmbeddingProvider } = await import(
@@ -952,7 +978,7 @@ async function main(): Promise<void> {
     case "down":
       return down(rest);
     case "status":
-      return status();
+      return status(rest);
     case "connect":
       return connect(rest);
     case "hook":
@@ -978,7 +1004,7 @@ async function main(): Promise<void> {
         "usage:\n" +
           "  memwarden up [--all] [--url URL] [--secret S]   # start daemon + wire every installed tool\n" +
           "  memwarden down [--all] [--data]                 # stop service; --all unwires every tool, --data deletes the brain\n" +
-          "  memwarden status                                # daemon, semantic recall, per-tool wiring — measured, not assumed\n" +
+          "  memwarden status [--json]                       # daemon, semantic recall, vector backend, per-tool wiring — measured, not assumed\n" +
           "  memwarden connect [claude-code|cursor|cline|windsurf] [--with-hooks] [--url URL] [--secret S]\n" +
           "  memwarden doctor [path] [--all-projects]        # audit this project (or the whole brain)\n" +
           "  memwarden audit <store> [--root repo] [--json] [--html [out.html]]  # audit a FOREIGN store (claude-mem db, CLAUDE.md, Mem0 json)\n" +
