@@ -4,7 +4,7 @@ memwarden's whole thesis is trust, so security reports get priority attention.
 
 ## Reporting
 
-Email saiyam@loft.sh, or use GitHub's private vulnerability reporting on this
+Email saiyam911@gmail.com, or use GitHub's private vulnerability reporting on this
 repository. Please do not open public issues for exploitable problems. You can
 expect an acknowledgment within 72 hours.
 

@@ -10,3 +10,5 @@ dist/
 .DS_Store
 coverage/
 .claude/worktrees/
+# internal launch/marketing assets — kept locally, never published
+launch/
