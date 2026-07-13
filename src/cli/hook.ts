@@ -334,7 +334,7 @@ export async function handleSessionStart(
       // outside the untrusted markers.
       const clean = (s: string): string =>
         s
-          .replace(/[\u0000-\u001f\u007f]+/g, " ")
+          .replace(/[\u0000-\u001f\u007f\u0085\u2028\u2029]+/g, " ")
           .replace(/&/g, "&amp;")
           .replace(/</g, "&lt;")
           .replace(/>/g, "&gt;")

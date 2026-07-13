@@ -423,12 +423,13 @@ async function why(rest: string[]): Promise<void> {
   // terminal escapes or instruction-like lines).
   const showContent = rest.includes("--content");
   const cleanText = (s: string): string =>
-    // strip control chars (incl. ANSI escape intros) but keep newlines, and
-    // defang this surface's own delimiter so printed content cannot close it
+    // strip control chars (ANSI escape intros + Unicode line/para separators)
+    // but keep newlines, and defang this surface's own delimiter —
+    // whitespace-tolerant — so printed content cannot close it
     s
-      .replace(/[\u0000-\u0009\u000b-\u001f\u007f]+/g, " ")
+      .replace(/[\u0000-\u0009\u000b-\u001f\u007f\u0085\u2028\u2029]+/g, " ")
       .replace(
-        /<(\/?)memwarden-refused-content>/gi,
+        /<\s*(\/?)\s*memwarden-refused-content\s*>/gi,
         "&lt;$1memwarden-refused-content&gt;",
       );
   // Single-line variant for metadata (verdict reasons embed repo-controlled

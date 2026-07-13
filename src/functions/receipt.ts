@@ -207,7 +207,10 @@ function wordsOf(text: string): string[] {
 
 interface ContentNeedles {
   shingles: Set<string>;
-  /** Short-but-distinctive whole strings (< SHINGLE_N words, >= 6 chars). */
+  /** Short-but-distinctive whole values (< SHINGLE_N words, >= 6 chars),
+   * stored as NORMALIZED word phrases (`"payment gateway"`) and matched
+   * case/spacing/punctuation-insensitively — a sibling echoing "Payment
+   * Gateway" must not slip past a value captured as "payment gateway". */
   whole: string[];
   /** Distinctive single tokens: digit-bearing (non-year) or long ids —
    * plus every word (>= 3 chars) of a short BODY value like "admin". */
@@ -215,6 +218,11 @@ interface ContentNeedles {
   /** A body value existed that is too short to scan (< 3 chars): residual
    * verification is incomplete and the receipt must not claim clean. */
   limited: boolean;
+}
+
+/** Word-boundary-fenced normalized form for contiguous-phrase matching. */
+function fencedWords(text: string): string {
+  return ` ${wordsOf(text).join(" ")} `;
 }
 
 function isDistinctiveToken(w: string): boolean {
@@ -238,7 +246,10 @@ function needlesOf(obs: Record<string, unknown>): ContentNeedles {
         shingles.add(words.slice(i, i + SHINGLE_N).join(" "));
       }
     } else if (s.trim().length >= 6) {
-      whole.push(s.trim());
+      // Store NORMALIZED (lowercased, punctuation-collapsed) so a case- or
+      // spacing-variant echo in a sibling can't slip past.
+      const phrase = words.join(" ");
+      if (phrase) whole.push(phrase);
     } else if (bodySet.has(s)) {
       // A short BODY value ("admin"): every word >= 3 chars becomes a
       // word-boundary needle; anything shorter cannot be scanned.
@@ -252,8 +263,12 @@ function needlesOf(obs: Record<string, unknown>): ContentNeedles {
 
 function sharesErasedContent(needles: ContentNeedles, text: string): boolean {
   if (!text) return false;
-  for (const w of needles.whole) if (text.includes(w)) return true;
   const words = wordsOf(text);
+  if (needles.whole.length > 0) {
+    // Contiguous normalized-phrase match (case/spacing/punctuation-insensitive).
+    const fenced = fencedWords(text);
+    for (const w of needles.whole) if (fenced.includes(` ${w} `)) return true;
+  }
   if (needles.tokens.size > 0) {
     for (const w of words) if (needles.tokens.has(w)) return true;
   }

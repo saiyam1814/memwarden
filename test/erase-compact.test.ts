@@ -1256,6 +1256,30 @@ describe("residual detection catches SHORT secrets (the PIN 7391 class)", () => 
     expect(r.deleted).toBe(true);
     expect(r.receipt!.contentErased).toBe(true);
   });
+
+  it("a CASE/SPACING-variant echo of a compact value is still caught", async () => {
+    // Compact value (< 5 words -> whole-value tier). Sibling echoes the FULL
+    // phrase with different case/spacing. The whole tier must normalize or
+    // this returns a false clean receipt (the reviewer's Finding 1).
+    const r = await eraseWithSibling(
+      "acmecorp prod cluster",
+      "deploying to Acmecorp  Prod  Cluster today",
+    );
+    expect(r.deleted).toBe(true);
+    expect(r.receipt!.contentErased).toBe(false);
+    expect(r.receipt!.residualScan).toBe("residuals");
+  });
+
+  it("a compact value with only a PARTIAL/absent echo still reports clean", async () => {
+    // The sibling shares a word but not the full phrase — not a residual.
+    const r = await eraseWithSibling(
+      "acmecorp prod cluster",
+      "deploying to the staging cluster today",
+    );
+    expect(r.deleted).toBe(true);
+    expect(r.receipt!.contentErased).toBe(true);
+    expect(r.receipt!.residualScan).toBe("clean");
+  });
 });
 
 describe("residual detection catches short ALPHABETIC values (the admin class)", () => {
