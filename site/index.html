@@ -99,6 +99,8 @@
 
   .flow{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:22px; color:var(--mut); font-size:14.5px}
   .flow b{color:var(--fg)}
+  .diagram{padding:18px}
+  .diagram svg{width:100%; height:auto; display:block}
 
   table{width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; font-size:14.5px}
   th,td{padding:12px 16px; text-align:left; border-bottom:1px solid var(--line)}
@@ -347,10 +349,95 @@ npm test 2>&1 | npx memwarden <span class="a">dejafix lookup</span></pre>
     <h2>How it works</h2>
     <p class="lead">Capture, compress on-device, store with integrity, recall the right slice
       under a token budget. Scoping is by canonical path, so recall never silently misses.</p>
-    <div class="flow">
-      <b>your tool</b> &nbsp;──observe + hash files──▶&nbsp; compress &nbsp;──▶&nbsp; libSQL store + <b>hash-chained oplog</b><br/><br/>
-      &nbsp;&nbsp;MiniLM embed &nbsp;──▶&nbsp; <b>TurboQuant</b> 4-bit codes &nbsp;──▶&nbsp; vector index (native <b>turbovec</b> when its binary loads, TypeScript otherwise)<br/><br/>
-      <b>your tool</b> &nbsp;◀──verified recall──&nbsp; BM25 + vector (RRF), <b>firewalled</b>, packed under a token budget
+    <div class="flow diagram">
+      <svg viewBox="0 0 1040 720" role="img" aria-label="memwarden architecture: agents reach the daemon over hooks, MCP, or the proxy; capture compresses, redacts, and hashes into the store; recall scopes, searches, classifies, and frames firewall-passing memory back to the agent." xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <style>
+            .n{fill:#0f1521;stroke:#243047;stroke-width:1.5;rx:12}
+            .t{fill:#e8edf5;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;font-size:15px;font-weight:600}
+            .ts{fill:#93a0b4;font-family:ui-sans-serif,system-ui,sans-serif;font-size:12px;font-weight:500}
+            .code{font-family:ui-monospace,"SF Mono",Menlo,monospace;fill:#93a0b4;font-size:12px}
+            .lane{font-family:ui-sans-serif,system-ui,sans-serif;font-size:12px;font-weight:700;letter-spacing:.12em}
+            .al{fill:#6b7689;font-family:ui-sans-serif,system-ui,sans-serif;font-size:11.5px}
+          </style>
+          <marker id="ahMut" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="#6b7689"/></marker>
+          <marker id="ahPur" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="#7c6cff"/></marker>
+          <marker id="ahTeal" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="#3ad1c9"/></marker>
+        </defs>
+
+        <!-- Agents -->
+        <rect class="n" x="170" y="24" width="700" height="60" rx="12"/>
+        <text class="t" x="520" y="46" text-anchor="middle">Your agents</text>
+        <text class="code" x="520" y="66" text-anchor="middle">Claude Code · Codex · Cursor · Gemini CLI · Kiro · OpenCode</text>
+
+        <!-- Agents <-> Daemon transport -->
+        <line x1="486" y1="84" x2="486" y2="118" stroke="#6b7689" stroke-width="2" marker-end="url(#ahMut)"/>
+        <line x1="554" y1="118" x2="554" y2="86" stroke="#3ad1c9" stroke-width="2" marker-end="url(#ahTeal)"/>
+        <text class="al" x="474" y="104" text-anchor="end">Hooks · MCP · Proxy</text>
+        <text class="al" x="566" y="104" fill="#3ad1c9">firewall-passing memory</text>
+
+        <!-- Daemon -->
+        <rect class="n" x="356" y="120" width="328" height="58" rx="12" stroke="#7c6cff"/>
+        <text class="t" x="520" y="143" text-anchor="middle">memwarden daemon</text>
+        <text class="code" x="520" y="163" text-anchor="middle">~/.memwarden · one brain, self-healing</text>
+
+        <!-- lane headers -->
+        <text class="lane" x="250" y="212" text-anchor="middle" fill="#7c6cff">CAPTURE</text>
+        <text class="lane" x="790" y="212" text-anchor="middle" fill="#3ad1c9">RECALL</text>
+
+        <!-- Daemon -> capture lane -->
+        <path d="M400 178 C300 200 250 208 250 232" fill="none" stroke="#7c6cff" stroke-width="2" marker-end="url(#ahPur)"/>
+        <!-- recall lane -> Daemon -->
+        <path d="M790 232 C790 200 700 196 640 178" fill="none" stroke="#3ad1c9" stroke-width="2" marker-end="url(#ahTeal)"/>
+        <text class="al" x="946" y="196" text-anchor="end" fill="#3ad1c9">recall policy + framing</text>
+
+        <!-- CAPTURE lane (top -> down) -->
+        <rect class="n" x="110" y="234" width="280" height="54" rx="12"/>
+        <text class="t" x="250" y="256" text-anchor="middle">Compress</text>
+        <text class="ts" x="250" y="275" text-anchor="middle">on-device, no LLM</text>
+
+        <rect class="n" x="110" y="330" width="280" height="54" rx="12"/>
+        <text class="t" x="250" y="352" text-anchor="middle">Redact private data</text>
+        <text class="ts" x="250" y="371" text-anchor="middle">secrets stripped before storage</text>
+
+        <rect class="n" x="110" y="426" width="280" height="54" rx="12"/>
+        <text class="t" x="250" y="448" text-anchor="middle">Hash referenced files</text>
+        <text class="ts" x="250" y="467" text-anchor="middle">SHA-256 provenance</text>
+
+        <line x1="250" y1="288" x2="250" y2="326" stroke="#7c6cff" stroke-width="2" marker-end="url(#ahPur)"/>
+        <line x1="250" y1="384" x2="250" y2="422" stroke="#7c6cff" stroke-width="2" marker-end="url(#ahPur)"/>
+        <path d="M250 480 C250 520 340 528 420 560" fill="none" stroke="#7c6cff" stroke-width="2" marker-end="url(#ahPur)"/>
+
+        <!-- RECALL lane (bottom -> up) -->
+        <rect class="n" x="650" y="426" width="300" height="54" rx="12"/>
+        <text class="t" x="800" y="448" text-anchor="middle">Project scoping</text>
+        <text class="ts" x="800" y="467" text-anchor="middle">canonical path — never silently misses</text>
+
+        <rect class="n" x="650" y="330" width="300" height="54" rx="12"/>
+        <text class="t" x="800" y="352" text-anchor="middle">Hybrid search · BM25 + vector</text>
+        <text class="ts" x="800" y="371" text-anchor="middle">RRF, TurboQuant / native turbovec</text>
+
+        <rect class="n" x="650" y="234" width="300" height="54" rx="12" stroke="#3ad1c9"/>
+        <text class="t" x="800" y="255" text-anchor="middle">Provenance classifier</text>
+        <text class="ts" x="800" y="274" text-anchor="middle">verified · sourced · stale · unsourced</text>
+
+        <line x1="800" y1="426" x2="800" y2="388" stroke="#3ad1c9" stroke-width="2" marker-end="url(#ahTeal)"/>
+        <line x1="800" y1="330" x2="800" y2="292" stroke="#3ad1c9" stroke-width="2" marker-end="url(#ahTeal)"/>
+        <path d="M620 560 C700 528 800 520 800 484" fill="none" stroke="#3ad1c9" stroke-width="2" marker-end="url(#ahTeal)"/>
+
+        <!-- Store -->
+        <rect class="n" x="170" y="560" width="700" height="66" rx="12" stroke="#46d18a"/>
+        <text class="t" x="520" y="586" text-anchor="middle">libSQL store</text>
+        <text class="code" x="520" y="607" text-anchor="middle">hash-chained oplog (tamper-evident) · BM25 + vector index</text>
+
+        <!-- KubeSimplify wordmark -->
+        <g transform="translate(866,656)" opacity="0.9">
+          <path d="M12 0 L23 6 L23 18 L12 24 L1 18 L1 6 Z" fill="none" stroke="#3ad1c9" stroke-width="1.6"/>
+          <path d="M12 0 L12 12 L1 6 M12 12 L23 6 M12 12 L12 24" fill="none" stroke="#7c6cff" stroke-width="1.4"/>
+          <text x="32" y="10" class="ts" fill="#93a0b4" font-size="11">diagram by</text>
+          <text x="32" y="23" font-family="ui-sans-serif,system-ui,sans-serif" font-size="13" font-weight="700" fill="#e8edf5">Kube<tspan fill="#3ad1c9">Simplify</tspan></text>
+        </g>
+      </svg>
     </div>
   </section>
 
