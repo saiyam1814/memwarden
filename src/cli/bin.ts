@@ -1430,7 +1430,8 @@ async function status(rest: string[]): Promise<void> {
 function printUsage(): void {
   console.log(
     "usage:\n" +
-      "  memwarden up [--all] [--agents-md] [--url URL] [--secret S]   # start daemon + wire every installed tool\n" +
+      "  memwarden up [--all] [--agents-md] [--lexical-only] [--url URL] [--secret S]\n" +
+      "                                                    # start daemon + wire every installed tool (--lexical-only skips local embeddings)\n" +
       "  memwarden down [--all] [--data]                 # stop service; --all unwires every tool + hooks, --data deletes the brain\n" +
       "  memwarden status [--json]                       # daemon, semantic, vector backend, per-tool detected/mcp/hooks/live\n" +
       "  memwarden connect [claude-code|cursor|cline|windsurf] [--with-hooks] [--url URL] [--secret S]\n" +

@@ -11,7 +11,7 @@
 
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
-import { DEJAFIX_SCOPE } from "../functions/dejafix.js";
+import { DEJAFIX_SCOPE, type FixMemory } from "../functions/dejafix.js";
 import type {
   CompressedObservation,
   Memory,
@@ -29,8 +29,14 @@ export interface BrainBundle {
   sessions: Session[];
   memories: Memory[];
   observations: Record<string, CompressedObservation[]>; // sessionId -> obs
-  /** Déjà Fix capsules (error signature -> fix), portable like the rest. */
-  fixes?: Array<{ signature: string } & Record<string, unknown>>;
+  /**
+   * Déjà Fix capsules, keyed by error signature (mirrors the store: each
+   * signature holds an append-only FixMemory[] list). Keyed like
+   * `observations` so the round-trip is lossless — the previous flat-array
+   * shape dropped every fix on import because it looked for a top-level
+   * `signature` that lives on the records, not the list.
+   */
+  fixes?: Record<string, FixMemory[]>;
   quantBlob?: string;
 }
 
@@ -59,9 +65,16 @@ export async function exportBundle(kv: StateKV): Promise<BrainBundle> {
   const quantBlob = await kv
     .get<string>(KV.quantParams, QUANT_BLOB_KEY)
     .catch(() => null);
-  const fixes = await kv
-    .list<{ signature: string } & Record<string, unknown>>(DEJAFIX_SCOPE)
-    .catch(() => []);
+  // list() returns values only, so recover each signature (the KV key) from
+  // the records — keyFor(signature) === signature, and every record in a
+  // list shares it. Empty/garbage lists are skipped.
+  const fixLists = await kv.list<FixMemory[]>(DEJAFIX_SCOPE).catch(() => []);
+  const fixes: Record<string, FixMemory[]> = {};
+  for (const list of fixLists) {
+    if (!Array.isArray(list) || list.length === 0) continue;
+    const signature = list.find((f) => typeof f?.signature === "string")?.signature;
+    if (signature) fixes[signature] = list;
+  }
 
   const bundle: BrainBundle = {
     kind: BRAIN_BUNDLE_KIND,
@@ -73,7 +86,7 @@ export async function exportBundle(kv: StateKV): Promise<BrainBundle> {
   if (typeof quantBlob === "string" && quantBlob.length > 0) {
     bundle.quantBlob = quantBlob;
   }
-  if (fixes.length > 0) bundle.fixes = fixes;
+  if (Object.keys(fixes).length > 0) bundle.fixes = fixes;
   return bundle;
 }
 
@@ -116,9 +129,27 @@ export async function importBundle(
       await kv.set(KV.observations(sessionId), o.id, o);
     }
   }
-  for (const f of bundle.fixes ?? []) {
-    if (f && typeof f.signature === "string" && f.signature) {
-      await kv.set(DEJAFIX_SCOPE, f.signature, f);
+  // Déjà Fix capsules: the current shape is signature -> FixMemory[]. Tolerate
+  // the legacy flat-array export (Array<FixMemory[]> or Array<FixMemory>) by
+  // recovering the signature from the records, so an old bundle still imports.
+  const importFixList = async (list: unknown): Promise<void> => {
+    if (!Array.isArray(list) || list.length === 0) return;
+    const records = list as FixMemory[];
+    const signature = records.find((f) => typeof f?.signature === "string")?.signature;
+    if (signature) await kv.set(DEJAFIX_SCOPE, signature, records);
+  };
+  const fixes = bundle.fixes;
+  if (Array.isArray(fixes)) {
+    // legacy: an array of lists (or of loose records)
+    for (const entry of fixes as unknown[]) {
+      await importFixList(Array.isArray(entry) ? entry : [entry]);
+    }
+  } else if (fixes && typeof fixes === "object") {
+    for (const signature of Object.keys(fixes)) {
+      const records = fixes[signature];
+      if (Array.isArray(records) && records.length > 0) {
+        await kv.set(DEJAFIX_SCOPE, signature, records);
+      }
     }
   }
   if (bundle.quantBlob) {

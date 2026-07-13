@@ -91,4 +91,41 @@ describe("brain bundle round-trip", () => {
       importBundle(dest.kv, { ...bundle, version: 999 }),
     ).rejects.toThrow(/unsupported brain bundle version/);
   });
+
+  it("round-trips Déjà Fix capsules: record → export → fresh store → import → identical lookup", async () => {
+    // Record a fix in the source store.
+    const errorText = "TypeError: cannot read property 'id' of undefined at auth.ts:42";
+    const rec = await source.sdk.trigger<unknown, { recorded?: boolean }>({
+      function_id: "mem::dejafix_record",
+      payload: {
+        errorText,
+        fix: "guard the session lookup before dereferencing .id",
+        rootCause: "session can be null on first request",
+        cwd: "/demo",
+      },
+    });
+    expect(rec.recorded).toBe(true);
+
+    const before = await source.sdk.trigger<unknown, { fixes: Array<{ fix?: string; rootCause?: string }> }>({
+      function_id: "mem::dejafix_lookup",
+      payload: { error_text: errorText, cwd: "/demo" },
+    });
+    expect(before.fixes.length).toBe(1);
+
+    // Export → fresh store → import.
+    const bundle = await exportBundle(source.kv);
+    expect(bundle.fixes && Object.keys(bundle.fixes).length).toBe(1);
+
+    const dest = freshKernel("memwarden-fix-import");
+    await importBundle(dest.kv, bundle);
+
+    // Lookup on the fresh store returns the IDENTICAL fix.
+    const after = await dest.sdk.trigger<unknown, { fixes: Array<{ fix?: string; rootCause?: string }> }>({
+      function_id: "mem::dejafix_lookup",
+      payload: { error_text: errorText, cwd: "/demo" },
+    });
+    expect(after.fixes.length).toBe(1);
+    expect(after.fixes[0]!.fix).toBe(before.fixes[0]!.fix);
+    expect(after.fixes[0]!.rootCause).toBe(before.fixes[0]!.rootCause);
+  });
 });
