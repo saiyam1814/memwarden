@@ -53,11 +53,6 @@ export function isAutoCompressEnabled(): boolean {
   return flag("MEMWARDEN_AUTO_COMPRESS");
 }
 
-/** Memory slots are an optional context-injection feature, off by default. */
-export function isSlotsEnabled(): boolean {
-  return flag("MEMWARDEN_SLOTS");
-}
-
 // --- injection / capture switches -----------------------------------
 //
 // Users must be able to turn the automatic paths off — per environment via
@@ -219,13 +214,13 @@ export function getQuantSeed(): string {
  * TurboQuant/full-precision indexes) or "turbovec" (the optional native
  * '@memwarden/turbovec' binding around the turbovec crate).
  *
- * THE DEFAULT STAYS "typescript" DELIBERATELY: it only flips to native
- * once the benchmark gate (benchmark/backends.ts — recall drop <= 2 points
- * vs FP32, allowlist correctness, add/remove/save/load id-set parity)
- * passes on CI-built prebuilds for every supported platform. Opting in
- * early is safe — a failed native load logs and falls back to the
- * TypeScript backend (see search.ts makeConfiguredVectorIndex) — but an
- * unproven native path must never be the silent default.
+ * The default is "auto" because published '@memwarden/turbovec' binaries
+ * only exist for platforms that passed the benchmark gate
+ * (benchmark/backends.ts — recall drop <= 2 points vs FP32, allowlist
+ * correctness, add/remove/save/load id-set parity) in CI before publish;
+ * a failed native load logs and falls back to the TypeScript backend
+ * (see search.ts makeConfiguredVectorIndex). Set the env var to pin a
+ * backend explicitly.
  */
 export function getVectorBackend(): "turbovec" | "typescript" | "auto" {
   const raw = (env("MEMWARDEN_VECTOR_BACKEND") ?? "").trim().toLowerCase();

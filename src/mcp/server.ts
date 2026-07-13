@@ -17,11 +17,26 @@
 // conversation — on-demand recall from within any MCP-aware tool.
 
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { canonicalizePath } from "../functions/paths.js";
 
 const PROTOCOL_VERSION = "2024-11-05";
 const SERVER_NAME = "memwarden";
-const SERVER_VERSION = "0.1.0";
+const SERVER_VERSION = (() => {
+  try {
+    const pkg = JSON.parse(
+      readFileSync(
+        join(dirname(fileURLToPath(import.meta.url)), "..", "..", "package.json"),
+        "utf8",
+      ),
+    ) as { version?: string };
+    return pkg.version ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+})();
 
 // Fallback sessionId for memory_remember calls that name none. It must be
 // derived from project identity: a session's project metadata is fixed at

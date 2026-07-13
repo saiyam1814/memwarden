@@ -721,6 +721,7 @@ describe("mem::forget {erase} + mem::erase + /memwarden/compact end to end", () 
     expect(r.eraseBlocked).toBeUndefined();
     const rec = r.receipt!;
     expect(rec.contentErased).toBe(true);
+    expect(rec.eraseIncomplete).toBeNull();
     expect(rec.chainIntact).toBe(true);
     expect(rec.chainHead).not.toBeNull();
     expect(rec.deleteEntry).not.toBeNull();
@@ -858,6 +859,237 @@ describe("mem::forget {erase} + mem::erase + /memwarden/compact end to end", () 
     expect(await store.verifyOplog()).toEqual({ ok: true });
   });
 
+  it("erase is ATOMIC: a cascade failure deletes NOTHING and the forget is retryable", async () => {
+    const canary = "atomic-abort-retry-canary";
+    const base = { sessionId: "sess-A", project: "proj-A", cwd: "/work/proj-A" };
+    const p = await sdk.trigger<unknown, { observationId: string }>({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "user_prompt",
+        ...base,
+        timestamp: "2026-07-13T10:00:00.000Z",
+        data: { prompt: `rotate the key with ${canary}` },
+      },
+    });
+    await sdk.trigger({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "session_end",
+        ...base,
+        timestamp: "2026-07-13T11:00:00.000Z",
+        data: { reason: "exit" },
+      },
+    });
+
+    // Fault injection: the cascade's first store write fails.
+    const origDelete = kv.delete.bind(kv);
+    (kv as { delete: typeof kv.delete }).delete = async () => {
+      throw new Error("injected store failure");
+    };
+    const failed = await sdk.trigger<unknown, ForgetResult>({
+      function_id: "mem::erase",
+      payload: { observationId: p.observationId },
+    });
+    (kv as { delete: typeof kv.delete }).delete = origDelete;
+
+    expect(failed.deleted).toBe(false);
+    expect(failed.reason).toMatch(/source memory was NOT deleted/);
+    expect(failed.reason).toMatch(/partially re-derived/);
+    expect(failed.reason).toMatch(/[Rr]etry/);
+    // The source observation is UNTOUCHED — no half-erased state.
+    expect(await kv.get(KV.observations("sess-A"), p.observationId)).not.toBeNull();
+
+    // Retry succeeds end to end — the exact flow the old order made
+    // impossible ("no observation with id" after a failed cascade).
+    const retried = await sdk.trigger<unknown, ForgetResult>({
+      function_id: "mem::erase",
+      payload: { observationId: p.observationId },
+    });
+    expect(retried.deleted).toBe(true);
+    expect(retried.receipt!.contentErased).toBe(true);
+    expect(retried.receipt!.eraseIncomplete).toBeNull();
+    const everything =
+      JSON.stringify(await kv.list(KV.sessions)) +
+      JSON.stringify(await kv.list(KV.observations("sess-A"))) +
+      JSON.stringify(await kv.list(KV.summaries)) +
+      JSON.stringify(await store.readOplog());
+    expect(everything).not.toContain(canary);
+  });
+
+  it("receipt admits RESIDUALS: content surviving in a sibling observation flips contentErased false", async () => {
+    const canary = "the walrus rotation cadence is forty two minutes";
+    const base = { sessionId: "sess-R", project: "proj-R", cwd: "/work/proj-R" };
+    const p = await sdk.trigger<unknown, { observationId: string }>({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "user_prompt",
+        ...base,
+        timestamp: "2026-07-13T10:00:00.000Z",
+        data: { prompt: `remember that ${canary}` },
+      },
+    });
+    // An INDEPENDENT sibling observation echoes the same content.
+    await sdk.trigger({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "post_tool_use",
+        ...base,
+        timestamp: "2026-07-13T10:05:00.000Z",
+        data: {
+          tool_name: "Bash",
+          tool_input: { command: "cat notes.txt" },
+          tool_output: `notes say: ${canary}`,
+        },
+      },
+    });
+
+    const r = await sdk.trigger<unknown, ForgetResult>({
+      function_id: "mem::erase",
+      payload: { observationId: p.observationId },
+    });
+    expect(r.deleted).toBe(true);
+    // The sibling is its own memory — NOT silently deleted — so the receipt
+    // must not claim the content is gone.
+    expect(r.receipt!.contentErased).toBe(false);
+    expect(r.receipt!.eraseIncomplete).toMatch(/still appears in/);
+    expect(r.receipt!.eraseIncomplete).toMatch(/obs_/);
+  });
+
+  it("outcome containment: an Outcome echoing the erased content is dropped, not re-injected", async () => {
+    const canary = "the deploy key lives in the vault under badger";
+    const base = { sessionId: "sess-OC", project: "proj-OC", cwd: "/work/proj-OC" };
+    const p = await sdk.trigger<unknown, { observationId: string }>({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "user_prompt",
+        ...base,
+        timestamp: "2026-07-13T10:00:00.000Z",
+        data: { prompt: `note: ${canary}` },
+      },
+    });
+    await sdk.trigger({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "session_end",
+        ...base,
+        timestamp: "2026-07-13T11:00:00.000Z",
+        data: {
+          reason: "exit",
+          // The assistant ECHOED the content being erased.
+          assistant_response: `Noted — ${canary}, saved for later.`,
+        },
+      },
+    });
+    expect(
+      (await kv.get<{ summary?: string }>(KV.sessions, "sess-OC"))?.summary,
+    ).toContain("badger");
+
+    const r = await sdk.trigger<unknown, ForgetResult>({
+      function_id: "mem::erase",
+      payload: { observationId: p.observationId },
+    });
+    expect(r.deleted).toBe(true);
+    // The rebuilt summary must not carry the echo back in via Outcome.
+    const after = await kv.get<{ summary?: string }>(KV.sessions, "sess-OC");
+    expect(after?.summary ?? "").not.toContain("badger");
+    expect(r.receipt!.contentErased).toBe(true);
+    expect(r.receipt!.eraseIncomplete).toBeNull();
+  });
+
+  it("partial cascade failure at a LATER write is reported honestly and retry CONVERGES", async () => {
+    const canary = "pelican failover threshold is nine seconds exactly";
+    const base = { sessionId: "sess-P", project: "proj-P", cwd: "/work/proj-P" };
+    const p = await sdk.trigger<unknown, { observationId: string }>({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "user_prompt",
+        ...base,
+        timestamp: "2026-07-13T10:00:00.000Z",
+        data: { prompt: `remember ${canary}` },
+      },
+    });
+    await sdk.trigger({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "session_end",
+        ...base,
+        timestamp: "2026-07-13T11:00:00.000Z",
+        data: { reason: "exit" },
+      },
+    });
+
+    // Fail the SECOND store delete (the summaries rewrite) — the handoff
+    // rewrite has already been applied by then.
+    const origDelete = kv.delete.bind(kv);
+    let deletes = 0;
+    (kv as { delete: typeof kv.delete }).delete = async (scope: string, key: string) => {
+      deletes++;
+      if (deletes === 2) throw new Error("injected late failure");
+      return origDelete(scope, key);
+    };
+    const failed = await sdk.trigger<unknown, ForgetResult>({
+      function_id: "mem::erase",
+      payload: { observationId: p.observationId },
+    });
+    (kv as { delete: typeof kv.delete }).delete = origDelete;
+
+    expect(failed.deleted).toBe(false);
+    // Honest: source intact, derived records possibly partially re-derived.
+    expect(failed.reason).toMatch(/source memory was NOT deleted/);
+    expect(failed.reason).toMatch(/partially re-derived/);
+    expect(await kv.get(KV.observations("sess-P"), p.observationId)).not.toBeNull();
+
+    // Retry converges to the fully erased state.
+    const retried = await sdk.trigger<unknown, ForgetResult>({
+      function_id: "mem::erase",
+      payload: { observationId: p.observationId },
+    });
+    expect(retried.deleted).toBe(true);
+    expect(retried.receipt!.contentErased).toBe(true);
+    const everything =
+      JSON.stringify(await kv.list(KV.sessions)) +
+      JSON.stringify(await kv.list(KV.observations("sess-P"))) +
+      JSON.stringify(await kv.list(KV.summaries)) +
+      JSON.stringify(await store.readOplog());
+    expect(everything).not.toContain("pelican");
+  });
+
+  it("cascade rebuild PRESERVES the handoff's Outcome line", async () => {
+    const base = { sessionId: "sess-O", project: "proj-O", cwd: "/work/proj-O" };
+    const p = await sdk.trigger<unknown, { observationId: string }>({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "user_prompt",
+        ...base,
+        timestamp: "2026-07-13T10:00:00.000Z",
+        data: { prompt: "fix the flaky deploy test" },
+      },
+    });
+    await sdk.trigger({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "session_end",
+        ...base,
+        timestamp: "2026-07-13T11:00:00.000Z",
+        data: {
+          reason: "exit",
+          assistant_response: "Shipped the fix; deploy test green on CI.",
+        },
+      },
+    });
+    const before = await kv.get<{ summary?: string }>(KV.sessions, "sess-O");
+    expect(before?.summary).toContain("Outcome: Shipped the fix");
+
+    // Erase the prompt — the rebuilt handoff must not lose the outcome.
+    await sdk.trigger<unknown, ForgetResult>({
+      function_id: "mem::erase",
+      payload: { observationId: p.observationId },
+    });
+    const after = await kv.get<{ summary?: string }>(KV.sessions, "sess-O");
+    expect(after?.summary).toContain("Outcome: Shipped the fix");
+    expect(after?.summary).not.toContain("flaky deploy test");
+  });
+
   it("erasing the HANDOFF observation itself scrubs Session.summary and the stored summary (F3)", async () => {
     const base = { sessionId: "sess-H", project: "proj-H", cwd: "/work/proj-H" };
     await sdk.trigger({
@@ -950,5 +1182,78 @@ describe("mem::forget {erase} + mem::erase + /memwarden/compact end to end", () 
     expect(rb.dryRun).toBe(false);
     expect(rb.previousHeadHash).toMatch(/^[0-9a-f]{64}$/);
     expect(await store.verifyOplog()).toEqual({ ok: true });
+  });
+});
+
+describe("residual detection catches SHORT secrets (the PIN 7391 class)", () => {
+  let sdk: Kernel;
+  let kv: StateKV;
+  let store: StoreMemory;
+  beforeEach(() => {
+    __resetKernelSingleton();
+    getSearchIndex().clear();
+    store = new StoreMemory();
+    sdk = registerWorker("in-process", { workerName: "memwarden-pin" }, { store });
+    kv = new StateKV(sdk);
+    registerCoreFunctions(sdk, kv);
+  });
+  afterEach(() => {
+    __resetKernelSingleton();
+  });
+
+  async function eraseWithSibling(prompt: string, siblingOutput: string) {
+    const base = { sessionId: "sess-PIN", project: "proj-PIN", cwd: "/w/pin" };
+    const p = await sdk.trigger<unknown, { observationId: string }>({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "user_prompt",
+        ...base,
+        timestamp: "2026-07-13T10:00:00.000Z",
+        data: { prompt },
+      },
+    });
+    await sdk.trigger({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "post_tool_use",
+        ...base,
+        timestamp: "2026-07-13T10:05:00.000Z",
+        data: {
+          tool_name: "Bash",
+          tool_input: { command: "cat door.txt" },
+          tool_output: siblingOutput,
+        },
+      },
+    });
+    return sdk.trigger<unknown, ForgetResult>({
+      function_id: "mem::erase",
+      payload: { observationId: p.observationId },
+    });
+  }
+
+  it("a short whole-value secret surviving in a sibling flips contentErased false", async () => {
+    const r = await eraseWithSibling("PIN 7391", "door says PIN 7391");
+    expect(r.deleted).toBe(true);
+    expect(r.receipt!.contentErased).toBe(false);
+    expect(r.receipt!.eraseIncomplete).toMatch(/still appears in/);
+  });
+
+  it("a digit-bearing token from a longer erased text is caught on its own", async () => {
+    const r = await eraseWithSibling(
+      "remember that the door code is PIN 7391 for the office",
+      "code: 7391",
+    );
+    expect(r.deleted).toBe(true);
+    expect(r.receipt!.contentErased).toBe(false);
+    expect(r.receipt!.eraseIncomplete).toMatch(/still appears in/);
+  });
+
+  it("year-shaped numbers do not false-positive", async () => {
+    const r = await eraseWithSibling(
+      "we decided this back in 2026 during the platform review",
+      "meeting notes from 2026 about lunch",
+    );
+    expect(r.deleted).toBe(true);
+    expect(r.receipt!.contentErased).toBe(true);
   });
 });

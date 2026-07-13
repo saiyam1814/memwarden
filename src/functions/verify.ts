@@ -140,6 +140,18 @@ export function classifyProvenance(
     if (changed.length > 0) parts.push(`changed: ${changed.slice(0, 2).join(", ")}`);
     return { status: "stale", reason: `references files that no longer match (${parts.join("; ")})` };
   }
+  // Mixed-trust content carries material its file evidence does not cover —
+  // a handoff digest embedding an unsourced prompt, or a capture whose file
+  // list was capped. One unchanged tracked file must not add up to
+  // "verified" for the whole memory. Drift above still proves it stale;
+  // matching hashes only ever earn "sourced".
+  if (prov?.mixedTrust === true) {
+    return {
+      status: "sourced_unverified",
+      reason:
+        "the memory's evidence is incomplete (mixed or capped at capture); file hashes cannot vouch for all of it",
+    };
+  }
   // Verified only when EVERY existing referenced file was content-checked.
   // A single unchecked file (unhashed, or too large) leaves the memory
   // sourced-but-not-verified, so one matching hash can't vouch for the rest.

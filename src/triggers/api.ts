@@ -164,7 +164,14 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
         function_id: "mem::observe",
         payload,
       });
-      return { status_code: 201, body: result };
+      // mem::observe refuses some writes (e.g. the session-project mismatch
+      // guard). A refusal must not travel as 201 — hooks are fire-and-forget,
+      // but anything that DOES read the response deserves the truth.
+      const refused =
+        typeof result === "object" &&
+        result !== null &&
+        (result as { success?: boolean }).success === false;
+      return { status_code: refused ? 409 : 201, body: result };
     },
   );
   sdk.registerTrigger({
@@ -454,6 +461,48 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
     function_id: "api::doctor",
     config: {
       api_path: "/memwarden/doctor",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  // --- POST /memwarden/why ----------------------------------------
+  // Explain one memory's trust verdict: why it would be injected or refused.
+  sdk.registerFunction(
+    "api::why",
+    async (
+      req: ApiRequest<{
+        observation_id?: string;
+        observationId?: string;
+        root?: string;
+      }>,
+    ): Promise<Response> => {
+      const body = (req.body ?? {}) as {
+        observation_id?: string;
+        observationId?: string;
+        root?: string;
+      };
+      const observationId =
+        asNonEmptyString(body.observation_id) ??
+        asNonEmptyString(body.observationId);
+      if (!observationId) {
+        return { status_code: 400, body: { error: "observation_id is required" } };
+      }
+      const result = await sdk.trigger({
+        function_id: "mem::why",
+        payload: {
+          observationId,
+          ...(typeof body.root === "string" ? { root: body.root } : {}),
+        },
+      });
+      return { status_code: 200, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::why",
+    config: {
+      api_path: "/memwarden/why",
       http_method: "POST",
       middleware_function_ids: ["middleware::api-auth"],
     },

@@ -187,20 +187,57 @@ export function buildSessionHandoff(input: HandoffInput): Handoff {
         (parts.length > 0 ? ` — ${parts.join(", ")}` : "") +
         (fileList.length > 0 ? `. Files touched: ${fileList.join(", ")}` : "");
 
-  // --- decisions: conservative keyword spans ----------------------------
-  const decisions = dedupe(
-    obs.flatMap((o) => matchingSpans(textOf(o), DECISION_RE)),
-    5,
-  );
+  // --- claim lineage -------------------------------------------------------
+  // Decisions and unresolved errors COPY text out of observations, so each
+  // claim's SOURCE observation must contribute its file evidence to the
+  // handoff's provenance — all of it, or the claim is DROPPED from the text.
+  // This is what makes the cap safe: raising or hitting it can never leave
+  // an untracked claim in the handoff (the old union-of-everything cap let a
+  // decision from observation 51 ride while only the first 50 files were
+  // tracked — its file could then drift undetected).
+  const HANDOFF_PROV_FILE_CAP = 50;
+  const provFiles: string[] = [];
+  const provHashes: Record<string, string> = {};
+  let provCwd: string | undefined;
+  /** All-or-nothing inherit of one observation's file evidence. */
+  const tryInherit = (p: Provenance | undefined): boolean => {
+    const fresh = (p?.files ?? []).filter((f) => !provFiles.includes(f));
+    if (provFiles.length + fresh.length > HANDOFF_PROV_FILE_CAP) return false;
+    if (!provCwd && p?.cwd) provCwd = p.cwd;
+    for (const f of fresh) {
+      provFiles.push(f);
+      const h = p?.fileHashes?.[f];
+      if (h) provHashes[f] = h;
+    }
+    return true;
+  };
+
+  // --- decisions: conservative keyword spans, evidence-tracked ------------
+  const decisions: string[] = [];
+  {
+    const seen = new Set<string>();
+    outer: for (const o of obs) {
+      for (const span of matchingSpans(textOf(o), DECISION_RE)) {
+        const k = span.toLowerCase();
+        if (seen.has(k)) continue;
+        if (decisions.length >= 5) break outer;
+        if (!tryInherit(o.provenance)) continue; // untrackable evidence → claim dropped
+        seen.add(k);
+        decisions.push(span);
+      }
+    }
+  }
 
   // --- open threads ------------------------------------------------------
   // (a) error-shaped observations among the LAST 5 — an error the session
   //     ended on is presumed unresolved (deterministic proxy for "no later
   //     fix"); earlier errors were followed by more work and are presumed
-  //     handled. (b) prompts that name future work (todo / follow-up / …).
+  //     handled. Error text is copied, so its evidence is tracked the same
+  //     way as decisions. (b) prompts that name future work — prompts carry
+  //     no file evidence; mixedTrust covers them.
   const tail = obs.slice(-5);
   const openErrors = tail
-    .filter(isError)
+    .filter((o) => isError(o) && tryInherit(o.provenance))
     .map((o) => clip(`unresolved: ${firstLine(o.title || o.narrative || "error")}`, 160));
   const openAsks = promptObs
     .filter((o) => FOLLOWUP_RE.test(textOf(o)))
@@ -235,30 +272,18 @@ export function buildSessionHandoff(input: HandoffInput): Handoff {
   const goalLine = goal === "(no prompt captured)" ? input.sessionId : firstLine(goal);
   const title = clip(`Session handoff: ${goalLine}`, 80);
 
-  // The handoff INHERITS provenance from the observations it summarizes.
-  // Without this, a handoff copies decision text out of code-backed memories
-  // but classifies as unsourced — so a fact the firewall would refuse as
-  // stale gets laundered through the summary. Conservative on purpose: if
-  // ANY inherited file drifts, the whole handoff is stale (a digest carrying
-  // possibly-false claims should be withheld from auto-injection; explicit
-  // lookups still find it).
-  const provFiles: string[] = [];
-  const provHashes: Record<string, string> = {};
-  let provCwd: string | undefined;
-  for (const o of obs) {
-    const p = o.provenance;
-    if (!p) continue;
-    if (!provCwd && p.cwd) provCwd = p.cwd;
-    for (const f of p.files ?? []) {
-      if (provFiles.length >= 20) break;
-      if (!provFiles.includes(f)) {
-        provFiles.push(f);
-        const h = p.fileHashes?.[f];
-        if (h) provHashes[f] = h;
-      }
-    }
-  }
-
+  // The handoff's provenance was accumulated by the claim-lineage pass
+  // above: exactly the observations whose text it copied. Conservative on
+  // purpose: if ANY inherited file drifts, the whole handoff is stale (a
+  // digest carrying possibly-false claims should be withheld from
+  // auto-injection; explicit lookups still find it).
+  //
+  // The handoff is ALWAYS mixed-trust: beyond the inherited file evidence it
+  // embeds the goal (a user prompt), the outcome, and prompt-derived
+  // threads — none of which any file hash covers. classifyProvenance
+  // therefore never lets a handoff reach "verified": unchanged files earn
+  // "sourced" at most, and one unsourced hostile prompt beside one unchanged
+  // file cannot ride a matching hash past a verified-only policy.
   const observation: CompressedObservation = {
     id: input.obsId,
     sessionId: input.sessionId,
@@ -284,6 +309,7 @@ export function buildSessionHandoff(input: HandoffInput): Handoff {
       ...(provCwd ? { cwd: provCwd } : {}),
       ...(provFiles.length > 0 ? { files: provFiles } : {}),
       ...(Object.keys(provHashes).length > 0 ? { fileHashes: provHashes } : {}),
+      mixedTrust: true,
     };
   }
 

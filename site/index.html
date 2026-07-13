@@ -63,6 +63,7 @@
   .lead{color:var(--mut); max-width:720px; margin:0 0 28px}
 
   .grid{display:grid; grid-template-columns:repeat(3,1fr); gap:16px}
+  .grid.two{grid-template-columns:repeat(2,1fr)}
   .feat{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:22px}
   .feat h3{margin:0 0 8px; font-size:16px}
   .feat p{margin:0; color:var(--mut); font-size:14.5px}
@@ -110,6 +111,7 @@
       <a href="#trust">Verified Recall</a>
       <a href="#dejafix">Déjà Fix</a>
       <a href="#ground">Ground truth</a>
+      <a href="#proof">Measured</a>
       <a href="#cross">Cross-tool</a>
       <a href="https://github.com/saiyam1814/memwarden">GitHub</a>
     </div>
@@ -138,7 +140,7 @@
     <div class="stats">
       <div class="stat"><b class="accent">1</b><small>command wires<br/>every tool</small></div>
       <div class="stat"><b>6</b><small>agents with native hooks<br/>one shared brain</small></div>
-      <div class="stat"><b>0</b><small>stale memories<br/>reach the model</small></div>
+      <div class="stat"><b>0</b><small>known-stale memories<br/>reach the model</small></div>
       <div class="stat"><b>0</b><small>cloud · self-custodied<br/>lives at ~/.memwarden</small></div>
     </div>
   </header>
@@ -164,15 +166,19 @@
       <kbd>memory_resume</kbd>, the <kbd>/recall</kbd> prompt, the Claude Code SessionStart hook,
       and the proxy all run with the firewall on. <b>It drops <code>stale</code> before injecting.
       It does not drop <code>unsourced</code></b> — unsourced means <i>unverified</i>, not
-      <i>dangerous</i>, so it stays available for explicit lookups.</p>
-    <div class="grid">
-      <div class="feat"><div class="ic" style="color:var(--good)">●</div><h3>verified</h3><p>A captured source-file hash still matches the file on disk. Code-backed and current.</p></div>
-      <div class="feat"><div class="ic" style="color:var(--accent2)">●</div><h3>sourced_unverified</h3><p>Has a source (a command, or files present but not hashable) but no content hash to re-check. Allowed, not content-verified.</p></div>
+      <i>dangerous</i>, so it stays available for explicit lookups. What passes is labeled for
+      exactly what it is — never laundered into one pile.</p>
+    <div class="grid two">
+      <div class="feat"><div class="ic" style="color:var(--good)">●</div><h3>verified</h3><p>A captured source-file hash still matches the file on disk. Code-backed and current. Auto-injected.</p></div>
+      <div class="feat"><div class="ic" style="color:var(--accent2)">●</div><h3>sourced</h3><p>Has a source (a command, or files present but not hashable) but no content hash to re-check. Allowed, labeled, not content-verified.</p></div>
       <div class="feat"><div class="ic" style="color:var(--warn)">●</div><h3>stale → dropped</h3><p>A referenced file was deleted, or its content changed since capture. Never injected into the model.</p></div>
+      <div class="feat"><div class="ic" style="color:var(--dim)">●</div><h3>unsourced</h3><p>No evidence trail. Kept for explicit lookups, labeled so the agent knows it is unverified — never silently promoted.</p></div>
     </div>
     <p class="lead" style="margin-top:24px">The shareable artifact: <kbd>memwarden doctor</kbd>
       runs the same check as a report, plus conservative subject/value conflict detection — no LLM,
-      no fuzzy black box. Run it against your current store and see how much is still earned.</p>
+      no fuzzy black box. <kbd>memwarden why &lt;id&gt;</kbd> explains one memory;
+      <kbd>doctor --fix-stale</kbd> forgets the whole stale inbox. And when the firewall refuses
+      something at SessionStart, the agent sees the refusal evidence — not a silent empty inject.</p>
 <pre>$ <span class="a">memwarden doctor .</span>
 
   <span class="g">VERIFIED:        8 memories (code-backed, current)</span>
@@ -220,8 +226,8 @@ npm test 2>&1 | npx memwarden <span class="a">dejafix lookup</span></pre>
       a memory is still earned.</p>
     <div class="grid">
       <div class="feat"><div class="ic">🔗</div><h3>Tamper-evident, honestly</h3><p>Every write lands in an append-only SHA-256 hash-chained oplog. <kbd>memory_verify</kbd> recomputes the chain, so an edit or reorder of any past entry breaks it. <b>Tamper-evident, not tamper-proof:</b> there is no signing, and the chain does not detect tail-truncation (dropping the newest entries).</p></div>
-      <div class="feat"><div class="ic">🔒</div><h3>Self-custodied</h3><p>The brain lives at <code>~/.memwarden</code> and nowhere else. On-device embeddings, two runtime dependencies, no cloud, no vendor in the loop.</p></div>
-      <div class="feat"><div class="ic">♻️</div><h3>Self-healing</h3><p>Once it is up you never touch it. It revives itself if a tool finds it down, and an OS service restarts it on crash and starts it at login.</p></div>
+      <div class="feat"><div class="ic">🧾</div><h3>Erasure with receipts</h3><p><kbd>memwarden forget &lt;id&gt;</kbd> returns an offline-checkable delete receipt (create + delete entry hashes, chain head). <kbd>forget --erase</kbd> nulls payloads and re-chains; <kbd>memwarden compact</kbd> reclaims bytes so content actually leaves the file. Receipts carry a real <code>contentErased</code> boolean — no silent lies about deletion.</p></div>
+      <div class="feat"><div class="ic">🔒</div><h3>Self-custodied</h3><p>The brain lives at <code>~/.memwarden</code> and nowhere else. On-device embeddings, two runtime dependencies, no cloud, no vendor in the loop. Once it is up you never touch it — self-healing on crash and at login.</p></div>
     </div>
   </section>
 
@@ -320,17 +326,36 @@ npm test 2>&1 | npx memwarden <span class="a">dejafix lookup</span></pre>
       under a token budget. Scoping is by canonical path, so recall never silently misses.</p>
     <div class="flow">
       <b>your tool</b> &nbsp;──observe + hash files──▶&nbsp; compress &nbsp;──▶&nbsp; libSQL store + <b>hash-chained oplog</b><br/><br/>
-      &nbsp;&nbsp;MiniLM embed &nbsp;──▶&nbsp; <b>TurboQuant</b> 4-bit codes &nbsp;──▶&nbsp; vector index (TypeScript, or native <b>turbovec</b> opt-in)<br/><br/>
+      &nbsp;&nbsp;MiniLM embed &nbsp;──▶&nbsp; <b>TurboQuant</b> 4-bit codes &nbsp;──▶&nbsp; vector index (native <b>turbovec</b> when its binary loads, TypeScript otherwise)<br/><br/>
       <b>your tool</b> &nbsp;◀──verified recall──&nbsp; BM25 + vector (RRF), <b>firewalled</b>, packed under a token budget
     </div>
   </section>
 
   <section id="proof">
     <h2>Measured, not claimed</h2>
-    <p class="lead">Real on-device model (all-MiniLM-L6-v2), 30 labelled memories buried in
-      2,000 plausible distractors, 14 paraphrased queries worded differently than the answers,
-      and the compressed index running with <b>no exact rescoring</b> — pure quantized codes.
-      Reproduce with <code>npm run benchmark</code>.</p>
+    <p class="lead">The launch claim is a <b>memory firewall</b>, so the first number is the
+      firewall itself — not retrieval. A deterministic corpus of 250 memories (file-backed,
+      command-sourced, and unsourced) across 5 projects with 50 controlled staleness events and
+      5 poisoned-handoff traps. Reproduce with <code>npm run eval</code> (CI-gated at 100% on
+      every metric).</p>
+    <table>
+      <tr><th>Firewall eval</th><th>Result</th></tr>
+      <tr><td>Stale retrievable — every stale memory first proven retrievable unfiltered (so "refused" measures work, not absence)</td><td class="ok">100%</td></tr>
+      <tr><td>Stale refusal — known-stale memories blocked under <code>safe_only</code></td><td class="ok">100%</td></tr>
+      <tr><td>Fresh retention — verified-current memories not wrongly blocked</td><td class="ok">100%</td></tr>
+      <tr><td>Project isolation — out-of-project results under scoping</td><td class="ok">0 leaks</td></tr>
+      <tr><td>Label accuracy — recall labels match ground truth across all three classes (verified / sourced / unsourced)</td><td class="ok">100%</td></tr>
+      <tr><td>Handoff traps — hostile unsourced prompts beside fresh file hashes never laundered to <code>verified</code></td><td class="ok">0 laundered</td></tr>
+      <tr><td>Verified-only policy — sourced, unsourced, and handoff digests refused; verified memory still flows</td><td class="ok">100%</td></tr>
+    </table>
+    <p class="note">Labels (<code>verified</code> / <code>sourced</code> / <code>unsourced</code>)
+      appear on compact and narrative recall formats — the ones agents actually read. The raw
+      <code>full</code> format stays a machine SearchResult without narrative labels.</p>
+
+    <p class="lead" style="margin-top:34px">Retrieval next. Real on-device model (all-MiniLM-L6-v2),
+      30 labelled memories buried in 2,000 plausible distractors, 14 paraphrased queries worded
+      differently than the answers, and the compressed index running with <b>no exact rescoring</b>
+      — pure quantized codes. Reproduce with <code>npm run benchmark</code>.</p>
     <table>
       <tr><th>Retrieval — gold answer in top-k</th><th>R@1</th><th>R@5</th><th>R@10</th></tr>
       <tr><td>Full-precision vectors</td><td>57%</td><td>79%</td><td>86%</td></tr>
@@ -355,10 +380,10 @@ npm test 2>&1 | npx memwarden <span class="a">dejafix lookup</span></pre>
     </table>
     <p class="note">~125× faster search, zero recall drop, 7.8× smaller vectors, and the firewall's
       scope filters can run <i>inside</i> the search kernel as allowlists. Honest defaults: the
-      native backend is opt-in (<code>MEMWARDEN_VECTOR_BACKEND=turbovec</code>) until prebuilt
-      binaries pass CI on every platform, and <code>memwarden status</code> always names the
+      native backend is quietly selected when the prebuilt binary loads (pin with
+      <code>MEMWARDEN_VECTOR_BACKEND</code>), and <code>memwarden status</code> always names the
       backend actually serving — a native backend that failed to load reports its TypeScript
-      fallback, never a silent claim. 520 tests, including a Verified Recall suite, the Déjà Fix
+      fallback, never a silent claim. 589 tests, including a Verified Recall suite, the Déjà Fix
       engine, HTTP security (auth / host firewall / content-type), per-host hook dialects, and a
       cross-tool reliability harness that proves memory captured in one tool is recalled in
       another.</p>
@@ -380,8 +405,10 @@ npm install -g memwarden && memwarden <span class="a">up</span>
 <span class="c"># audit your own brain (verified / sourced / stale / unsourced + footprint):</span>
 npx memwarden <span class="a">doctor</span> .
 
-<span class="c"># delete with a tamper-evident receipt:</span>
-npx memwarden <span class="a">forget</span> &lt;observationId&gt;</pre>
+<span class="c"># delete with a tamper-evident receipt (contentErased:false until --erase):</span>
+npx memwarden <span class="a">forget</span> &lt;observationId&gt;
+npx memwarden <span class="a">forget</span> &lt;observationId&gt; --erase   <span class="c"># null payloads + re-chain</span>
+npx memwarden <span class="a">compact</span>                          <span class="c"># reclaim bytes; content leaves the file</span></pre>
   </section>
 
   <footer>

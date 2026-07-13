@@ -29,7 +29,9 @@ jobs:
           # runners avoid the OpenBLAS cross-compile swamp entirely.
           - host: macos-14
             target: aarch64-apple-darwin
-          - host: macos-13
+          # macos-13 (the last free Intel image) was retired in Dec 2025;
+          # macos-15-intel is GitHub's designated replacement.
+          - host: macos-15-intel
             target: x86_64-apple-darwin
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
@@ -61,6 +63,23 @@ jobs:
         run: |
           npm ci
           npx vitest run test/turbovec-native.test.ts
+      # The PROMOTION BENCHMARK the docs advertise: recall drop <= 2 points
+      # vs FP32, in-kernel allowlist correctness, add/remove/save/load id-set
+      # parity. This is what makes the "auto" default honest — a published
+      # binary is a binary that passed this gate on its platform.
+      - name: promotion benchmark gate
+        working-directory: .
+        run: npm run benchmark:backends
+      # CLEAN-CONSUMER gate: the runner installed OpenBLAS to build, but a
+      # user's machine has not. The binding must dlopen in a bare node image
+      # (no OpenBLAS, no build tools) or it must not ship — a published
+      # binary that only loads on machines with libopenblas would quietly
+      # fall back to TypeScript for almost every Linux user.
+      - name: clean-container load test (linux)
+        if: contains(matrix.target, 'linux')
+        run: |
+          docker run --rm -v "$PWD":/pkg -w /pkg node:20-slim \
+            node -e "const b = require('./index.js'); const k = Object.keys(b); if (k.length === 0) throw new Error('no exports'); console.log('clean-container load OK:', k.join(','));"
       - uses: actions/upload-artifact@v4
         with:
           name: binding-${{ matrix.target }}

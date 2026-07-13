@@ -103,6 +103,11 @@ export interface Provenance {
   agent?: string; // which agent captured it (claude, codex, …)
   capturedAt?: string;
   userConfirmed?: boolean; // explicitly saved by the user vs passively observed
+  /** The memory's CONTENT includes material its file evidence does not cover
+   * (e.g. a handoff digest mixing code-backed decisions with unsourced
+   * prompts/outcomes, or inherited files dropped by a cap). File drift can
+   * still prove it stale, but matching hashes can never prove it verified. */
+  mixedTrust?: boolean;
 }
 
 export interface CompressedObservation {

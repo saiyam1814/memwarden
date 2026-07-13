@@ -74,6 +74,14 @@ export interface DeleteReceipt {
    */
   contentErased: boolean;
   /**
+   * INSIDE the hashed receipt (a warning outside the hash would let the
+   * receipt alone claim clean success): non-null when --erase could not
+   * fully scrub — a v1-blocked oplog erase, or a derived-record refusal.
+   * `contentErased` is true only when this is null; the recovery path is
+   * `memwarden compact`.
+   */
+  eraseIncomplete: string | null;
+  /**
    * Chain head (id + hash) at receipt issuance, identifying WHICH chain the
    * cited entries live in. `memwarden compact` re-chains every hash; receipts
    * issued before a compaction validate against the PRE-compaction chain,
@@ -107,6 +115,7 @@ function receiptHash(fields: Omit<DeleteReceipt, "receiptHash">): string {
     createEntry: fields.createEntry,
     chainIntact: fields.chainIntact,
     contentErased: fields.contentErased,
+    eraseIncomplete: fields.eraseIncomplete,
     chainHead: fields.chainHead,
   });
   return createHash("sha256").update(canonical).digest("hex");
@@ -120,6 +129,103 @@ function isHandoffObservation(obs: CompressedObservation | undefined): boolean {
     Array.isArray(obs.concepts) &&
     obs.concepts.includes("session-summary")
   );
+}
+
+// --- residual content detection ------------------------------------------
+//
+// An erase receipt's `contentErased: true` is a claim about CONTENT, not one
+// record: if the same text also lives in a sibling observation, a preserved
+// Outcome line, or a rebuilt summary, the receipt must say so instead of
+// claiming clean erasure. Matching is deterministic and best-effort, over
+// the erased CONTENT fields only (never paths/provenance, which
+// legitimately repeat across records):
+//   - 5-word shingles catch shared phrases;
+//   - whole short strings (< 5 words, >= 6 chars) catch compact values;
+//   - DISTINCTIVE TOKENS catch short secrets — the "PIN 7391" class that
+//     matters most during erasure: any digit-bearing token (>= 3 chars,
+//     excluding year-shaped ones, which would false-positive on dates) and
+//     any long identifier (>= 12 chars).
+// A short all-alphabetic common word shared with a sibling can still escape
+// detection — the receipt's documented scope, not a hidden gap. False
+// positives only ever push contentErased toward `false` (never overclaim).
+
+const CONTENT_FIELDS = [
+  "title",
+  "subtitle",
+  "narrative",
+  "userPrompt",
+  "assistantResponse",
+] as const;
+
+function contentStrings(obs: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const k of CONTENT_FIELDS) {
+    const v = obs[k];
+    if (typeof v === "string" && v.trim()) out.push(v);
+  }
+  const facts = obs["facts"];
+  if (Array.isArray(facts)) {
+    for (const f of facts) if (typeof f === "string" && f.trim()) out.push(f);
+  }
+  const raw = obs["raw"];
+  if (raw && typeof raw === "object") {
+    const t = (raw as Record<string, unknown>)["tool_output"];
+    if (typeof t === "string" && t.trim()) out.push(t);
+  }
+  return out;
+}
+
+const SHINGLE_N = 5;
+
+function wordsOf(text: string): string[] {
+  return text.toLowerCase().split(/[^a-z0-9_]+/).filter((w) => w.length > 0);
+}
+
+interface ContentNeedles {
+  shingles: Set<string>;
+  /** Short-but-distinctive whole strings (< SHINGLE_N words, >= 6 chars). */
+  whole: string[];
+  /** Distinctive single tokens: digit-bearing (non-year) or long ids. */
+  tokens: Set<string>;
+}
+
+function isDistinctiveToken(w: string): boolean {
+  if (w.length >= 12) return true; // long identifiers / hashes / slugs
+  if (w.length >= 3 && /\d/.test(w) && !/^(19|20)\d{2}$/.test(w)) return true;
+  return false;
+}
+
+function needlesOf(obs: Record<string, unknown>): ContentNeedles {
+  const shingles = new Set<string>();
+  const whole: string[] = [];
+  const tokens = new Set<string>();
+  for (const s of contentStrings(obs)) {
+    if (/^\d{4}-\d{2}-\d{2}T/.test(s.trim())) continue; // timestamps
+    const words = wordsOf(s);
+    for (const w of words) if (isDistinctiveToken(w)) tokens.add(w);
+    if (words.length >= SHINGLE_N) {
+      for (let i = 0; i + SHINGLE_N <= words.length; i++) {
+        shingles.add(words.slice(i, i + SHINGLE_N).join(" "));
+      }
+    } else if (s.trim().length >= 6) {
+      whole.push(s.trim());
+    }
+  }
+  return { shingles, whole, tokens };
+}
+
+function sharesErasedContent(needles: ContentNeedles, text: string): boolean {
+  if (!text) return false;
+  for (const w of needles.whole) if (text.includes(w)) return true;
+  const words = wordsOf(text);
+  if (needles.tokens.size > 0) {
+    for (const w of words) if (needles.tokens.has(w)) return true;
+  }
+  if (needles.shingles.size === 0) return false;
+  for (let i = 0; i + SHINGLE_N <= words.length; i++) {
+    if (needles.shingles.has(words.slice(i, i + SHINGLE_N).join(" "))) return true;
+  }
+  return false;
 }
 
 export function registerReceiptFunction(sdk: ISdk, kv: StateKV): void {
@@ -155,23 +261,41 @@ export function registerReceiptFunction(sdk: ISdk, kv: StateKV): void {
     value?: unknown,
   ): Promise<string | undefined> => {
     await kv.delete(scope, key);
-    const blocked = await oplogErase(scope, key);
-    if (value !== undefined) await kv.set(scope, key, value);
-    return blocked;
+    try {
+      return await oplogErase(scope, key);
+    } finally {
+      // The re-derived value goes back even when the history erase THREW —
+      // otherwise a transient store error between delete and set would
+      // silently destroy the derived record instead of just leaving its
+      // history unscrubbed.
+      if (value !== undefined) await kv.set(scope, key, value);
+    }
   };
 
   /**
    * The F3 cascade: re-derive every session-derived record from the
    * remaining observations and byte-erase the stale derived history. Runs
-   * under the caller's per-session lock (no observe can interleave).
+   * under the caller's per-session lock (no observe can interleave), and
+   * runs BEFORE the source observation is deleted — so a cascade failure
+   * aborts the whole forget and leaves it retryable. `erased` is excluded
+   * from "remaining" explicitly.
    */
   const cascadeDerived = async (
     sessionId: string,
     erased: CompressedObservation,
+    needles: ContentNeedles,
   ): Promise<string[]> => {
-    const blocked: string[] = [];
-    const remaining = await kv.list<CompressedObservation>(KV.observations(sessionId));
+    // ---- phase 1: COMPUTE (reads only — no store mutation) --------------
+    // Every re-derived value is computed before the first write, so a write
+    // failure partway leaves a partially re-derived (never half-computed)
+    // state, and re-running the cascade from the same remaining set is
+    // idempotent: it recomputes the identical values and converges.
+    const remaining = (
+      await kv.list<CompressedObservation>(KV.observations(sessionId))
+    ).filter((o) => o?.id !== erased.id);
     const session = await kv.get<Session>(KV.sessions, sessionId);
+    const hadStoredSummary =
+      (await kv.get<SessionSummary>(KV.summaries, sessionId)) !== null;
 
     // Re-derive firstPrompt: the earliest remaining prompt-shaped
     // observation, exactly how observe.ts derived it (collapsed, capped).
@@ -183,21 +307,46 @@ export function registerReceiptFunction(sdk: ISdk, kv: StateKV): void {
     const erasedWasHandoff = isHandoffObservation(erased);
     const handoffObs = remaining.find(isHandoffObservation);
 
-    // Re-derive the handoff (Session.summary + KV.summaries + the stored
-    // handoff observation) from what remains — deterministic, no LLM, same
-    // builder mem::observe used at session_end.
+    let rebuilt: ReturnType<typeof buildSessionHandoff> | undefined;
     let newSummary: string | undefined;
     if (handoffObs && !erasedWasHandoff) {
-      const rebuilt = buildSessionHandoff({
+      // The original handoff's Outcome line came from the host's stop event
+      // (assistantResponse) — it exists nowhere else, so the rebuild reads
+      // it back out of the stored summary. BUT: an outcome that echoes the
+      // erased content would re-inject what we are erasing, so it is dropped
+      // when it shares content with the erased observation.
+      const outcome = /^Outcome: (.+)$/m.exec(
+        session?.summary ?? handoffObs.narrative ?? "",
+      )?.[1];
+      const outcomeClean =
+        outcome && !sharesErasedContent(needles, outcome) ? outcome : undefined;
+      rebuilt = buildSessionHandoff({
         obsId: handoffObs.id,
         sessionId,
         timestamp: handoffObs.timestamp,
         project: session?.project,
         firstPrompt,
         agentId: handoffObs.agentId,
+        assistantResponse: outcomeClean,
         observations: remaining.filter((o) => o?.id !== handoffObs.id),
       });
       newSummary = rebuilt.summaryText;
+    }
+
+    let nextSession: Session | undefined;
+    if (session) {
+      const { firstPrompt: _oldPrompt, summary: _oldSummary, ...rest } = session;
+      nextSession = {
+        ...rest,
+        observationCount: remaining.length,
+        ...(firstPrompt ? { firstPrompt } : {}),
+        ...(newSummary ? { summary: newSummary } : {}),
+      };
+    }
+
+    // ---- phase 2: APPLY (writes) -----------------------------------------
+    const blocked: string[] = [];
+    if (handoffObs && rebuilt) {
       const b1 = await rewriteErased(
         KV.observations(sessionId),
         handoffObs.id,
@@ -217,7 +366,7 @@ export function registerReceiptFunction(sdk: ISdk, kv: StateKV): void {
         const b2 = await rewriteErased(KV.summaries, sessionId, rebuilt.sessionSummary);
         if (b2) blocked.push(`session summary: ${b2}`);
       }
-    } else if (await kv.get<SessionSummary>(KV.summaries, sessionId)) {
+    } else if (hadStoredSummary) {
       // The handoff itself was erased (or is gone): the stored summary is
       // wholly derived from it — remove it and erase its history.
       const b = await rewriteErased(KV.summaries, sessionId);
@@ -228,19 +377,12 @@ export function registerReceiptFunction(sdk: ISdk, kv: StateKV): void {
     // content, so when those fields exist(ed) the row's oplog history is
     // byte-erased too; a session that never held derived text keeps its
     // history (proportionality: nothing to scrub).
-    if (session) {
-      const { firstPrompt: _oldPrompt, summary: _oldSummary, ...rest } = session;
-      const next: Session = {
-        ...rest,
-        observationCount: remaining.length,
-        ...(firstPrompt ? { firstPrompt } : {}),
-        ...(newSummary ? { summary: newSummary } : {}),
-      };
+    if (session && nextSession) {
       if (session.firstPrompt !== undefined || session.summary !== undefined) {
-        const b = await rewriteErased(KV.sessions, sessionId, next);
+        const b = await rewriteErased(KV.sessions, sessionId, nextSession);
         if (b) blocked.push(`session row: ${b}`);
       } else {
-        await kv.set(KV.sessions, sessionId, next);
+        await kv.set(KV.sessions, sessionId, nextSession);
       }
     }
     return blocked;
@@ -308,51 +450,122 @@ export function registerReceiptFunction(sdk: ISdk, kv: StateKV): void {
       // lock mem::observe takes when it adds to those global indexes —
       // otherwise a concurrent observe could re-add this id to the BM25/vector
       // index after we removed it (a ghost that outlives the deleted record).
-      // With erase, the derived-record cascade runs inside the same lock so
-      // no observe can interleave between the deletion and the re-derivation.
+      //
+      // ORDER MATTERS for resumability: with erase, both cascades run FIRST,
+      // while the source observation still exists. If a cascade throws, the
+      // whole forget aborts with nothing deleted — `memwarden forget <id>
+      // --erase` can simply be retried. (The old order deleted the source
+      // first; a cascade failure then left derived copies behind with no
+      // record left to retry against.) Cascade REFUSALS (v1 oplog rows) are
+      // not failures: they collect into the receipt's eraseIncomplete.
+      const needles = needlesOf(found.obs as unknown as Record<string, unknown>);
       const cascadeBlocked: string[] = [];
+      let cascadeFailed: string | undefined;
       await withKeyedLock(`obs:${found.sessionId}`, async () => {
+        if (data?.erase === true) {
+          try {
+            cascadeBlocked.push(
+              ...(await cascadeDerived(found!.sessionId, found!.obs, needles)),
+            );
+            cascadeBlocked.push(...(await cascadeDejaFix(obsId)));
+          } catch (err) {
+            cascadeFailed = err instanceof Error ? err.message : String(err);
+            return;
+          }
+        }
         await kv.delete(KV.observations(found!.sessionId), obsId);
         getSearchIndex().remove(obsId);
         vectorIndexRemove(obsId);
         await deleteAccessLog(kv, obsId);
-        if (data?.erase === true) {
-          try {
-            cascadeBlocked.push(...(await cascadeDerived(found!.sessionId, found!.obs)));
-          } catch (err) {
-            // The cascade must never turn a successful delete into a failure;
-            // report it instead of hiding it.
-            cascadeBlocked.push(
-              `derived-record cascade failed: ${err instanceof Error ? err.message : String(err)}`,
-            );
-          }
-        }
       });
+      if (cascadeFailed !== undefined) {
+        // HONEST partial-failure semantics: the SOURCE memory was not
+        // deleted, but the cascade applies its writes sequentially, so
+        // derived records (handoff / summary / session row) may already be
+        // partially re-derived. The cascade computes every value before
+        // writing and is idempotent over the same remaining set — retrying
+        // converges to the fully re-derived state.
+        return {
+          deleted: false,
+          reason:
+            `erase cascade failed (${cascadeFailed}). The source memory was NOT ` +
+            `deleted; derived records may be partially re-derived. Retrying ` +
+            `\`memwarden forget ${obsId} --erase\` is safe and converges.`,
+        };
+      }
 
       // Optional in-place erasure: null this observation's oplog payloads.
       // v2 entry hashes cover payload_hash, so the chain keeps verifying;
       // every erasure is chain-authorized by an appended `erase` record; the
       // store refuses (erasing nothing) when legacy v1 rows are present.
-      let contentErased = false;
+      // This must run AFTER the row delete (the store refuses to erase a
+      // live record); if it fails here the row is already gone, so the
+      // recovery path is `memwarden compact` — and the receipt says so.
+      let sourceErased = false;
       let eraseBlocked: string | undefined;
       if (data?.erase === true) {
-        const refusal = await oplogErase(KV.observations(found.sessionId), obsId);
+        let refusal: string | undefined;
+        try {
+          refusal = await oplogErase(KV.observations(found.sessionId), obsId);
+        } catch (err) {
+          refusal =
+            `oplog erase failed (${err instanceof Error ? err.message : String(err)}) — ` +
+            `run \`memwarden compact\` to erase`;
+        }
         if (refusal) {
           eraseBlocked = refusal;
         } else {
-          contentErased = true;
-        }
-        try {
-          cascadeBlocked.push(...(await cascadeDejaFix(obsId)));
-        } catch (err) {
-          cascadeBlocked.push(
-            `dejafix cascade failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
+          sourceErased = true;
         }
         if (cascadeBlocked.length > 0) {
           eraseBlocked = [eraseBlocked, ...cascadeBlocked].filter(Boolean).join("; ");
         }
+
+        // RESIDUAL VERIFICATION: `contentErased: true` is a claim about the
+        // CONTENT, so scan what remains in this session — sibling
+        // observations, the session row, the stored summary — for text the
+        // erased observation carried. Independent records that echo it
+        // (e.g. an assistant outcome quoting the erased prompt) are NOT
+        // silently deleted (they are their own memories); the receipt
+        // reports them and points at the fix.
+        const residuals: string[] = [];
+        const remainingObs = await kv.list<CompressedObservation>(
+          KV.observations(found.sessionId),
+        );
+        for (const o of remainingObs) {
+          if (!o?.id) continue;
+          const text = contentStrings(o as unknown as Record<string, unknown>).join("\n");
+          if (sharesErasedContent(needles, text)) residuals.push(o.id);
+        }
+        const sessRow = await kv.get<Session>(KV.sessions, found.sessionId);
+        if (
+          sessRow &&
+          sharesErasedContent(
+            needles,
+            [sessRow.firstPrompt, sessRow.summary].filter(Boolean).join("\n"),
+          )
+        ) {
+          residuals.push("session row (firstPrompt/summary)");
+        }
+        const summaryRow = await kv.get<SessionSummary>(KV.summaries, found.sessionId);
+        if (
+          summaryRow &&
+          sharesErasedContent(needles, JSON.stringify(summaryRow))
+        ) {
+          residuals.push("stored session summary");
+        }
+        if (residuals.length > 0) {
+          const note =
+            `erased content still appears in: ${residuals.join(", ")} — ` +
+            `independent records are not silently deleted; forget them too, then \`memwarden compact\``;
+          eraseBlocked = [eraseBlocked, note].filter(Boolean).join("; ");
+        }
       }
+      // contentErased is the receipt's headline claim: true ONLY when the
+      // source payloads were nulled, every derived copy was scrubbed, AND
+      // the residual scan found no remaining copy of the content.
+      const contentErased =
+        sourceErased && cascadeBlocked.length === 0 && eraseBlocked === undefined;
 
       // Build the receipt from the chain — scoped to this observation's own
       // KV scope so a same-named key in another scope can't be mis-cited.
@@ -387,6 +600,7 @@ export function registerReceiptFunction(sdk: ISdk, kv: StateKV): void {
         createEntry,
         chainIntact: verdict.ok === true,
         contentErased,
+        eraseIncomplete: data?.erase === true ? (eraseBlocked ?? null) : null,
         chainHead: head.hash ? { id: head.id, hash: head.hash } : null,
       };
       const receipt: DeleteReceipt = { ...base, receiptHash: receiptHash(base) };

@@ -764,6 +764,17 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       // label recall output without classifying twice.
       const verdictByObs = new Map<string, Verdict>();
       let staleDropped = 0;
+      // Samples the SessionStart hook (and `memwarden why`) can surface so the
+      // user *sees* the firewall work — not just silent omission. Evidence
+      // only (id + verdict), never the title: a refused observation's title
+      // carries its content (a handoff title embeds the user's prompt), and
+      // refused content must not ride back to the model inside the refusal
+      // notice. `memwarden why <obsId>` is the inspection path.
+      const refusalSamples: Array<{
+        obsId: string;
+        reason: string;
+        status: string;
+      }> = [];
       for (const r of results) {
         if (candidates.length >= candidateTarget) break;
         if (filtering) {
@@ -824,6 +835,13 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
               verdict.status !== "verified");
           if (dropUnderPolicy || !verdict) {
             staleDropped++;
+            if (obs && verdict && refusalSamples.length < 5) {
+              refusalSamples.push({
+                obsId: obs.id,
+                reason: verdict.reason,
+                status: verdict.status,
+              });
+            }
             continue;
           }
           verdictByObs.set(r.obsId, verdict);
@@ -833,6 +851,9 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       if (safeOnly && staleDropped > 0) {
         logger.info("Verified Recall dropped stale results", { dropped: staleDropped });
       }
+      const firewallMeta = safeOnly
+        ? { refused: staleDropped, samples: refusalSamples }
+        : undefined;
       // No silent cap: if we ran out of safe candidates AND exhausted the scan
       // window, a verified result could exist beyond it — say so.
       if (
@@ -913,6 +934,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           tokens_used: packed.used,
           tokens_budget: tokenBudget,
           truncated: packed.truncated,
+          ...(firewallMeta ? { firewall: firewallMeta } : {}),
         };
       }
 
@@ -929,6 +951,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           tokens_used: packed.used,
           tokens_budget: tokenBudget,
           truncated: packed.truncated,
+          ...(firewallMeta ? { firewall: firewallMeta } : {}),
         };
       }
 
@@ -948,6 +971,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         tokens_used: packed.used,
         tokens_budget: tokenBudget,
         truncated: packed.truncated,
+        ...(firewallMeta ? { firewall: firewallMeta } : {}),
       };
     },
   );

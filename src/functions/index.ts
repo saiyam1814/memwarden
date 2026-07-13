@@ -13,10 +13,14 @@ import { registerForgetFunction } from "./forget.js";
 import { registerDoctorFunction } from "./doctor.js";
 import { registerDejaFixFunctions } from "./dejafix.js";
 import { registerReceiptFunction } from "./receipt.js";
+import { registerWhyFunction } from "./why.js";
 import { DedupMap } from "./dedup.js";
 import { getTokenBudget, getMaxObservationsPerSession } from "./config.js";
 
-export { registerObserveFunction } from "./observe.js";
+export {
+  registerObserveFunction,
+  sessionProjectMismatch,
+} from "./observe.js";
 export { registerContextFunction } from "./context.js";
 export { registerSearchFunction } from "./search.js";
 export { registerForgetFunction } from "./forget.js";
@@ -24,6 +28,8 @@ export { registerDoctorFunction } from "./doctor.js";
 export type { DoctorReport } from "./doctor.js";
 export { registerReceiptFunction } from "./receipt.js";
 export type { DeleteReceipt, ForgetResult } from "./receipt.js";
+export { registerWhyFunction } from "./why.js";
+export type { WhyResult } from "./why.js";
 export {
   registerDejaFixFunctions,
   recordFix,
@@ -92,6 +98,7 @@ export function registerCoreFunctions(
   registerDoctorFunction(sdk, kv);
   registerDejaFixFunctions(sdk, kv);
   registerReceiptFunction(sdk, kv);
+  registerWhyFunction(sdk, kv);
 
   return kv;
 }

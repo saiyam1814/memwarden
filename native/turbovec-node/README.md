@@ -83,21 +83,25 @@ Each prebuild job must run the full `test/turbovec-native.test.ts` suite and
 musl targets are out of scope until someone needs them; they fall back to
 TypeScript like every other unsupported platform.
 
-## Why the default backend stays "typescript"
+## How the "auto" default stays honest
 
-memwarden defaults to its portable TypeScript index even though the native
-backend is dramatically faster (on darwin-arm64: p50 0.15 ms vs 18.9 ms per
-search over 10K vectors at identical 1-recall@10). The default only flips
-when the benchmark gate — recall drop <= 2 points vs FP32, allowlist purity,
-add/remove/save/load id-set parity — passes on **CI-built prebuilds for
-every supported platform**, not just on one developer machine. Until then,
-opt in per environment:
+memwarden's default backend mode is `auto`: the native engine is selected
+whenever this binding actually loads, and the portable TypeScript index
+serves otherwise. That is honest because a published `@memwarden/turbovec`
+binary is one that passed, in CI, on its own platform: the integration
+tests, the promotion benchmark (recall drop <= 2 points vs FP32, allowlist
+purity, add/remove/save/load id-set parity), and — on Linux — a
+clean-container load test with no OpenBLAS installed. Pin a backend
+explicitly per environment:
 
 ```sh
-MEMWARDEN_VECTOR_BACKEND=turbovec
+MEMWARDEN_VECTOR_BACKEND=turbovec   # or: typescript
 ```
 
-A failed native load is never silent and never lies about the label.
+A failed native load is never silent and never lies about the label —
+`memwarden status` always names the backend actually serving. (On
+darwin-arm64 the native engine measures p50 0.15 ms vs 18.9 ms per search
+over 10K vectors at identical 1-recall@10.)
 
 ## License
 

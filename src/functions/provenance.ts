@@ -20,17 +20,35 @@ const FILE_KEYS = [
 const PATH_RE = /(^|\/)[\w.\-/]+\.\w{1,8}$|\//;
 // Bounded, best-effort extraction: hosts can nest arbitrarily deep and wide;
 // provenance only needs the referenced files, not a full input walk.
+//
+// TRUNCATION IS NOT SILENT: a memory whose evidence was capped references
+// files its provenance cannot vouch for, so the caller marks it mixedTrust —
+// verification of the captured subset must never certify the whole memory
+// as `verified` (drift in an uncaptured file would go undetected).
 const MAX_FILE_DEPTH = 4;
-const MAX_FILES = 20;
+const MAX_FILES = 64;
 
-function collectFiles(toolInput: unknown): string[] {
+export function collectFilesBounded(toolInput: unknown): {
+  files: string[];
+  truncated: boolean;
+} {
   const files = new Set<string>();
+  let truncated = false;
+  // Collect one PAST the cap so hitting the cap is distinguishable from
+  // exactly filling it.
+  const limit = MAX_FILES + 1;
   const visit = (node: unknown, depth: number): void => {
-    if (files.size >= MAX_FILES || depth > MAX_FILE_DEPTH) return;
+    if (files.size >= limit) return;
     if (!node || typeof node !== "object") return;
+    if (depth > MAX_FILE_DEPTH) {
+      // An unvisited object below the depth cap could hold file keys we
+      // never saw — same falsely-complete-evidence hazard as the size cap.
+      truncated = true;
+      return;
+    }
     if (Array.isArray(node)) {
       for (const item of node) {
-        if (files.size >= MAX_FILES) return;
+        if (files.size >= limit) return;
         visit(item, depth + 1);
       }
       return;
@@ -38,7 +56,7 @@ function collectFiles(toolInput: unknown): string[] {
     const obj = node as Record<string, unknown>;
     for (const k of FILE_KEYS) {
       const v = obj[k];
-      if (typeof v === "string" && v.trim() && files.size < MAX_FILES) {
+      if (typeof v === "string" && v.trim() && files.size < limit) {
         files.add(v.trim());
       }
     }
@@ -55,7 +73,7 @@ function collectFiles(toolInput: unknown): string[] {
           v.length < 400 &&
           PATH_RE.test(v) &&
           !v.includes(" ") &&
-          files.size < MAX_FILES
+          files.size < limit
         ) {
           files.add(v.trim());
         }
@@ -65,7 +83,9 @@ function collectFiles(toolInput: unknown): string[] {
     }
   };
   visit(toolInput, 0);
-  return Array.from(files);
+  const all = Array.from(files);
+  if (all.length > MAX_FILES) truncated = true;
+  return { files: all.slice(0, MAX_FILES), truncated };
 }
 
 /**
@@ -93,8 +113,9 @@ export function extractProvenance(payload: {
   const data = (payload.data ?? {}) as Record<string, unknown>;
   const toolName = typeof data["tool_name"] === "string" ? data["tool_name"] : undefined;
   const toolInput = data["tool_input"];
+  const collected = collectFilesBounded(toolInput);
   const files = Array.from(
-    new Set(collectFiles(toolInput).map((f) => relativizeUnder(payload.cwd, f))),
+    new Set(collected.files.map((f) => relativizeUnder(payload.cwd, f))),
   );
 
   let command = toolName;
@@ -112,6 +133,10 @@ export function extractProvenance(payload: {
   if (command) prov.command = command;
   if (payload.agent) prov.agent = payload.agent;
   if (payload.timestamp) prov.capturedAt = payload.timestamp;
+  // Capped evidence: the memory references files this provenance does not
+  // carry, so hashes over the captured subset can never certify the whole
+  // memory (classifyProvenance caps mixedTrust below `verified`).
+  if (collected.truncated) prov.mixedTrust = true;
   return prov;
 }
 

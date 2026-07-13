@@ -11,9 +11,10 @@
 // Reports 1-recall@10 (FP32's true top-1 found in the backend's top-10) and
 // overlap recall@10 (|top10 ∩ FP32 top10|/10), p50/p95 search latency, add
 // throughput, per-vector memory, then runs the PROMOTION GATE. The gate is
-// what keeps MEMWARDEN_VECTOR_BACKEND defaulting to "typescript": the
-// native backend becomes default-eligible only when every check passes
-// (see config.ts getVectorBackend).
+// what makes the "auto" default honest: @memwarden/turbovec binaries are
+// published only after this gate passes in CI on their platform, so a
+// binary that loads is a binary that earned it (see config.ts
+// getVectorBackend and .github/workflows/turbovec-release.yml).
 //
 //   GATE 1  recall: 1-recall@10 drop vs FP32 <= 2 points
 //   GATE 2  allowlist: filtered search returns ONLY allowed ids
@@ -443,10 +444,11 @@ async function main(): Promise<void> {
 
   console.log(
     allOk
-      ? "\n  RESULT: PASS — turbovec meets the gate on this machine. The default stays" +
-          "\n  'typescript' until CI prebuilds pass this gate on every supported platform;" +
-          "\n  opt in now with MEMWARDEN_VECTOR_BACKEND=turbovec.\n"
-      : "\n  RESULT: FAIL — the default vector backend remains 'typescript'.\n",
+      ? "\n  RESULT: PASS — turbovec meets the promotion gate on this machine. Auto" +
+          "\n  mode selects it whenever the binary loads; pin explicitly with" +
+          "\n  MEMWARDEN_VECTOR_BACKEND=turbovec|typescript.\n"
+      : "\n  RESULT: FAIL — this binary must NOT ship; auto mode falls back to the" +
+          "\n  TypeScript backend on machines where the binding does not load.\n",
   );
   rmSync(scratch, { recursive: true, force: true });
   if (!allOk) process.exitCode = 1;

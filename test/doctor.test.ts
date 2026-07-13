@@ -170,7 +170,10 @@ describe("provenance extraction", () => {
       },
     });
     expect(deep.files ?? []).not.toContain("src/too-deep.ts");
-    // …and the total file count is capped.
+    // …and the truncation is MARKED (mixedTrust), not silent: verification
+    // of the captured subset must never certify the whole memory.
+    expect(deep.mixedTrust).toBe(true);
+    // …and the total file count is capped, also marked.
     const many = extractProvenance({
       cwd: "/w",
       data: {
@@ -180,7 +183,8 @@ describe("provenance extraction", () => {
         },
       },
     });
-    expect((many.files ?? []).length).toBeLessThanOrEqual(20);
+    expect((many.files ?? []).length).toBeLessThanOrEqual(64);
+    expect(many.mixedTrust).toBe(true);
   });
 });
 

@@ -116,9 +116,19 @@ node dist/cli/bin.js doctor .
   UNSOURCED:       1 memory has no evidence
   CONFLICTS:       1 possible contradiction
 
-  [stale]    Edit — references files that no longer match (changed: src/legacy.ts)
+  [stale]    Edit (obs_…) — references files that no longer match (changed: src/legacy.ts)
   [conflict] Edit may contradict Edit — same subject "auth" has incompatible values
 ```
+
+Explain one memory, or clear the stale inbox in one shot:
+
+```bash
+memwarden why obs_abc123          # why verified / sourced / stale / refused
+memwarden doctor . --fix-stale    # forget every stale memory (add --erase to null oplog payloads)
+```
+
+SessionStart also surfaces firewall refusals in-context (not just silent omission), so you
+*see* the firewall work the moment a file drifts.
 
 This is the artifact. Run it against your current memory store and see how much of it is still
 earned.
@@ -346,10 +356,14 @@ on faith.
 Run the product thesis locally without starting a daemon:
 
 ```bash
-npm run demo:trust
+npm run demo:trust      # Verified Recall refusing a stale memory, step by step
+npm run demo:firewall   # the full firewall arc against a real daemon, ending in a byte-scan-proven erasure
 ```
 
-It creates a temp repo, captures a code-backed memory, changes the file, and proves `safe_only`
+`demo:firewall` boots a real daemon and ends by byte-scanning the store to prove the erased
+content is physically gone.
+
+`demo:trust` creates a temp repo, captures a code-backed memory, changes the file, and proves `safe_only`
 recall refuses the now-stale memory while plain search can still find it. Then it captures two
 sourced claims (`runtime uses node 22` / `runtime uses bun runtime`), proves safe recall keeps
 **both** (it never silently drops a true fact), and shows `memwarden doctor` flagging the
@@ -430,8 +444,8 @@ vector stream searches inside an allowlist of in-scope ids (all three backends),
 scan, which left roughly half the slots unfilled (the scope post-filter still runs on every
 candidate as the correctness backstop).
 
-~125× faster search with zero recall drop. Honest defaults: the native backend is **opt-in**
-(`MEMWARDEN_VECTOR_BACKEND=turbovec`) until prebuilt binaries pass CI on every platform, and
+~125× faster search with zero recall drop. Honest defaults: the native backend is quietly
+selected when the prebuilt binary loads (pin one with `MEMWARDEN_VECTOR_BACKEND`), and
 `memwarden status` always names the backend actually serving — a native backend that failed
 to load reports its TypeScript fallback, never a silent claim. The binding lives in
 [`native/turbovec-node/`](native/turbovec-node/) (`@memwarden/turbovec`, MIT).
@@ -440,11 +454,12 @@ to load reports its TypeScript fallback, never a silent claim. The binding lives
 
 | Capability | How |
 | --- | --- |
-| Memory firewall — stale memory never injected | Verified Recall (`safe_only`) |
-| Trust audit — stale / unsourced / conflicts | `memwarden doctor` |
+| Memory firewall — stale memory never injected | Verified Recall (`safe_only`) + visible refusal evidence on SessionStart |
+| Trust audit — stale / unsourced / conflicts | `memwarden doctor` (+ `--fix-stale` to quarantine) |
+| Explain one memory | `memwarden why <id>` |
 | Validity tied to source-file content | per-file SHA-256, re-checked on recall |
 | Tamper-evident store | hash-chained oplog + `memory_verify` |
-| One-command setup across every tool | `memwarden up` (7 tools) |
+| One-command setup across every tool | `memwarden up` (7 tools; auto-prints `status` + next steps) |
 | Self-healing daemon (use + crash + reboot) | LaunchAgent / systemd + revive-on-use |
 | Self-custodied, portable | `export` / `import` Brain Bundle, zero cloud |
 | Compressed storage | TurboQuant, ~6–11× smaller |
@@ -514,7 +529,7 @@ src/cli/tools.ts per-tool MCP adapters: Claude Code, Codex, Cursor, Kiro, Antigr
 src/cli/host-hooks.ts  native lifecycle-hook adapters: Claude Code, Codex, Cursor, Gemini CLI, Kiro, OpenCode
 src/bundle/      portable Brain Bundle export & import
 benchmark/       reproducible recall benchmark
-test/            427 tests: kernel, store parity, oplog, erase + compact, quantizer, MCP,
+test/            589 tests: kernel, store parity, oplog, erase + compact, quantizer, MCP,
                  proxy, tool-wiring, Verified Recall, Déjà Fix, foreign-store audit,
                  delete receipts, injection controls, conflict audit, HTTP security
                  (auth/host/content-type), path scoping, self-heal, cross-tool
@@ -547,6 +562,11 @@ subject/value conflicts as advisories (it never drops them from recall).
 Tamper-*evidence* ships via the hash chain, but oplog *signing* (Ed25519), *encrypted* Brain
 Bundles, and an ANN index for >1M-memory scale are not. These are candidates, not claims. The
 hash chain detects edits and reorders; it does not detect tail-truncation.
+
+**Windows**: the daemon runs, but service supervision (auto-restart on crash, start at login)
+is macOS (launchd) and Linux (systemd) only. On Windows the daemon lives for the login session
+and self-heals on next use; rerun `memwarden up` after a reboot. A Windows service installer is
+on the roadmap, not shipped.
 
 ## License
 

@@ -21,7 +21,6 @@ import type {
 import { KV } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
 import { recordAccessBatch } from "./access-tracker.js";
-import { isSlotsEnabled } from "./config.js";
 import { logger } from "./logger.js";
 import { metrics, estimateTokens } from "../observability/metrics.js";
 
@@ -42,11 +41,6 @@ function block(
   const b: ContextBlock = { type, content, tokens: estimateTokens(content), recency };
   if (sourceIds && sourceIds.length > 0) b.sourceIds = sourceIds;
   return b;
-}
-
-// Slots feature is not part of the core path; no pinned content when disabled.
-async function renderPinnedSlots(_kv: StateKV): Promise<string> {
-  return isSlotsEnabled() ? "" : "";
 }
 
 function profileBlock(profile: ProjectProfile | null): ContextBlock | null {
@@ -100,13 +94,11 @@ export function registerContextFunction(
       const budget = data.budget || tokenBudget;
       const blocks: ContextBlock[] = [];
 
-      const [slotContent, profile, lessons] = await Promise.all([
-        renderPinnedSlots(kv).catch(() => ""),
+      const [profile, lessons] = await Promise.all([
         kv.get<ProjectProfile>(KV.profiles, data.project).catch(() => null),
         kv.list<Lesson>(KV.lessons).catch(() => [] as Lesson[]),
       ]);
 
-      if (slotContent) blocks.push(block("memory", slotContent, Date.now()));
       const pb = profileBlock(profile);
       if (pb) blocks.push(pb);
       const lb = lessonsBlock(lessons, data.project);

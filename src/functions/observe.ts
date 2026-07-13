@@ -21,6 +21,7 @@ import type {
   CompressedObservation,
 } from "./types.js";
 import { projectKey } from "./git-identity.js";
+import { canonicalizePath } from "./paths.js";
 import { KV, STREAM, generateId } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
 import { stripPrivateData } from "./privacy.js";
@@ -35,6 +36,56 @@ import { recordFix, looksLikeResolvedFix } from "./dejafix.js";
 import { getSearchIndex, vectorIndexAddGuarded, vectorIndexRemove } from "./search.js";
 import { logger } from "./logger.js";
 import { metrics } from "../observability/metrics.js";
+
+/**
+ * Defense-in-depth against sessionId reuse across projects.
+ *
+ * MCP and the proxy already mint per-project session ids
+ * (`mcp-<hash>`, `proxy-<port>-<hash>`), but a forged or stale client can
+ * still present an existing sessionId under a different project. A session's
+ * project identity is fixed at creation — refuse the write rather than
+ * silently attach foreign observations (which would make them searchable
+ * under the wrong project and invisible under the right one).
+ *
+ * Prefer stable projectKey (survives worktrees / moved checkouts). Fall back
+ * to canonical project/cwd paths when either side lacks a key. Insufficient
+ * identity on either side fails open so legacy/partial payloads keep working.
+ */
+export function sessionProjectMismatch(
+  session: {
+    project?: string;
+    cwd?: string;
+    projectKey?: string;
+  },
+  incoming: {
+    project?: string;
+    cwd?: string;
+    projectKey?: string;
+  },
+): boolean {
+  if (session.projectKey && incoming.projectKey) {
+    return session.projectKey !== incoming.projectKey;
+  }
+  if (
+    typeof session.project === "string" &&
+    session.project.trim().length > 0 &&
+    typeof incoming.project === "string" &&
+    incoming.project.trim().length > 0
+  ) {
+    return (
+      canonicalizePath(session.project) !== canonicalizePath(incoming.project)
+    );
+  }
+  if (
+    typeof session.cwd === "string" &&
+    session.cwd.trim().length > 0 &&
+    typeof incoming.cwd === "string" &&
+    incoming.cwd.trim().length > 0
+  ) {
+    return canonicalizePath(session.cwd) !== canonicalizePath(incoming.cwd);
+  }
+  return false;
+}
 
 export function extractImage(d: unknown): string | undefined {
   if (!d) return undefined;
@@ -108,7 +159,12 @@ export function registerObserveFunction(
           : payload.hookType === "session_end"
             ? { data: d, ts: payload.timestamp }
             : d["prompt"];
-      dedupHash = dedupMap.computeHash(payload.sessionId, toolName, dedupInput);
+      // The dedup key is scoped by project as well as session: without it, a
+      // cross-project write into an existing session that happens to carry
+      // identical data would short-circuit here as a silent "success" before
+      // the session-project mismatch guard below ever sees it.
+      const dedupScope = `${payload.sessionId}|${payload.project ?? payload.cwd ?? ""}`;
+      dedupHash = dedupMap.computeHash(dedupScope, toolName, dedupInput);
       if (dedupMap.isDuplicate(dedupHash)) {
         return { deduplicated: true, sessionId: payload.sessionId };
       }
@@ -209,7 +265,30 @@ export function registerObserveFunction(
         agentId?: string;
         observationCount?: number;
         firstPrompt?: string;
+        project?: string;
+        cwd?: string;
+        projectKey?: string;
       }>(KV.sessions, payload.sessionId);
+
+      // Defense-in-depth: refuse cross-project writes into an existing session
+      // (MCP/proxy already mint per-project session ids; this catches reuse).
+      if (
+        existingSession &&
+        sessionProjectMismatch(existingSession, {
+          ...(typeof payload.project === "string"
+            ? { project: payload.project }
+            : {}),
+          ...(typeof payload.cwd === "string" ? { cwd: payload.cwd } : {}),
+          ...(stableProjectKey ? { projectKey: stableProjectKey } : {}),
+        })
+      ) {
+        return {
+          success: false,
+          error:
+            "Session project mismatch: observation project does not match the existing session",
+        };
+      }
+
       const inheritedAgentId = existingSession
         ? existingSession.agentId
         : getAgentId();

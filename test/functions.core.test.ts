@@ -130,6 +130,58 @@ describe("mem::observe (write path)", () => {
     expect(second).toMatchObject({ deduplicated: true });
   });
 
+  it("refuses an observation when the session already belongs to another project", async () => {
+    await kv.set(KV.sessions, "sess-A", {
+      id: "sess-A",
+      project: "/work/proj-X",
+      cwd: "/work/proj-X",
+      projectKey: "/work/proj-X",
+      startedAt: new Date().toISOString(),
+      status: "active",
+      observationCount: 1,
+    });
+    const r = await sdk.trigger<
+      unknown,
+      { success?: boolean; error?: string; observationId?: string }
+    >({
+      function_id: "mem::observe",
+      payload: observePayload({
+        project: "/work/proj-Y",
+        cwd: "/work/proj-Y",
+        data: { tool_name: "Grep", tool_input: { pattern: "cross-project" } },
+      }),
+    });
+    expect(r).toMatchObject({
+      success: false,
+      error: expect.stringMatching(/project mismatch/i),
+    });
+    expect(r.observationId).toBeUndefined();
+    // Nothing written under the hijacked session.
+    const obs = await kv.list(KV.observations("sess-A"));
+    expect(obs).toHaveLength(0);
+  });
+
+  it("allows a same-project observation even when the path representation differs", async () => {
+    await kv.set(KV.sessions, "sess-A", {
+      id: "sess-A",
+      project: "/work/proj-X",
+      cwd: "/work/proj-X",
+      projectKey: "/work/proj-X",
+      startedAt: new Date().toISOString(),
+      status: "active",
+      observationCount: 0,
+    });
+    const r = await sdk.trigger<unknown, { observationId?: string }>({
+      function_id: "mem::observe",
+      payload: observePayload({
+        project: "/work/proj-X",
+        cwd: "/work/proj-X",
+        data: { tool_name: "Grep", tool_input: { pattern: "same-project" } },
+      }),
+    });
+    expect(r.observationId).toMatch(/^obs_/);
+  });
+
   it("redacts secrets so they never persist (privacy stripping)", async () => {
     await sdk.trigger({
       function_id: "mem::observe",
@@ -351,6 +403,23 @@ describe("HTTP routes (wire compatibility)", () => {
         body: JSON.stringify({ hookType: "post_tool_use" }),
       });
       expect(bad.status).toBe(400);
+
+      // observe refused by the session-project mismatch guard -> 409, not a
+      // silent 201 (the refusal must be visible at the HTTP boundary).
+      const mismatch = await fetch(`${base}/observe`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(
+          observePayload({ project: "proj-OTHER", cwd: "/work/proj-OTHER" }),
+        ),
+      });
+      expect(mismatch.status).toBe(409);
+      const mismatchBody = (await mismatch.json()) as {
+        success?: boolean;
+        error?: string;
+      };
+      expect(mismatchBody.success).toBe(false);
+      expect(mismatchBody.error).toMatch(/mismatch/i);
 
       // search -> 200.
       const search = await fetch(`${base}/search`, {

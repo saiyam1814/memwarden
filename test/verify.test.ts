@@ -23,6 +23,7 @@ import { StoreLibsql } from "../src/state/store-libsql.js";
 import { StateKV } from "../src/state/kv.js";
 import { registerCoreFunctions, getSearchIndex } from "../src/functions/index.js";
 import { classifyProvenance, hashFiles } from "../src/functions/verify.js";
+import { extractProvenance } from "../src/functions/provenance.js";
 import type { Provenance } from "../src/functions/types.js";
 
 let sdk: Kernel;
@@ -292,6 +293,29 @@ describe("Verified Recall firewall (safe_only)", () => {
 
     // safe_only recall now firewalls the stale memory...
     expect(await search(root, true)).toBe(0);
+    // ...and surfaces refusal evidence so hooks can show the firewall working.
+    const blocked = (await sdk.trigger({
+      function_id: "mem::search",
+      payload: {
+        query: "bearer",
+        cwd: root,
+        project: root,
+        limit: 5,
+        safe_only: true,
+        format: "narrative",
+      },
+    })) as {
+      text?: string;
+      firewall?: {
+        refused: number;
+        samples: Array<{ obsId?: string; title?: string; reason?: string }>;
+      };
+    };
+    expect(blocked.firewall?.refused).toBeGreaterThan(0);
+    expect(blocked.firewall?.samples?.length).toBeGreaterThan(0);
+    // Evidence, not content: samples carry the id + reason, never the title.
+    expect(blocked.firewall?.samples?.[0]?.obsId).toBeTruthy();
+    expect(blocked.firewall?.samples?.[0]?.title).toBeUndefined();
     // ...but a plain (unverified) search still returns it.
     expect(await search(root, false)).toBeGreaterThan(0);
   });
@@ -452,5 +476,65 @@ describe("Verified Recall firewall (safe_only)", () => {
       payload: { query: "runtime uses", cwd: root, project: root, limit: 10 },
     })) as { results: unknown[] };
     expect(plain.results.length).toBe(2);
+  });
+});
+
+describe("capped capture evidence never certifies verified (truncation)", () => {
+  // The false-verified repro: a tool call referencing MORE files than the
+  // capture cap. The uncaptured tail can drift undetected, so hashes over
+  // the captured subset must cap the verdict at sourced_unverified.
+  it("marks truncated captures mixedTrust and refuses to verify them", () => {
+    const root = mkdtempSync(join(tmpdir(), "mw-trunc-"));
+    try {
+      const names: string[] = [];
+      for (let i = 1; i <= 65; i++) {
+        const f = `f${String(i).padStart(2, "0")}.ts`;
+        writeFileSync(join(root, f), `export const x${i} = ${i};\n`);
+        names.push(f);
+      }
+      const prov = extractProvenance({
+        cwd: root,
+        data: {
+          tool_name: "Patch",
+          tool_input: { changes: names.map((f) => ({ file_path: f })) },
+        },
+      });
+      prov.fileHashes = hashFiles(prov.files, root);
+      expect(prov.mixedTrust).toBe(true);
+
+      // Drift ONLY the uncaptured file: must not come back verified.
+      writeFileSync(join(root, "f65.ts"), "// drifted\n");
+      expect(classifyProvenance(prov, root).status).toBe("sourced_unverified");
+
+      // Drift a TRACKED file: staleness detection still works.
+      writeFileSync(join(root, "f01.ts"), "// drifted too\n");
+      expect(classifyProvenance(prov, root).status).toBe("stale");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not mark small captures (no truncation) — they still verify", () => {
+    const root = mkdtempSync(join(tmpdir(), "mw-notrunc-"));
+    try {
+      const names: string[] = [];
+      for (let i = 1; i <= 10; i++) {
+        const f = `s${i}.ts`;
+        writeFileSync(join(root, f), `export const y = ${i};\n`);
+        names.push(f);
+      }
+      const prov = extractProvenance({
+        cwd: root,
+        data: {
+          tool_name: "Patch",
+          tool_input: { changes: names.map((f) => ({ file_path: f })) },
+        },
+      });
+      prov.fileHashes = hashFiles(prov.files, root);
+      expect(prov.mixedTrust).toBeUndefined();
+      expect(classifyProvenance(prov, root).status).toBe("verified");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
