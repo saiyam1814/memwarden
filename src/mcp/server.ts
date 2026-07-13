@@ -21,6 +21,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { canonicalizePath } from "../functions/paths.js";
+import { frameMemoryBlock } from "../functions/injection-format.js";
 
 const PROTOCOL_VERSION = "2024-11-05";
 const SERVER_NAME = "memwarden";
@@ -454,8 +455,12 @@ export function createMcpServer(opts: McpServerOptions) {
           "what was I working on in this project",
         );
         const text = await recallText(query);
+        // Same shared framing + delimiter defense as every other injection
+        // surface: recalled content is DATA, and an embedded closing marker
+        // cannot break out of the block.
         const body = text
-          ? `Relevant memory recalled by memwarden (scoped to this project) for "${query}":\n\n${text}`
+          ? `Relevant memory recalled by memwarden (scoped to this project) for "${query}".\n` +
+            frameMemoryBlock(text)
           : `No relevant memory found for "${query}".`;
         return ok(id, {
           description: `memwarden recall: ${query}`,

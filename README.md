@@ -529,7 +529,7 @@ src/cli/tools.ts per-tool MCP adapters: Claude Code, Codex, Cursor, Kiro, Antigr
 src/cli/host-hooks.ts  native lifecycle-hook adapters: Claude Code, Codex, Cursor, Gemini CLI, Kiro, OpenCode
 src/bundle/      portable Brain Bundle export & import
 benchmark/       reproducible recall benchmark
-test/            589 tests: kernel, store parity, oplog, erase + compact, quantizer, MCP,
+test/            597 tests: kernel, store parity, oplog, erase + compact, quantizer, MCP,
                  proxy, tool-wiring, Verified Recall, Déjà Fix, foreign-store audit,
                  delete receipts, injection controls, conflict audit, HTTP security
                  (auth/host/content-type), path scoping, self-heal, cross-tool

@@ -97,6 +97,7 @@ describe("mem::forget", () => {
           chainIntact: rec.chainIntact,
           contentErased: rec.contentErased,
           eraseIncomplete: rec.eraseIncomplete,
+          residualScan: rec.residualScan,
           chainHead: rec.chainHead,
         }),
       )

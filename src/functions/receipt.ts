@@ -82,6 +82,15 @@ export interface DeleteReceipt {
    */
   eraseIncomplete: string | null;
   /**
+   * Outcome of the post-erase residual scan (hashed, like every claim):
+   * "clean" — no trace of the erased content in the session's remaining
+   * records; "residuals" — matches found (named in eraseIncomplete);
+   * "limited" — the erased content contains values below the detection
+   * floor, so the scan cannot be conclusive and contentErased is refused.
+   * null on plain (non-erase) forgets.
+   */
+  residualScan: "clean" | "residuals" | "limited" | null;
+  /**
    * Chain head (id + hash) at receipt issuance, identifying WHICH chain the
    * cited entries live in. `memwarden compact` re-chains every hash; receipts
    * issued before a compaction validate against the PRE-compaction chain,
@@ -116,6 +125,7 @@ function receiptHash(fields: Omit<DeleteReceipt, "receiptHash">): string {
     chainIntact: fields.chainIntact,
     contentErased: fields.contentErased,
     eraseIncomplete: fields.eraseIncomplete,
+    residualScan: fields.residualScan,
     chainHead: fields.chainHead,
   });
   return createHash("sha256").update(canonical).digest("hex");
@@ -141,28 +151,38 @@ function isHandoffObservation(obs: CompressedObservation | undefined): boolean {
 // legitimately repeat across records):
 //   - 5-word shingles catch shared phrases;
 //   - whole short strings (< 5 words, >= 6 chars) catch compact values;
-//   - DISTINCTIVE TOKENS catch short secrets — the "PIN 7391" class that
-//     matters most during erasure: any digit-bearing token (>= 3 chars,
-//     excluding year-shaped ones, which would false-positive on dates) and
-//     any long identifier (>= 12 chars).
-// A short all-alphabetic common word shared with a sibling can still escape
-// detection — the receipt's documented scope, not a hidden gap. False
-// positives only ever push contentErased toward `false` (never overclaim).
+//   - DISTINCTIVE TOKENS catch short secrets — the "PIN 7391" class: any
+//     digit-bearing token (>= 3 chars, excluding year-shaped ones, which
+//     would false-positive on dates) and any long identifier (>= 12 chars);
+//   - SHORT BODY VALUES ("admin"): a body-field string under 6 chars becomes
+//     a word-boundary token needle (>= 3 chars). Body fields only — titles
+//     are mechanical, and matching "Edit" against every sibling would drown
+//     the signal.
+// When a body value is SO short it cannot be scanned meaningfully (< 3
+// chars), the scan is marked LIMITED and the receipt refuses the headline
+// claim rather than overstate it. False positives only ever push
+// contentErased toward `false` (never overclaim).
 
-const CONTENT_FIELDS = [
-  "title",
-  "subtitle",
-  "narrative",
-  "userPrompt",
-  "assistantResponse",
-] as const;
+// Title/subtitle are usually mechanical (tool names, "Session handoff: …"),
+// so they participate in phrase/whole matching but never in the short-token
+// tier — otherwise every erased "Edit" would flag every sibling "Edit".
+const MECHANICAL_FIELDS = ["title", "subtitle"] as const;
+const BODY_FIELDS = ["narrative", "userPrompt", "assistantResponse"] as const;
 
-function contentStrings(obs: Record<string, unknown>): string[] {
+function fieldStrings(
+  obs: Record<string, unknown>,
+  fields: readonly string[],
+): string[] {
   const out: string[] = [];
-  for (const k of CONTENT_FIELDS) {
+  for (const k of fields) {
     const v = obs[k];
     if (typeof v === "string" && v.trim()) out.push(v);
   }
+  return out;
+}
+
+function bodyStrings(obs: Record<string, unknown>): string[] {
+  const out = fieldStrings(obs, BODY_FIELDS);
   const facts = obs["facts"];
   if (Array.isArray(facts)) {
     for (const f of facts) if (typeof f === "string" && f.trim()) out.push(f);
@@ -175,6 +195,10 @@ function contentStrings(obs: Record<string, unknown>): string[] {
   return out;
 }
 
+function contentStrings(obs: Record<string, unknown>): string[] {
+  return [...fieldStrings(obs, MECHANICAL_FIELDS), ...bodyStrings(obs)];
+}
+
 const SHINGLE_N = 5;
 
 function wordsOf(text: string): string[] {
@@ -185,8 +209,12 @@ interface ContentNeedles {
   shingles: Set<string>;
   /** Short-but-distinctive whole strings (< SHINGLE_N words, >= 6 chars). */
   whole: string[];
-  /** Distinctive single tokens: digit-bearing (non-year) or long ids. */
+  /** Distinctive single tokens: digit-bearing (non-year) or long ids —
+   * plus every word (>= 3 chars) of a short BODY value like "admin". */
   tokens: Set<string>;
+  /** A body value existed that is too short to scan (< 3 chars): residual
+   * verification is incomplete and the receipt must not claim clean. */
+  limited: boolean;
 }
 
 function isDistinctiveToken(w: string): boolean {
@@ -199,6 +227,8 @@ function needlesOf(obs: Record<string, unknown>): ContentNeedles {
   const shingles = new Set<string>();
   const whole: string[] = [];
   const tokens = new Set<string>();
+  let limited = false;
+  const bodySet = new Set(bodyStrings(obs));
   for (const s of contentStrings(obs)) {
     if (/^\d{4}-\d{2}-\d{2}T/.test(s.trim())) continue; // timestamps
     const words = wordsOf(s);
@@ -209,9 +239,15 @@ function needlesOf(obs: Record<string, unknown>): ContentNeedles {
       }
     } else if (s.trim().length >= 6) {
       whole.push(s.trim());
+    } else if (bodySet.has(s)) {
+      // A short BODY value ("admin"): every word >= 3 chars becomes a
+      // word-boundary needle; anything shorter cannot be scanned.
+      const scannable = words.filter((w) => w.length >= 3);
+      for (const w of scannable) tokens.add(w);
+      if (scannable.length === 0) limited = true;
     }
   }
-  return { shingles, whole, tokens };
+  return { shingles, whole, tokens, limited };
 }
 
 function sharesErasedContent(needles: ContentNeedles, text: string): boolean {
@@ -503,6 +539,7 @@ export function registerReceiptFunction(sdk: ISdk, kv: StateKV): void {
       // recovery path is `memwarden compact` — and the receipt says so.
       let sourceErased = false;
       let eraseBlocked: string | undefined;
+      let residualScan: "clean" | "residuals" | "limited" = "clean";
       if (data?.erase === true) {
         let refusal: string | undefined;
         try {
@@ -555,17 +592,29 @@ export function registerReceiptFunction(sdk: ISdk, kv: StateKV): void {
           residuals.push("stored session summary");
         }
         if (residuals.length > 0) {
+          residualScan = "residuals";
           const note =
             `erased content still appears in: ${residuals.join(", ")} — ` +
             `independent records are not silently deleted; forget them too, then \`memwarden compact\``;
+          eraseBlocked = [eraseBlocked, note].filter(Boolean).join("; ");
+        } else if (needles.limited) {
+          residualScan = "limited";
+          const note =
+            `the erased content contains values below the residual-detection floor ` +
+            `(< 3 chars); the scan cannot be conclusive — review this session's records ` +
+            `and run \`memwarden compact\``;
           eraseBlocked = [eraseBlocked, note].filter(Boolean).join("; ");
         }
       }
       // contentErased is the receipt's headline claim: true ONLY when the
       // source payloads were nulled, every derived copy was scrubbed, AND
-      // the residual scan found no remaining copy of the content.
+      // the residual scan came back conclusively clean. A limited scan
+      // refuses the claim instead of overstating it.
       const contentErased =
-        sourceErased && cascadeBlocked.length === 0 && eraseBlocked === undefined;
+        sourceErased &&
+        cascadeBlocked.length === 0 &&
+        eraseBlocked === undefined &&
+        residualScan !== "limited";
 
       // Build the receipt from the chain — scoped to this observation's own
       // KV scope so a same-named key in another scope can't be mis-cited.
@@ -601,6 +650,7 @@ export function registerReceiptFunction(sdk: ISdk, kv: StateKV): void {
         chainIntact: verdict.ok === true,
         contentErased,
         eraseIncomplete: data?.erase === true ? (eraseBlocked ?? null) : null,
+        residualScan: data?.erase === true ? residualScan : null,
         chainHead: head.hash ? { id: head.id, hash: head.hash } : null,
       };
       const receipt: DeleteReceipt = { ...base, receiptHash: receiptHash(base) };

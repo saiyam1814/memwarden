@@ -431,10 +431,14 @@ async function why(rest: string[]): Promise<void> {
         /<(\/?)memwarden-refused-content>/gi,
         "&lt;$1memwarden-refused-content&gt;",
       );
+  // Single-line variant for metadata (verdict reasons embed repo-controlled
+  // FILE NAMES, which can carry newlines/control sequences): flatten to one
+  // line so hostile metadata cannot fabricate its own output lines.
+  const cleanLine = (s: string): string => cleanText(s).replace(/\s*\n\s*/g, " ");
   const refusedByPolicy = r.injectable !== true;
   console.log(`\nmemwarden why — ${o.id}\n`);
   if (!refusedByPolicy || showContent) {
-    console.log(`  title      ${cleanText(o.title)}`);
+    console.log(`  title      ${cleanLine(o.title)}`);
   } else {
     console.log(
       `  title      (withheld — this memory is refused under the current policy; add --content to print it as quoted data)`,
@@ -443,7 +447,7 @@ async function why(rest: string[]): Promise<void> {
   console.log(`  type       ${o.type} · captured ${o.timestamp}`);
   console.log(`  session    ${o.sessionId}${r.session?.agentId ? ` (${r.session.agentId})` : ""}`);
   if (r.session) console.log(`  project    ${r.session.project}`);
-  console.log(`  verdict    [${v.trust}] ${v.status} — ${v.reason}`);
+  console.log(`  verdict    [${v.trust}] ${v.status} — ${cleanLine(v.reason)}`);
   console.log(`  injectable ${r.injectable ? "yes (under current policy)" : "no — firewall / policy withholds it"}`);
   const files = r.provenance?.files ?? [];
   const hashes = r.provenance?.fileHashes ?? {};
@@ -451,7 +455,9 @@ async function why(rest: string[]): Promise<void> {
     console.log(`  evidence`);
     for (const f of files.slice(0, 8)) {
       const h = hashes[f];
-      console.log(`    ${f}${h ? `  sha256:${h.slice(0, 12)}…` : "  (no hash at capture)"}`);
+      console.log(
+        `    ${cleanLine(f)}${h ? `  sha256:${h.slice(0, 12)}…` : "  (no hash at capture)"}`,
+      );
     }
   } else {
     console.log(`  evidence   none (unsourced or command-only)`);

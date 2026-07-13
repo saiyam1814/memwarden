@@ -1257,3 +1257,71 @@ describe("residual detection catches SHORT secrets (the PIN 7391 class)", () => 
     expect(r.receipt!.contentErased).toBe(true);
   });
 });
+
+describe("residual detection catches short ALPHABETIC values (the admin class)", () => {
+  let sdk: Kernel;
+  let kv: StateKV;
+  beforeEach(() => {
+    __resetKernelSingleton();
+    getSearchIndex().clear();
+    sdk = registerWorker("in-process", { workerName: "memwarden-admin" }, { store: new StoreMemory() });
+    kv = new StateKV(sdk);
+    registerCoreFunctions(sdk, kv);
+  });
+  afterEach(() => {
+    __resetKernelSingleton();
+  });
+
+  async function eraseWithSibling(prompt: string, siblingOutput: string) {
+    const base = { sessionId: "sess-ADM", project: "proj-ADM", cwd: "/w/adm" };
+    const p = await sdk.trigger<unknown, { observationId: string }>({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "user_prompt",
+        ...base,
+        timestamp: "2026-07-13T10:00:00.000Z",
+        data: { prompt },
+      },
+    });
+    await sdk.trigger({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "post_tool_use",
+        ...base,
+        timestamp: "2026-07-13T10:05:00.000Z",
+        data: {
+          tool_name: "Bash",
+          tool_input: { command: "whoami" },
+          tool_output: siblingOutput,
+        },
+      },
+    });
+    return sdk.trigger<unknown, ForgetResult>({
+      function_id: "mem::erase",
+      payload: { observationId: p.observationId },
+    });
+  }
+
+  it('erasing "admin" while a sibling echoes it: contentErased false, residuals named', async () => {
+    const r = await eraseWithSibling("admin", "current user: admin");
+    expect(r.deleted).toBe(true);
+    expect(r.receipt!.contentErased).toBe(false);
+    expect(r.receipt!.residualScan).toBe("residuals");
+    expect(r.receipt!.eraseIncomplete).toMatch(/still appears in/);
+  });
+
+  it('erasing "admin" with clean siblings: conclusive clean scan, contentErased true', async () => {
+    const r = await eraseWithSibling("admin", "current user: guest");
+    expect(r.deleted).toBe(true);
+    expect(r.receipt!.contentErased).toBe(true);
+    expect(r.receipt!.residualScan).toBe("clean");
+  });
+
+  it("a value below the scan floor (< 3 chars) refuses the headline claim as LIMITED", async () => {
+    const r = await eraseWithSibling("42", "the answer is 42");
+    expect(r.deleted).toBe(true);
+    expect(r.receipt!.contentErased).toBe(false);
+    expect(r.receipt!.residualScan).toBe("limited");
+    expect(r.receipt!.eraseIncomplete).toMatch(/below the residual-detection floor/);
+  });
+});

@@ -28,9 +28,9 @@ firewall made measurable.
   top-10s become full, 15–22 ms becomes ≤1.5 ms TypeScript / 0.2 ms native).
 - **Firewall demo and eval**: `npm run demo:firewall` (real daemon, ends in a byte-scan-proven
   erasure) and `npm run eval` — 250 memories across verified/sourced/unsourced classes,
-  5 projects, 50 staleness events, 5 poisoned-handoff traps; CI-gated at 100% on all seven
-  gates (stale-retrievable, stale-refusal, fresh-retention, isolation, label accuracy,
-  handoff-trust, verified-only policy).
+  5 projects, 50 staleness events, 5 poisoned-handoff traps, 3 delimiter forgeries; CI-gated
+  at 100% on all eight gates (stale-retrievable, stale-refusal, fresh-retention, isolation,
+  label accuracy, handoff-trust, verified-only policy, injection containment).
 - `memwarden why <id>` explains one memory's trust verdict; `doctor --fix-stale [--erase]`
   clears the stale inbox; `up` ends with live status and concrete next steps; SessionStart
   surfaces firewall refusal evidence instead of a silent empty inject.
@@ -66,7 +66,8 @@ firewall made measurable.
 - The firewall demo now proves its erasure claim: it erases every canary-bearing observation,
   compacts, and byte-scans the store files — and exits non-zero if the canary survives.
 - The eval gained gates for retrievability preconditions, sourced/unsourced label accuracy,
-  poisoned-handoff traps, and the verified-only policy (250 memories, 7 gates, all at 100%).
+  poisoned-handoff traps, the verified-only policy, and injection containment (forged
+  delimiters through real storage + recall + the shared formatter) — 8 gates, all at 100%.
 - **Capped capture evidence never certifies `verified`**: when a tool call references more
   files than the capture bound (now 64, was a silent 20) or nests deeper than the walk,
   the provenance is marked incomplete — drift in an uncaptured file can no longer hide
@@ -85,12 +86,21 @@ firewall made measurable.
 - The cascade computes every re-derived value before writing (idempotent two-phase apply),
   and a partial failure reports honestly: source not deleted, derived records possibly
   partially re-derived, retry converges.
+- **One shared injection formatter for every surface**: SessionStart, the proxy, Déjà Fix
+  (whose root cause used to sit outside the markers), and the MCP `/recall` prompt (which had
+  no framing at all) now build their blocks in `injection-format.ts` — framing plus delimiter
+  defanging, with a formatter-level invariant test and an eval gate.
+- Residual detection covers short body values (`admin`) via word-boundary tokens, and receipts
+  carry a hashed tri-state `residualScan` (`clean` / `residuals` / `limited`): a value below
+  the detection floor marks the scan `limited` and the headline `contentErased` is refused
+  rather than overstated.
 - Refusal-notice hardening: verdict reasons (which embed repo-controlled file names) are
   stripped of control characters, `<`/`>`/`&`-escaped (a filename can no longer forge a
   closing delimiter and break out of the block), and rendered inside an explicit
   untrusted-data block; recalled-memory injection defangs its own delimiter the same way;
   `memwarden why` withholds refused content by default (`--content` prints it as framed,
-  sanitized data).
+  sanitized data), and sanitizes verdict reasons, file names, and titles in its metadata
+  lines (repo-controlled names cannot fabricate output lines).
 - Release hardening: the retired `macos-13` runner replaced with `macos-15-intel`; Linux
   native binaries must pass a clean-container (no OpenBLAS) load test before publish; the
   npm release gate now runs the firewall eval and the end-to-end demo.

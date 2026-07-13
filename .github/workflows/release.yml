@@ -27,7 +27,7 @@ jobs:
       - run: npx vitest run
       # The trust gates. A release that passes unit tests but breaks the
       # firewall would ship a broken CENTRAL promise — so the eval corpus
-      # (7 gates at 100%) and the end-to-end demo (real daemon, byte-scan
+      # (8 gates at 100%) and the end-to-end demo (real daemon, byte-scan
       # proven erasure, exits non-zero on any broken stage) both block it.
       - run: npm run build
       - name: firewall eval gate

@@ -347,6 +347,7 @@ npm test 2>&1 | npx memwarden <span class="a">dejafix lookup</span></pre>
       <tr><td>Label accuracy — recall labels match ground truth across all three classes (verified / sourced / unsourced)</td><td class="ok">100%</td></tr>
       <tr><td>Handoff traps — hostile unsourced prompts beside fresh file hashes never laundered to <code>verified</code></td><td class="ok">0 laundered</td></tr>
       <tr><td>Verified-only policy — sourced, unsourced, and handoff digests refused; verified memory still flows</td><td class="ok">100%</td></tr>
+      <tr><td>Injection containment — forged <code>&lt;/memwarden-memory&gt;</code> delimiters stored as real memory cannot escape the untrusted-data block on any surface</td><td class="ok">100%</td></tr>
     </table>
     <p class="note">Labels (<code>verified</code> / <code>sourced</code> / <code>unsourced</code>)
       appear on compact and narrative recall formats — the ones agents actually read. The raw
@@ -383,7 +384,7 @@ npm test 2>&1 | npx memwarden <span class="a">dejafix lookup</span></pre>
       native backend is quietly selected when the prebuilt binary loads (pin with
       <code>MEMWARDEN_VECTOR_BACKEND</code>), and <code>memwarden status</code> always names the
       backend actually serving — a native backend that failed to load reports its TypeScript
-      fallback, never a silent claim. 589 tests, including a Verified Recall suite, the Déjà Fix
+      fallback, never a silent claim. 597 tests, including a Verified Recall suite, the Déjà Fix
       engine, HTTP security (auth / host firewall / content-type), per-host hook dialects, and a
       cross-tool reliability harness that proves memory captured in one tool is recalled in
       another.</p>
