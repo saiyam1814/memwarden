@@ -33,6 +33,16 @@ export interface HookPayload {
   data: unknown;
   /** Which agent captured this (claude, codex, cursor, …). Optional. */
   agent?: string;
+  /**
+   * Set by `memwarden adopt` when seeding a FOREIGN memory store (CLAUDE.md,
+   * claude-mem, Mem0) into the brain. Such memories carry no capture-time file
+   * hashes, so hashing their referenced files against the current repo would
+   * forge a `verified` verdict for a fact that was never content-anchored.
+   * When true, the capture path records the referenced files WITHOUT hashing
+   * them, so the memory can only ever classify as `sourced_unverified` (or
+   * `stale` if a referenced file is gone) — never `verified`.
+   */
+  adopted?: boolean;
 }
 
 export interface Session {

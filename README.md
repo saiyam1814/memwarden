@@ -47,6 +47,8 @@ memwarden up
 
 `memwarden down --all` reverses everything it wrote; `--data` deletes the brain. Prefer to try before you install? `npx memwarden audit <store>` needs no daemon and no setup.
 
+**Already have memory elsewhere?** `memwarden adopt <store>` seeds an existing CLAUDE.md, claude-mem db, or Mem0 export into the brain so it flows across your agents. Adopted memory carries no capture-time hashes, so it is labeled `sourced` (drift-aware but not content-`verified`) - honest by construction; only memory captured going forward earns `verified`. Run `memwarden audit <store>` first to preview exactly what you are adopting.
+
 ## 🤔 Why memwarden
 
 The failure mode that hurts isn't forgetting - it's **confidently wrong recall**. A stored fact goes
@@ -155,6 +157,7 @@ verifiable-erasure model - is in **[docs/architecture.md](docs/architecture.md)*
 | `memwarden status` | daemon, backend, and per-tool detected/configured/live |
 | `memwarden doctor .` | trust audit of this project (`--fix-stale`, `--erase`) |
 | `memwarden audit <store>` | audit a foreign store (claude-mem, CLAUDE.md, Mem0) - no daemon |
+| `memwarden adopt <store>` | seed a foreign store into the brain (labeled `sourced`, never `verified`) |
 | `memwarden why <id>` | explain one memory's trust verdict |
 | `memwarden forget <id>` | delete with a tamper-evident receipt (`--erase` scrubs the oplog) |
 | `memwarden export / import` | move your brain between machines |

@@ -496,7 +496,12 @@ export function registerObserveFunction(
         // judge whether this memory is sourced and still valid. Hash the
         // referenced files now (under cwd) so content drift is detectable.
         const prov = extractProvenance(payload);
-        if (prov.files && prov.files.length > 0 && payload.cwd) {
+        // Adopted memories (seeded from a foreign store by `memwarden adopt`)
+        // had no capture-time hashes. Hashing their files against the current
+        // repo would forge a `verified` verdict for a fact that was never
+        // content-anchored, so we keep the file references but never hash them
+        // — classifyProvenance then caps them at `sourced_unverified`.
+        if (!payload.adopted && prov.files && prov.files.length > 0 && payload.cwd) {
           const fileHashes = hashFiles(prov.files, payload.cwd);
           if (Object.keys(fileHashes).length > 0) prov.fileHashes = fileHashes;
         }
