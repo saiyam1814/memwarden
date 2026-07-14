@@ -36,3 +36,9 @@ apps, cloud sync, and team memory are candidates, not claims.
 macOS (launchd) and Linux (systemd) only. On Windows the daemon lives for the login session and
 self-heals on next use; rerun `memwarden up` after a reboot. A Windows service installer is on the
 roadmap, not shipped.
+
+**Native turbovec backend**: prebuilt for macOS (arm64/x64) and Linux x64. Linux arm64 and Windows
+use the pure-TypeScript vector backend — same results, just not the ~125× speedup. `memwarden
+status` always names the backend actually serving, and the default (`auto`) loads native only where
+its binary is present. So memwarden is correct and fully functional everywhere; native is an
+accelerator, never a requirement.

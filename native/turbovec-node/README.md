@@ -72,15 +72,20 @@ and `blas-src` + `extern crate blas_src` route ndarray to it, so the shipped
 `.node` has no runtime `libopenblas.so` dependency and loads on a bare
 machine. A CI clean-container gate (no OpenBLAS installed) enforces this.
 
-## Prebuild CI matrix (plan)
+## Prebuild CI matrix
 
 | Target | Status |
 | --- | --- |
-| `aarch64-apple-darwin` (darwin-arm64) | build + test + publish prebuild |
-| `x86_64-apple-darwin` (darwin-x64) | build + test + publish prebuild |
-| `x86_64-unknown-linux-gnu` (linux-x64 gnu) | build + test + publish prebuild |
-| `aarch64-unknown-linux-gnu` (linux-arm64 gnu) | build + publish prebuild (test under QEMU) |
-| Windows | **not built** — memwarden explicitly falls back to the TypeScript backend |
+| `aarch64-apple-darwin` (darwin-arm64) | build + test + benchmark + publish prebuild |
+| `x86_64-apple-darwin` (darwin-x64) | build + test + benchmark + publish prebuild |
+| `x86_64-unknown-linux-gnu` (linux-x64 gnu) | build (old-glibc container, static OpenBLAS) + test + benchmark + clean-container gate + publish prebuild |
+| `aarch64-unknown-linux-gnu` (linux-arm64 gnu) | **not built yet** — OpenBLAS's Neoverse kernels fail to compile under the old-glibc toolchain; TypeScript fallback until a clean arm64 path lands |
+| Windows | **not built** — TypeScript fallback |
+
+memwarden's `auto` backend loads the native engine wherever its prebuilt
+binary is present and honestly falls back to TypeScript otherwise
+(`memwarden status` names the backend actually serving), so unshipped targets
+are correct-everywhere, just not accelerated.
 
 Each prebuild job must run the full `test/turbovec-native.test.ts` suite and
 `npm run benchmark:backends` (the promotion gate) against its artifact.
