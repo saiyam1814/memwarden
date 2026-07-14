@@ -64,6 +64,7 @@ export const HOOK_HOSTS = [
   "codex",
   "cursor",
   "gemini",
+  "grok",
   "kiro",
   "opencode",
 ] as const;
@@ -131,10 +132,15 @@ export function parseHostEvent(raw: string, host: HookHost): CanonicalEvent {
   } catch {
     obj = {};
   }
-  if (host === "opencode") {
+  // camelCase hosts: our own OpenCode plugin speaks the canonical names, and
+  // Grok's runner emits the same shape natively — {hookEventName, sessionId,
+  // cwd, workspaceRoot, toolName, toolInput, toolResult}. Verified against
+  // Grok's documented stdin example and the key set in the grok binary; the
+  // only divergence is the tool-output field (`toolResult`, not toolOutput).
+  if (host === "opencode" || host === "grok") {
     const evt: CanonicalEvent = {};
     const sessionId = str(obj["sessionId"]);
-    const cwd = str(obj["cwd"]);
+    const cwd = str(obj["cwd"]) ?? str(obj["workspaceRoot"]);
     const toolName = str(obj["toolName"]);
     const prompt = str(obj["prompt"]);
     const reason = str(obj["reason"]);
@@ -144,6 +150,7 @@ export function parseHostEvent(raw: string, host: HookHost): CanonicalEvent {
     if (toolName) evt.toolName = toolName;
     if ("toolInput" in obj) evt.toolInput = obj["toolInput"];
     if ("toolOutput" in obj) evt.toolOutput = obj["toolOutput"];
+    else if ("toolResult" in obj) evt.toolOutput = obj["toolResult"];
     if (prompt) evt.prompt = prompt;
     if (reason) evt.reason = reason;
     if (assistant) evt.assistantResponse = assistant;
@@ -206,6 +213,15 @@ export function formatInjection(
       return JSON.stringify({ hookSpecificOutput: { additionalContext: text } });
     case "cursor":
       return JSON.stringify({ additional_context: text });
+    case "grok":
+      // Grok ignores hook stdout for every event except PreToolUse (which
+      // takes an allow/deny decision) — see ~/.grok/docs/user-guide/10-hooks.md
+      // ("For events like SessionStart or PostToolUse, stdout is ignored").
+      // So there is no hook channel to inject memory through: Grok captures
+      // via hooks and recalls via the MCP server / AGENTS.md instead. Emitting
+      // nothing is the honest no-op; printing a payload Grok drops would only
+      // look like it worked.
+      return "";
     case "kiro":
     case "opencode":
       return text;
