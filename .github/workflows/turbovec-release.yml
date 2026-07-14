@@ -24,28 +24,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS links the system Accelerate framework (always present), so
-          # it builds natively on the runner. Linux STATICALLY links OpenBLAS
-          # (built from source by openblas-src) AND must run on old glibc: a
-          # binary built on the ubuntu-latest runner (glibc 2.39) demands
-          # GLIBC_2.38+ and won't load on node:20-slim or most user machines.
-          # So Linux builds run INSIDE the napi-rs Debian image (old glibc,
-          # node + rust preinstalled) via `docker run`, keeping the host's
-          # Docker free for the clean-container gate below.
+          # macOS links the system Accelerate framework (always present), so it
+          # builds natively on the runner. Linux x64 builds inside the old-glibc
+          # node:20-bullseye container (glibc 2.31, broad compatibility) and
+          # STATICALLY links an OpenBLAS compiled from source (no runtime BLAS,
+          # no fortran runtime dependency).
+          #
+          # Linux ARM64 is intentionally NOT a native prebuild: OpenBLAS's
+          # Neoverse kernels fail to compile under bullseye's gcc, and forcing a
+          # newer compiler would raise the glibc floor. arm64 Linux users get
+          # the honest TypeScript fallback (memwarden status names the real
+          # backend) until a clean arm64 build path lands. Tracked as a follow-up.
           - host: macos-14
             target: aarch64-apple-darwin
           # macos-13 (the last free Intel image) was retired in Dec 2025;
           # macos-15-intel is GitHub's designated replacement.
           - host: macos-15-intel
             target: x86_64-apple-darwin
-          # node:20-bullseye is MULTI-ARCH (Docker pulls amd64 on the x64
-          # runner, arm64 on the arm runner — native each, no cross-compile)
-          # and Debian bullseye's glibc 2.31 is old enough to load broadly.
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            buildImage: node:20-bullseye
-          - host: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
             buildImage: node:20-bullseye
     runs-on: ${{ matrix.host }}
     steps:
@@ -78,7 +75,7 @@ jobs:
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
               . "$HOME/.cargo/env"
               npm ci
-              npx napi build --release --target ${{ matrix.target }}
+              npx napi build --release --platform --target ${{ matrix.target }}
             '
       # macOS: build natively (Accelerate is in the OS).
       - name: build binding (macos)
