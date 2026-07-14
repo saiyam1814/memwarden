@@ -112,36 +112,10 @@ jobs:
           path: native/turbovec-node/*.node
           if-no-files-found: error
 
-  publish:
-    needs: build
-    runs-on: ubuntu-latest
-    # id-token for npm provenance; contents read for checkout.
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-      # npm trusted publishing (OIDC) requires Node >=22.14 / npm >=11.5.1.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-      - run: npm install -g npm@latest
-        working-directory: .
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: binding-*
-          merge-multiple: true
-          path: native/turbovec-node
-      - run: ls -la *.node && npm ci
-      - name: smoke the binding on this runner
-        run: node -e "const b = require('./index.js'); console.log('loaded:', Object.keys(b));"
-      - name: publish (dry run on manual dispatch, real on tag)
-        run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            npm publish --provenance --access public
-          else
-            npm publish --dry-run --access public
-          fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+  # NOTE: auto-publish removed. This workflow BUILDS + VALIDATES the native
+  # binding for every platform (build, native tests, promotion benchmark, and
+  # the clean-container load gate) and uploads each platform's *.node as an
+  # artifact. Publishing is done manually — download the artifacts from a green
+  # run and `npm publish` locally (an interactive OTP works; CI cannot provide
+  # one). See docs/RELEASE-turbovec.md. Once the package exists on npm,
+  # configure Trusted Publishing (OIDC) and this can auto-publish token-free.
