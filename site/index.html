@@ -15,47 +15,49 @@
 <meta name="twitter:title" content="memwarden — the memory firewall for AI coding agents" />
 <meta name="twitter:description" content="Known-stale memory is blocked before injection; what passes is trust-labeled. Local-first, cross-tool, no API key." />
 <link rel="canonical" href="https://github.com/saiyam1814/memwarden" />
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='24' y2='24'%3E%3Cstop stop-color='%235CFF68'/%3E%3Cstop offset='1' stop-color='%2305CAFF'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M12 1.5 L20.5 4.8 V11 C20.5 16.4 16.8 20.6 12 22.5 C7.2 20.6 3.5 16.4 3.5 11 V4.8 Z' fill='url(%23g)'/%3E%3Cpath d='M8 12 l2.6 2.6 L16 8.6' fill='none' stroke='%23041016' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='24' y2='24'%3E%3Cstop stop-color='%23FF4D6A'/%3E%3Cstop offset='1' stop-color='%23FFB347'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M12 1.5 L20.5 4.8 V11 C20.5 16.4 16.8 20.6 12 22.5 C7.2 20.6 3.5 16.4 3.5 11 V4.8 Z' fill='url(%23g)'/%3E%3Cpath d='M8 12 l2.6 2.6 L16 8.6' fill='none' stroke='%23041016' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-  /* ---- KubeSimplify design system (brand: #5CFF68 green -> #05CAFF cyan) ---- */
+  /* ---- memwarden "Ember" design system (a firewall = fire): rose #FF4D6A -> gold #FFB347.
+     Its own identity: not Claude purple/teal, not KubeSimplify green/cyan, not vCluster orange.
+     --brand-a = rose, --brand-b = gold (names kept short). ---- */
   :root{
-    --brand-green:#5CFF68; --brand-cyan:#05CAFF; --brand-green-dim:#2bb534; --brand-cyan-dim:#0098cc;
-    --grad:linear-gradient(135deg,#5CFF68 0%,#30E8A0 38%,#05CAFF 100%);
+    --brand-a:#FF4D6A; --brand-b:#FFB347; --brand-a-dim:#E11D48; --brand-b-dim:#C2410C;
+    --grad:linear-gradient(135deg,#FF4D6A 0%,#FF7E5F 45%,#FFB347 100%);
     --radius:16px; --max:1120px;
-    /* light theme (default) */
-    --bg:#ffffff; --bg2:#f8fafc; --card:#ffffff; --elevated:#f1f5f9;
-    --fg:#0f172a; --mut:#475569; --dim:#94a3b8;
-    --line:rgba(2,6,23,.09); --line2:rgba(2,6,23,.14);
-    --accent:#0098cc; --accent2:#2bb534;
-    --good:#16a34a; --warn:#d97706; --bad:#dc2626;
-    --shadow:0 1px 3px rgba(2,6,23,.06),0 8px 30px rgba(2,6,23,.05);
-    --shadow-h:0 12px 44px rgba(5,202,255,.14);
-    --glow:rgba(5,202,255,.10);
-    --code-bg:#0b1220; --code-fg:#e2e8f0;
+    /* light theme (default) — warm off-white */
+    --bg:#fffdfc; --bg2:#fbf6f4; --card:#ffffff; --elevated:#faf1ee;
+    --fg:#1a1220; --mut:#5c5266; --dim:#9c93a5;
+    --line:rgba(26,18,32,.09); --line2:rgba(26,18,32,.15);
+    --accent:#E11D48; --accent2:#C2410C;
+    --good:#059669; --info:#2563eb; --warn:#d97706; --bad:#dc2626;
+    --shadow:0 1px 3px rgba(26,18,32,.06),0 10px 34px rgba(26,18,32,.06);
+    --shadow-h:0 14px 48px rgba(255,77,106,.16);
+    --glow:rgba(255,77,106,.10);
+    --code-bg:#171019; --code-fg:#f0e8ee;
   }
   :root[data-theme="dark"]{
-    --bg:#030712; --bg2:#0a0f1a; --card:#111827; --elevated:#1e293b;
-    --fg:#f9fafb; --mut:#a3b0c2; --dim:#64748b;
-    --line:rgba(255,255,255,.08); --line2:rgba(255,255,255,.14);
-    --accent:#05CAFF; --accent2:#5CFF68;
-    --good:#5CFF68; --warn:#f0b75e; --bad:#f87171;
-    --shadow:0 4px 24px rgba(0,0,0,.4); --shadow-h:0 20px 60px rgba(5,202,255,.16);
-    --glow:rgba(5,202,255,.18);
-    --code-bg:#060b16; --code-fg:#dbe4f0;
+    --bg:#0b0910; --bg2:#120e17; --card:#17121e; --elevated:#241b2e;
+    --fg:#f7f3f7; --mut:#a89fb2; --dim:#6e6678;
+    --line:rgba(255,255,255,.08); --line2:rgba(255,255,255,.15);
+    --accent:#ff6b85; --accent2:#ffb347;
+    --good:#34d399; --info:#60a5fa; --warn:#fbbf24; --bad:#f87171;
+    --shadow:0 4px 24px rgba(0,0,0,.5); --shadow-h:0 20px 60px rgba(255,77,106,.20);
+    --glow:rgba(255,77,106,.16);
+    --code-bg:#0a0810; --code-fg:#ecdfe8;
   }
   @media (prefers-color-scheme:dark){
     :root:not([data-theme]){
-      --bg:#030712; --bg2:#0a0f1a; --card:#111827; --elevated:#1e293b;
-      --fg:#f9fafb; --mut:#a3b0c2; --dim:#64748b;
-      --line:rgba(255,255,255,.08); --line2:rgba(255,255,255,.14);
-      --accent:#05CAFF; --accent2:#5CFF68;
-      --good:#5CFF68; --warn:#f0b75e; --bad:#f87171;
-      --shadow:0 4px 24px rgba(0,0,0,.4); --shadow-h:0 20px 60px rgba(5,202,255,.16);
-      --glow:rgba(5,202,255,.18);
-      --code-bg:#060b16; --code-fg:#dbe4f0;
+      --bg:#0b0910; --bg2:#120e17; --card:#17121e; --elevated:#241b2e;
+      --fg:#f7f3f7; --mut:#a89fb2; --dim:#6e6678;
+      --line:rgba(255,255,255,.08); --line2:rgba(255,255,255,.15);
+      --accent:#ff6b85; --accent2:#ffb347;
+      --good:#34d399; --info:#60a5fa; --warn:#fbbf24; --bad:#f87171;
+      --shadow:0 4px 24px rgba(0,0,0,.5); --shadow-h:0 20px 60px rgba(255,77,106,.20);
+      --glow:rgba(255,77,106,.16);
+      --code-bg:#0a0810; --code-fg:#ecdfe8;
     }
   }
   *{box-sizing:border-box}
@@ -104,15 +106,15 @@
   header{text-align:center; padding:72px 0 40px}
   .pill{display:inline-flex; align-items:center; gap:8px; font-size:12.5px; font-weight:600; color:var(--accent);
     border:1px solid var(--line2); background:var(--card); padding:7px 15px; border-radius:999px; margin-bottom:26px}
-  .pill .dot{width:7px; height:7px; border-radius:50%; background:var(--brand-green); box-shadow:0 0 10px var(--brand-green)}
+  .pill .dot{width:7px; height:7px; border-radius:50%; background:var(--brand-a); box-shadow:0 0 10px var(--brand-a)}
   h1{font-size:clamp(36px,6vw,66px); line-height:1.04; margin:0 0 20px; letter-spacing:-.03em; font-weight:900}
   h1 .grad{background:var(--grad); -webkit-background-clip:text; background-clip:text; color:transparent}
   .sub{font-size:clamp(16px,2.1vw,20px); color:var(--mut); max-width:720px; margin:0 auto 30px}
   .cmd{display:flex; align-items:center; justify-content:space-between; gap:14px; max-width:540px; margin:0 auto 16px;
     background:var(--code-bg); border:1px solid var(--line2); border-radius:13px; padding:15px 16px; font-size:15px; text-align:left; box-shadow:var(--shadow)}
-  .cmd code{color:#dbe4f0} .cmd code .p{color:var(--brand-cyan)}
+  .cmd code{color:#dbe4f0} .cmd code .p{color:var(--brand-b)}
   .copy{cursor:pointer; border:1px solid rgba(255,255,255,.16); background:rgba(255,255,255,.06); color:#c7d2e0; border-radius:8px; padding:6px 12px; font-size:12.5px; font-weight:600}
-  .copy:hover{border-color:var(--brand-cyan); color:#fff}
+  .copy:hover{border-color:var(--brand-b); color:#fff}
   .cta{display:flex; gap:13px; justify-content:center; flex-wrap:wrap; margin-top:8px}
   .btn{display:inline-flex; align-items:center; gap:8px; padding:13px 22px; border-radius:12px; font-weight:700; font-size:15px}
   .btn.primary{background:var(--grad); color:#041016; box-shadow:0 8px 24px var(--glow)}
@@ -156,7 +158,7 @@
 
   pre{background:var(--code-bg); border:1px solid var(--line2); border-radius:var(--radius); padding:20px 22px;
     overflow-x:auto; font-size:13.5px; line-height:1.7; color:var(--code-fg); box-shadow:var(--shadow)}
-  pre .c{color:#64748b} pre .g{color:var(--brand-green)} pre .y{color:#f0b75e} pre .a{color:var(--brand-cyan)} pre .ok{color:var(--brand-green)}
+  pre .c{color:#64748b} pre .g{color:var(--brand-a)} pre .y{color:#f0b75e} pre .a{color:var(--brand-b)} pre .ok{color:var(--brand-a)}
 
   .diagram{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:18px; box-shadow:var(--shadow); overflow-x:auto}
   .diagram svg{width:100%; height:auto; display:block; min-width:640px}
@@ -191,7 +193,7 @@
 
 <nav>
   <a class="brand" href="#top" aria-label="memwarden home">
-    <svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="mwmark" x1="0" y1="0" x2="24" y2="24"><stop stop-color="#5CFF68"/><stop offset="1" stop-color="#05CAFF"/></linearGradient></defs><path d="M12 1.5 L20.5 4.8 V11 C20.5 16.4 16.8 20.6 12 22.5 C7.2 20.6 3.5 16.4 3.5 11 V4.8 Z" fill="url(#mwmark)"/><path d="M8 12 l2.6 2.6 L16 8.6" fill="none" stroke="#041016" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="mwmark" x1="0" y1="0" x2="24" y2="24"><stop stop-color="#FF4D6A"/><stop offset="1" stop-color="#FFB347"/></linearGradient></defs><path d="M12 1.5 L20.5 4.8 V11 C20.5 16.4 16.8 20.6 12 22.5 C7.2 20.6 3.5 16.4 3.5 11 V4.8 Z" fill="url(#mwmark)"/><path d="M8 12 l2.6 2.6 L16 8.6" fill="none" stroke="#041016" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
     <span>mem<b class="g">warden</b></span>
   </a>
   <div class="nav-links">
@@ -264,7 +266,7 @@
       never laundered into one "verified" pile.</p>
     <div class="grid two">
       <div class="feat"><span class="dotc" style="background:var(--good)"></span><h3>verified</h3><p>A captured source-file hash still matches the file on disk — code-backed and current. This is the only label reserved for content-hash-confirmed memory. Auto-injected.</p></div>
-      <div class="feat"><span class="dotc" style="background:var(--accent)"></span><h3>sourced</h3><p>Has a source (a command, or files present but not hashable) but no content hash to re-check. Allowed, labeled, not content-verified.</p></div>
+      <div class="feat"><span class="dotc" style="background:var(--info)"></span><h3>sourced</h3><p>Has a source (a command, or files present but not hashable) but no content hash to re-check. Allowed, labeled, not content-verified.</p></div>
       <div class="feat"><span class="dotc" style="background:var(--warn)"></span><h3>stale → blocked</h3><p>A referenced file was deleted, or its content changed since capture. Never injected into the model.</p></div>
       <div class="feat"><span class="dotc" style="background:var(--dim)"></span><h3>unsourced</h3><p>No evidence trail. Kept for explicit lookups, labeled so the agent knows it is unverified — never silently promoted.</p></div>
     </div>
@@ -401,8 +403,8 @@ npm test 2>&1 | npx memwarden <span class="a">dejafix lookup</span></pre>
             .al{fill:var(--dim);font-family:"Inter",ui-sans-serif,sans-serif;font-size:11.5px}
           </style>
           <marker id="aMut" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="#94a3b8"/></marker>
-          <marker id="aGreen" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="#2bb534"/></marker>
-          <marker id="aCyan" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="#0098cc"/></marker>
+          <marker id="aGreen" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="#FF4D6A"/></marker>
+          <marker id="aCyan" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="#F59E0B"/></marker>
         </defs>
 
         <rect class="n" x="170" y="24" width="700" height="60" rx="12"/>
@@ -410,20 +412,20 @@ npm test 2>&1 | npx memwarden <span class="a">dejafix lookup</span></pre>
         <text class="cd" x="520" y="66" text-anchor="middle">Claude Code · Codex · Cursor · Gemini CLI · Kiro · OpenCode</text>
 
         <line x1="486" y1="84" x2="486" y2="118" stroke="#94a3b8" stroke-width="2" marker-end="url(#aMut)"/>
-        <line x1="554" y1="118" x2="554" y2="86" stroke="#0098cc" stroke-width="2" marker-end="url(#aCyan)"/>
+        <line x1="554" y1="118" x2="554" y2="86" stroke="#F59E0B" stroke-width="2" marker-end="url(#aCyan)"/>
         <text class="al" x="474" y="104" text-anchor="end">Hooks · MCP · Proxy</text>
-        <text class="al" x="566" y="104" fill="#0098cc">firewall-passing memory</text>
+        <text class="al" x="566" y="104" fill="#F59E0B">firewall-passing memory</text>
 
-        <rect class="n" x="356" y="120" width="328" height="58" rx="12" stroke="#05CAFF" stroke-width="2"/>
+        <rect class="n" x="356" y="120" width="328" height="58" rx="12" stroke="#FFB347" stroke-width="2"/>
         <text class="t" x="520" y="143" text-anchor="middle">memwarden daemon</text>
         <text class="cd" x="520" y="163" text-anchor="middle">~/.memwarden · one brain, self-healing</text>
 
-        <text class="lane" x="250" y="212" text-anchor="middle" fill="#2bb534">CAPTURE</text>
-        <text class="lane" x="790" y="212" text-anchor="middle" fill="#0098cc">RECALL</text>
+        <text class="lane" x="250" y="212" text-anchor="middle" fill="#FF4D6A">CAPTURE</text>
+        <text class="lane" x="790" y="212" text-anchor="middle" fill="#F59E0B">RECALL</text>
 
-        <path d="M400 178 C300 200 250 208 250 232" fill="none" stroke="#2bb534" stroke-width="2" marker-end="url(#aGreen)"/>
-        <path d="M790 232 C790 200 700 196 640 178" fill="none" stroke="#0098cc" stroke-width="2" marker-end="url(#aCyan)"/>
-        <text class="al" x="946" y="196" text-anchor="end" fill="#0098cc">recall policy + framing</text>
+        <path d="M400 178 C300 200 250 208 250 232" fill="none" stroke="#FF4D6A" stroke-width="2" marker-end="url(#aGreen)"/>
+        <path d="M790 232 C790 200 700 196 640 178" fill="none" stroke="#F59E0B" stroke-width="2" marker-end="url(#aCyan)"/>
+        <text class="al" x="946" y="196" text-anchor="end" fill="#F59E0B">recall policy + framing</text>
 
         <rect class="n" x="110" y="234" width="280" height="54" rx="12"/>
         <text class="t" x="250" y="256" text-anchor="middle">Compress</text>
@@ -434,9 +436,9 @@ npm test 2>&1 | npx memwarden <span class="a">dejafix lookup</span></pre>
         <rect class="n" x="110" y="426" width="280" height="54" rx="12"/>
         <text class="t" x="250" y="448" text-anchor="middle">Hash referenced files</text>
         <text class="ts" x="250" y="467" text-anchor="middle">SHA-256 provenance</text>
-        <line x1="250" y1="288" x2="250" y2="326" stroke="#2bb534" stroke-width="2" marker-end="url(#aGreen)"/>
-        <line x1="250" y1="384" x2="250" y2="422" stroke="#2bb534" stroke-width="2" marker-end="url(#aGreen)"/>
-        <path d="M250 480 C250 520 340 528 420 560" fill="none" stroke="#2bb534" stroke-width="2" marker-end="url(#aGreen)"/>
+        <line x1="250" y1="288" x2="250" y2="326" stroke="#FF4D6A" stroke-width="2" marker-end="url(#aGreen)"/>
+        <line x1="250" y1="384" x2="250" y2="422" stroke="#FF4D6A" stroke-width="2" marker-end="url(#aGreen)"/>
+        <path d="M250 480 C250 520 340 528 420 560" fill="none" stroke="#FF4D6A" stroke-width="2" marker-end="url(#aGreen)"/>
 
         <rect class="n" x="650" y="426" width="300" height="54" rx="12"/>
         <text class="t" x="800" y="448" text-anchor="middle">Project scoping</text>
@@ -444,14 +446,14 @@ npm test 2>&1 | npx memwarden <span class="a">dejafix lookup</span></pre>
         <rect class="n" x="650" y="330" width="300" height="54" rx="12"/>
         <text class="t" x="800" y="352" text-anchor="middle">Hybrid search · BM25 + vector</text>
         <text class="ts" x="800" y="371" text-anchor="middle">RRF, TurboQuant / native turbovec</text>
-        <rect class="n" x="650" y="234" width="300" height="54" rx="12" stroke="#05CAFF" stroke-width="2"/>
+        <rect class="n" x="650" y="234" width="300" height="54" rx="12" stroke="#FFB347" stroke-width="2"/>
         <text class="t" x="800" y="255" text-anchor="middle">Provenance classifier</text>
         <text class="ts" x="800" y="274" text-anchor="middle">verified · sourced · stale · unsourced</text>
-        <line x1="800" y1="426" x2="800" y2="388" stroke="#0098cc" stroke-width="2" marker-end="url(#aCyan)"/>
-        <line x1="800" y1="330" x2="800" y2="292" stroke="#0098cc" stroke-width="2" marker-end="url(#aCyan)"/>
-        <path d="M620 560 C700 528 800 520 800 484" fill="none" stroke="#0098cc" stroke-width="2" marker-end="url(#aCyan)"/>
+        <line x1="800" y1="426" x2="800" y2="388" stroke="#F59E0B" stroke-width="2" marker-end="url(#aCyan)"/>
+        <line x1="800" y1="330" x2="800" y2="292" stroke="#F59E0B" stroke-width="2" marker-end="url(#aCyan)"/>
+        <path d="M620 560 C700 528 800 520 800 484" fill="none" stroke="#F59E0B" stroke-width="2" marker-end="url(#aCyan)"/>
 
-        <rect class="n" x="170" y="560" width="700" height="66" rx="12" stroke="#5CFF68" stroke-width="2"/>
+        <rect class="n" x="170" y="560" width="700" height="66" rx="12" stroke="#FF4D6A" stroke-width="2"/>
         <text class="t" x="520" y="586" text-anchor="middle">libSQL store</text>
         <text class="cd" x="520" y="607" text-anchor="middle">hash-chained oplog (tamper-evident) · BM25 + vector index</text>
       </svg>
