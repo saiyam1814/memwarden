@@ -65,7 +65,17 @@ jobs:
         working-directory: .
         run: |
           docker run --rm -v "$PWD":/w -w /w/native/turbovec-node ${{ matrix.buildImage }} \
-            bash -lc "apt-get update && apt-get install -y --no-install-recommends gfortran make gcc perl && npm ci && npx napi build --release --target ${{ matrix.target }}"
+            bash -lc '
+              set -e
+              # The napi-rs image ships an old Rust that cannot parse newer
+              # transitive Cargo.toml files (generativity 1.2.1). Update to
+              # current stable; the OLD GLIBC of the image is what we want and
+              # it is unaffected by the toolchain version.
+              rustup update stable && rustup default stable
+              apt-get update && apt-get install -y --no-install-recommends gfortran make gcc perl build-essential
+              npm ci
+              npx napi build --release --target ${{ matrix.target }}
+            '
       # macOS: build natively (Accelerate is in the OS).
       - name: build binding (macos)
         if: ${{ !contains(matrix.target, 'linux') }}
