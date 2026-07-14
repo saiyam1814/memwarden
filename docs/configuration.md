@@ -23,19 +23,19 @@ these at boot and the CLI bakes `MEMWARDEN_*` tuning into the service unit).
 
 ## Per-project and per-session switches
 
-- `memwarden exclude <path>` firewalls a project completely — no capture from it, no injection
+- `memwarden exclude <path>` firewalls a project completely - no capture from it, no injection
   into it, across hooks and proxy alike, effective immediately (the list is re-read per request).
   `memwarden include <path>` undoes it; `memwarden exclude --list` shows the list.
 - `MEMWARDEN_INJECT=off` starts sessions with a clean slate; `MEMWARDEN_CAPTURE=off` stops
   auto-capture. Explicit recall and the MCP tools keep working under both.
 
-## The proxy — one memory layer for the models you control
+## The proxy - one memory layer for the models you control
 
 An OpenAI-compatible gateway on `:3141` that any model-configurable tool can point its base URL
 at. It injects relevant firewall-passing memory, captures the answer, and is blind to the model
 behind it. Local (Ollama, LM Studio) and paid (OpenAI, OpenRouter, Together) all speak the same
 `/v1/chat/completions`, so it is one memory layer for all of them. Streaming (SSE) passes straight
-through. It applies only where you control the model endpoint — tools with their own protocol or
+through. It applies only where you control the model endpoint - tools with their own protocol or
 backend (Claude Code, Cursor, Kiro, Antigravity) are covered by their native hooks instead.
 
 ```bash

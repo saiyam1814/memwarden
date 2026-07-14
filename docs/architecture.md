@@ -42,7 +42,7 @@ flowchart TB
 4. **Verified recall.** Hybrid BM25 + vector search (RRF), scoped to your project by canonical
    path (symlinks and path spellings resolved, so recall never silently misses), firewalled so
    stale memory never reaches the model, packed under a token budget. Contradictions are surfaced
-   by `doctor` as advisories — recall never silently drops a true memory.
+   by `doctor` as advisories - recall never silently drops a true memory.
 
 ## Tamper-evidence and erasure, in full
 
@@ -51,16 +51,16 @@ and recomputes every hash, so an **edit or a reorder** of any past entry breaks 
 first touched entry.
 
 It is **tamper-evident, not tamper-proof.** There is no signing. The chain detects edits and
-reorders, but it does **not** detect tail-truncation — dropping the newest entries leaves a
+reorders, but it does **not** detect tail-truncation - dropping the newest entries leaves a
 shorter, still-valid chain.
 
-**Deletion comes with a receipt — and an honest scope.** `memwarden forget <id>` removes a memory
+**Deletion comes with a receipt - and an honest scope.** `memwarden forget <id>` removes a memory
 from the active store, search, recall, and every index, and prints a receipt citing the oplog
 entries that recorded the original write and the deletion, plus whole-chain verification. An
 unknown id reports failure honestly; there is no `{deleted: 0, success: true}` theater here.
 
-**Erasure without breaking the chain — and only *authorized* erasure.** Oplog entries commit to
-the SHA-256 *of* their content (chain v2), not the content itself — so the content can be nulled in
+**Erasure without breaking the chain - and only *authorized* erasure.** Oplog entries commit to
+the SHA-256 *of* their content (chain v2), not the content itself - so the content can be nulled in
 place and every hash still verifies. Every erasure is itself chain-recorded: the store appends an
 `erase` entry listing exactly which entry ids (and their content hashes) were nulled, and
 verification **rejects any nulled payload that no later `erase`/`compact` record vouches for**.
@@ -71,7 +71,7 @@ yourself to confirm the bytes are gone (SQLite `secure_delete` is on, and the WA
 **Erase cascades into derived records.** An observation's content also flows into records *derived*
 from it: the session's `firstPrompt`, the session-end handoff (`Session.summary`, the stored
 summary, the searchable handoff observation), and Déjà Fix capsules recorded from it. `--erase`
-re-derives all of those from the remaining observations — as if the erased one never existed — and
+re-derives all of those from the remaining observations - as if the erased one never existed - and
 byte-erases their stale history too (each rewrite is chain-authorized). It is source-preserving,
 idempotent, and convergent, not atomic: a mid-cascade failure never deletes the source, may leave
 derived records partially re-derived (the failure message says so), and a retry converges. After
@@ -84,7 +84,7 @@ independent observations* that quote the same text (forget them by id).
 pre-v2 history to the new chain, anchors the old chain's head hash in a final `compact` record, and
 VACUUMs the file. Live memories are never touched.
 
-The remaining honest limits: erasure cannot reach copies *outside* the store — filesystem
+The remaining honest limits: erasure cannot reach copies *outside* the store - filesystem
 snapshots, backups, `memwarden export` files you made earlier, or bytes an SSD's wear-leveling
 retired. Receipts issued before a compaction cite pre-compaction entry hashes; the compact record's
 `previousHeadHash` (plus each receipt's `chainHead`) anchors which chain they belong to. The

@@ -46,7 +46,7 @@ Known limitations, stated on purpose:
 - The database is not encrypted at rest; disk encryption is the OS's job for
   now.
 - The default `balanced` recall policy means "not detected stale", not
-  "proven safe" — unsourced memory is injectable, labeled.
+  "proven safe" - unsourced memory is injectable, labeled.
 
 Reports about any gap between what the README claims and what the code does
 are treated as security reports.

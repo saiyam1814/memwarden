@@ -9,7 +9,7 @@ This file exists so the README does not have to pretend otherwise.
   hostile repos or tool output, run `MEMWARDEN_RECALL_POLICY=verified-only`, which auto-injects
   only hash-verified-current memory.
 - **Verified Recall checks deletion and content drift**, not semantic correctness. `doctor`
-  additionally flags conservative subject/value conflicts as advisories — it never drops them from
+  additionally flags conservative subject/value conflicts as advisories - it never drops them from
   recall.
 - **Injection framing is a mitigation, not a proof.** Recalled content is delimited and framed as
   untrusted data (`<memwarden-memory>` markers, embedded delimiters defanged), which reduces but
@@ -19,7 +19,7 @@ This file exists so the README does not have to pretend otherwise.
 
 - **Tamper-evident, not tamper-proof.** The hash chain detects edits and reorders; it does **not**
   detect tail-truncation (dropping the newest entries). There is no signing.
-- **Erasure cannot reach copies outside the store** — filesystem snapshots, backups, earlier
+- **Erasure cannot reach copies outside the store** - filesystem snapshots, backups, earlier
   `memwarden export` files, or bytes an SSD's wear-leveling retired.
 - **Residual detection is best-effort.** It catches shared phrases, compact values, and short
   secrets; a value below its detection floor marks the scan `limited` and the receipt refuses the
@@ -38,7 +38,7 @@ self-heals on next use; rerun `memwarden up` after a reboot. A Windows service i
 roadmap, not shipped.
 
 **Native turbovec backend**: prebuilt for macOS (arm64/x64) and Linux x64. Linux arm64 and Windows
-use the pure-TypeScript vector backend — same results, just not the ~125× speedup. `memwarden
+use the pure-TypeScript vector backend - same results, just not the ~125× speedup. `memwarden
 status` always names the backend actually serving, and the default (`auto`) loads native only where
 its binary is present. So memwarden is correct and fully functional everywhere; native is an
 accelerator, never a requirement.

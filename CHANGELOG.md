@@ -3,7 +3,7 @@
 All notable changes to memwarden. Dates are release dates; the format loosely follows
 [Keep a Changelog](https://keepachangelog.com/).
 
-## 0.0.5 — unreleased
+## 0.0.5 - unreleased
 
 The launch release: session journals, verifiable erasure, the native engine, and the
 firewall made measurable.
@@ -11,7 +11,7 @@ firewall made measurable.
 ### Added
 - **Session journals**: `hook prompt` / `hook session-end` across all six hosts capture the
   prompt that started the work and a deterministic handoff summary (goal, what happened,
-  decisions, open threads) — not just clipped tool output. Handoffs are searchable and carried
+  decisions, open threads) - not just clipped tool output. Handoffs are searchable and carried
   across tools.
 - **Verifiable erasure**: `forget --erase` nulls a memory's oplog payloads in place (chain v2
   commits to payload *hashes*, so the chain still verifies); `memwarden compact [--dry-run]`
@@ -27,7 +27,7 @@ firewall made measurable.
   instead of post-filtering a global top-k (filtered 10K/20-project benchmark: half-empty
   top-10s become full, 15–22 ms becomes ≤1.5 ms TypeScript / 0.2 ms native).
 - **Firewall demo and eval**: `npm run demo:firewall` (real daemon, ends in a byte-scan-proven
-  erasure) and `npm run eval` — 250 memories across verified/sourced/unsourced classes,
+  erasure) and `npm run eval` - 250 memories across verified/sourced/unsourced classes,
   5 projects, 50 staleness events, 5 poisoned-handoff traps, 3 delimiter forgeries; CI-gated
   at 100% on all eight gates (stale-retrievable, stale-refusal, fresh-retention, isolation,
   label accuracy, handoff-trust, verified-only policy, injection containment).
@@ -43,17 +43,16 @@ firewall made measurable.
   on `turbovec-v*` tags.
 
 ### Fixed
-- Handoff summaries now inherit provenance from their source observations — stale facts can no
+- Handoff summaries now inherit provenance from their source observations - stale facts can no
   longer launder through summaries past the firewall.
 - **Mixed-trust handoffs can never classify `verified`**: a handoff digest embeds unsourced
   content (the prompt, the outcome) beside inherited file hashes, so matching hashes now earn
-  it `sourced` at most — a hostile prompt cannot ride one unchanged file past the
+  it `sourced` at most - a hostile prompt cannot ride one unchanged file past the
   `verified-only` policy. Drift still proves it stale.
 - **Refusal evidence no longer re-injects refused content**: the firewall notice carries the
   observation id and the verdict's reason, never the refused memory's title (a stale handoff's
   title embeds the user's prompt). `memwarden why <id>` is the inspection path.
-- **Erasure is source-preserving, idempotent, and convergent** (deliberately NOT atomic —
-  there is no cross-record transaction): the cascade runs before the source delete and
+- **Erasure is source-preserving, idempotent, and convergent** (deliberately NOT atomic -   there is no cross-record transaction): the cascade runs before the source delete and
   computes every re-derived value before writing, so a failure never deletes the source,
   may leave derived records partially re-derived (the failure message says so), and a retry
   converges to the fully erased state. Receipts gain a hashed `eraseIncomplete` field;
@@ -64,13 +63,13 @@ firewall made measurable.
   project-scoped so a cross-project duplicate can't bypass the guard, and hook events without
   a session id fall back to a per-project session instead of a global shared one.
 - The firewall demo now proves its erasure claim: it erases every canary-bearing observation,
-  compacts, and byte-scans the store files — and exits non-zero if the canary survives.
+  compacts, and byte-scans the store files - and exits non-zero if the canary survives.
 - The eval gained gates for retrievability preconditions, sourced/unsourced label accuracy,
   poisoned-handoff traps, the verified-only policy, and injection containment (forged
-  delimiters through real storage + recall + the shared formatter) — 8 gates, all at 100%.
+  delimiters through real storage + recall + the shared formatter) - 8 gates, all at 100%.
 - **Capped capture evidence never certifies `verified`**: when a tool call references more
   files than the capture bound (now 64, was a silent 20) or nests deeper than the walk,
-  the provenance is marked incomplete — drift in an uncaptured file can no longer hide
+  the provenance is marked incomplete - drift in an uncaptured file can no longer hide
   behind matching hashes over the captured subset.
 - **Handoff claims carry their own evidence (claim lineage)**: decisions and unresolved
   errors inherit provenance from the observations whose text they copy, all-or-nothing; a
@@ -80,15 +79,14 @@ firewall made measurable.
   are scanned for the erased content; an echo surviving in a sibling observation or a
   preserved Outcome flips `contentErased` to false and names the residual. Outcomes that
   echo the erased content are dropped from rebuilds instead of re-injected. Detection covers
-  shared phrases (5-word shingles), compact whole values (>= 6 chars), and short secrets —
-  digit-bearing tokens like `PIN 7391` and long identifiers — with year-shaped numbers
+  shared phrases (5-word shingles), compact whole values (>= 6 chars), and short secrets -   digit-bearing tokens like `PIN 7391` and long identifiers - with year-shaped numbers
   excluded to avoid date false-positives.
 - The cascade computes every re-derived value before writing (idempotent two-phase apply),
   and a partial failure reports honestly: source not deleted, derived records possibly
   partially re-derived, retry converges.
 - **One shared injection formatter for every surface**: SessionStart, the proxy, Déjà Fix
   (whose root cause used to sit outside the markers), and the MCP `/recall` prompt (which had
-  no framing at all) now build their blocks in `injection-format.ts` — framing plus delimiter
+  no framing at all) now build their blocks in `injection-format.ts` - framing plus delimiter
   defanging, with a formatter-level invariant test and an eval gate.
 - Residual detection covers short body values (`admin`) via word-boundary tokens, and receipts
   carry a hashed tri-state `residualScan` (`clean` / `residuals` / `limited`): a value below
@@ -106,7 +104,7 @@ firewall made measurable.
   npm release gate now runs the firewall eval and the end-to-end demo.
 - MCP server reported a hardcoded version; it now reports the real package version.
 
-## 0.0.4 — 2026-07-11 (not published to npm; changes ship in 0.0.5)
+## 0.0.4 - 2026-07-11 (not published to npm; changes ship in 0.0.5)
 
 ### Fixed
 - **MCP scoping (P0)**: `memory_remember` stored everything under the literal project `"mcp"`;
@@ -124,7 +122,7 @@ firewall made measurable.
   memory) and untrusted-data framing around every injection.
 - CI (ubuntu/macos × node 20/22 + fresh-tarball smoke), SECURITY.md.
 
-## 0.0.3 — 2026-07-11
+## 0.0.3 - 2026-07-11
 
 The truth release.
 
@@ -142,7 +140,7 @@ The truth release.
 ### Known issue
 - `memory_remember` project scoping bug, fixed in 0.0.4. If you are on 0.0.3, upgrade.
 
-## 0.0.2 — 2026-06-12
+## 0.0.2 - 2026-06-12
 
 Ten bugs from an adversarial review, each reproduced before fixing. Highlights: daemon no
 longer crashes on first boot against a missing data dir; `up`/`connect` refuse to bake
@@ -151,7 +149,7 @@ timestamps as UTC; `safe_only` recall fails closed without a cwd; proxy tee surv
 disconnects with bounded buffering; MCP auth failures surface instead of reading as empty
 success. Added `memwarden audit --html` shareable reports.
 
-## 0.0.1 — 2026-06-11
+## 0.0.1 - 2026-06-11
 
 First published alpha: Verified Recall (source-file hashes as ground truth, `safe_only`
 firewall), `memwarden doctor`, foreign-store `audit`, hash-chained oplog with delete receipts,

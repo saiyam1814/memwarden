@@ -4,8 +4,7 @@
 
 Measured on-device with the real model (`all-MiniLM-L6-v2`): 30 labelled coding memories buried
 in **2,000 plausible distractor memories** (2,030 total), 14 **paraphrased** queries (worded
-differently than the answers), and the compressed index running with **no exact rescoring** —
-pure quantized codes, nothing retained to fall back on. Reproduce with `npm run benchmark`.
+differently than the answers), and the compressed index running with **no exact rescoring** - pure quantized codes, nothing retained to fall back on. Reproduce with `npm run benchmark`.
 
 | Retrieval (gold answer in top-k) | R@1 | R@5 | R@10 |
 | --- | --- | --- | --- |
@@ -13,9 +12,9 @@ pure quantized codes, nothing retained to fall back on. Reproduce with `npm run 
 | **TurboQuant (4-bit, no rescore)** | **57%** | **79%** | **86%** |
 | Keyword search (lexical baseline) | 7% | 57% | 57% |
 
-- **At this scale, compression costs nothing** — pure 4-bit codes match full precision on every
+- **At this scale, compression costs nothing** - pure 4-bit codes match full precision on every
   metric, at 5.9× smaller vectors (384-dim @ 4-bit; ~11× at 2-bit).
-- **Meaning beats keywords** — +22 points R@5, +50 points R@1, on questions that share no words
+- **Meaning beats keywords** - +22 points R@5, +50 points R@1, on questions that share no words
   with the answer.
 - Scaling honestly: at 10,000 distractors the pure-code index gives up ~7 points of R@10 versus
   full precision; enabling top-32 exact rescoring restores exact parity but keeps full vectors
@@ -44,14 +43,14 @@ backstop).
 
 ~125× faster search with zero recall drop. Honest defaults: the native backend is quietly
 selected when the prebuilt binary loads (pin one with `MEMWARDEN_VECTOR_BACKEND`), and
-`memwarden status` always names the backend actually serving — a native backend that failed to
+`memwarden status` always names the backend actually serving - a native backend that failed to
 load reports its TypeScript fallback, never a silent claim. The binding lives in
 [`native/turbovec-node/`](../native/turbovec-node/) (`@memwarden/turbovec`, MIT).
 
 ## Firewall eval
 
-`npm run eval` runs a deterministic corpus — 250 memories across verified/sourced/unsourced
+`npm run eval` runs a deterministic corpus - 250 memories across verified/sourced/unsourced
 classes, 5 projects, 50 controlled staleness events, 5 poisoned-handoff traps, 5 delimiter
-forgeries — and gates CI at 100% on all eight gates: stale-retrievable, stale-refusal,
+forgeries - and gates CI at 100% on all eight gates: stale-retrievable, stale-refusal,
 fresh-retention, isolation, label accuracy, handoff-trust, verified-only policy, and injection
 containment.
