@@ -41,9 +41,14 @@ jobs:
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             buildImage: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-debian
-          - host: ubuntu-24.04-arm
+          # aarch64 Linux is cross-compiled on an x86_64 host using the
+          # napi-rs cross-compilation image (lts-debian-aarch64 is a linux/amd64
+          # image that contains the aarch64 cross toolchain — it cannot run on a
+          # native ARM64 runner, hence ubuntu-latest here, not ubuntu-24.04-arm).
+          - host: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             buildImage: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-debian-aarch64
+            crossCompile: true
     runs-on: ${{ matrix.host }}
     steps:
       - uses: actions/checkout@v4
@@ -74,7 +79,10 @@ jobs:
           npx napi build --release --platform --target ${{ matrix.target }}
       # Per-platform gate: the freshly built binding must pass memwarden's
       # real native integration tests on THIS platform before it ships.
+      # Skipped for cross-compiled targets because the binary cannot run
+      # on the build host (e.g. aarch64 .node on an x86_64 runner).
       - name: test the binding on this platform
+        if: "!matrix.crossCompile"
         working-directory: .
         run: |
           npm ci
@@ -83,15 +91,19 @@ jobs:
       # vs FP32, in-kernel allowlist correctness, add/remove/save/load id-set
       # parity. This is what makes the "auto" default honest — a published
       # binary is a binary that passed this gate on its platform.
+      # Skipped for cross-compiled targets (binary can't run on build host).
       - name: promotion benchmark gate
+        if: "!matrix.crossCompile"
         working-directory: .
         run: npm run benchmark:backends
       # CLEAN-CONSUMER gate: the binding must dlopen in a bare node:20-slim
       # image — no OpenBLAS, no build tools, and a stock glibc — or it must
       # not ship. This catches both a dynamic libopenblas dependency and a
       # too-new glibc requirement before either reaches a user.
+      # Skipped for cross-compiled targets: the aarch64 binary cannot be
+      # tested in a node:20-slim amd64 container on the build host.
       - name: clean-container load test (linux)
-        if: contains(matrix.target, 'linux')
+        if: contains(matrix.target, 'linux') && !matrix.crossCompile
         run: |
           docker run --rm -v "$PWD":/pkg -w /pkg node:20-slim \
             node -e "const b = require('./index.js'); const k = Object.keys(b); if (k.length === 0) throw new Error('no exports'); console.log('clean-container load OK:', k.join(','));"
