@@ -24,11 +24,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS links the system Accelerate framework (always present).
-          # Linux STATICALLY links OpenBLAS built from source by openblas-src,
-          # so the runners need a Fortran toolchain, not the runtime -dev pkg,
-          # and the shipped .node has no external BLAS dependency. Built
-          # natively per-arch — GitHub's arm64 runner avoids cross-compiling.
+          # macOS links the system Accelerate framework (always present), so
+          # it builds natively on the runner. Linux STATICALLY links OpenBLAS
+          # (built from source by openblas-src) AND must run on old glibc: a
+          # binary built on the ubuntu-latest runner (glibc 2.39) demands
+          # GLIBC_2.38+ and won't load on node:20-slim or most user machines.
+          # So Linux builds run INSIDE the napi-rs Debian image (old glibc,
+          # node + rust preinstalled) via `docker run`, keeping the host's
+          # Docker free for the clean-container gate below.
           - host: macos-14
             target: aarch64-apple-darwin
           # macos-13 (the last free Intel image) was retired in Dec 2025;
@@ -37,10 +40,10 @@ jobs:
             target: x86_64-apple-darwin
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            setup: sudo apt-get update && sudo apt-get install -y gfortran make gcc perl
+            buildImage: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-debian
           - host: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            setup: sudo apt-get update && sudo apt-get install -y gfortran make gcc perl
+            buildImage: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-debian-aarch64
     runs-on: ${{ matrix.host }}
     steps:
       - uses: actions/checkout@v4
@@ -53,11 +56,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: native/turbovec-node
-      - name: platform deps
-        if: matrix.setup
-        run: ${{ matrix.setup }}
-      - run: npm ci
-      - run: npx napi build --release --platform --target ${{ matrix.target }}
+      # Linux: build in the old-glibc napi-rs container so the .node runs on a
+      # broad range of distros (bullseye glibc, well below node:20-slim's).
+      # openblas-src compiles OpenBLAS in-container, statically linked, so the
+      # binary references only the container's (old) glibc and no runtime BLAS.
+      - name: build binding (linux — portable old-glibc container)
+        if: contains(matrix.target, 'linux')
+        working-directory: .
+        run: |
+          docker run --rm -v "$PWD":/w -w /w/native/turbovec-node ${{ matrix.buildImage }} \
+            bash -lc "apt-get update && apt-get install -y --no-install-recommends gfortran make gcc perl && npm ci && npx napi build --release --target ${{ matrix.target }}"
+      # macOS: build natively (Accelerate is in the OS).
+      - name: build binding (macos)
+        if: ${{ !contains(matrix.target, 'linux') }}
+        run: |
+          npm ci
+          npx napi build --release --platform --target ${{ matrix.target }}
       # Per-platform gate: the freshly built binding must pass memwarden's
       # real native integration tests on THIS platform before it ships.
       - name: test the binding on this platform
@@ -72,11 +86,10 @@ jobs:
       - name: promotion benchmark gate
         working-directory: .
         run: npm run benchmark:backends
-      # CLEAN-CONSUMER gate: the runner installed OpenBLAS to build, but a
-      # user's machine has not. The binding must dlopen in a bare node image
-      # (no OpenBLAS, no build tools) or it must not ship — a published
-      # binary that only loads on machines with libopenblas would quietly
-      # fall back to TypeScript for almost every Linux user.
+      # CLEAN-CONSUMER gate: the binding must dlopen in a bare node:20-slim
+      # image — no OpenBLAS, no build tools, and a stock glibc — or it must
+      # not ship. This catches both a dynamic libopenblas dependency and a
+      # too-new glibc requirement before either reaches a user.
       - name: clean-container load test (linux)
         if: contains(matrix.target, 'linux')
         run: |

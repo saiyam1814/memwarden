@@ -1,6 +1,6 @@
 {
   "name": "@memwarden/turbovec",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Node bindings for the turbovec crate (IdMapIndex): optional native vector backend for memwarden. memwarden itself has zero native dependencies; it dynamic-imports this package and falls back to its TypeScript index when absent.",
   "license": "MIT",
   "main": "index.js",
