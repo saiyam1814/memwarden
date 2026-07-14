@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🛡️ memwarden
+<img src="site/memwarden-logo.svg" alt="memwarden" width="380" />
 
 ### The memory firewall for AI coding agents
 
