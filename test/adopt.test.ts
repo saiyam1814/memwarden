@@ -31,6 +31,8 @@ import { KV } from "../src/state/schema.js";
 import { registerCoreFunctions, getSearchIndex } from "../src/functions/index.js";
 import { registerApiTriggers } from "../src/triggers/api.js";
 import { classifyProvenance } from "../src/functions/verify.js";
+import { lookupFix } from "../src/functions/dejafix.js";
+import { StateKV as StateKVType } from "../src/state/kv.js";
 import type { CompressedObservation } from "../src/functions/types.js";
 
 // Point secret resolution at a clean, empty data dir so the API stays open in
@@ -151,6 +153,36 @@ describe("adopt: the sourced_unverified honesty contract", () => {
     expect(verdict.status).toBe("verified");
   });
 
+  // The side door. A fix-shaped memory ("TypeError ... fixed in src/config.ts")
+  // is extremely common in a real CLAUDE.md pile, and observe.ts opportunistically
+  // records it as a Déjà Fix reusing the SAME provenance. If that path re-hashes
+  // the files, an adopted memory reappears to the next agent as a "verified
+  // current" fix — the exact forgery the adopted marker exists to prevent, and
+  // the two stores would then disagree about one memory.
+  it("an adopted fix-shaped memory never surfaces as a verified Déjà Fix", async () => {
+    const errorText =
+      "TypeError: user is not a function. The root cause was a missing guard; fixed in src/config.ts.";
+    const res = await postObserve(
+      seedPayload({
+        sessionId: "adopt-fix-sess",
+        data: {
+          prompt: errorText,
+          tool_input: [{ file_path: "src/config.ts" }],
+        },
+      }),
+    );
+    expect(res.status).toBe(201);
+
+    const fixes = await lookupFix(new StateKVType(sdk), errorText, repo);
+    // It may or may not be recorded as a fix — but if it is, it must never
+    // claim to be content-verified, because it was never content-anchored.
+    for (const f of fixes) {
+      expect(f.status).not.toBe("verified");
+      expect(f.badge).not.toBe("verified current");
+      expect(f.provenance?.fileHashes ?? {}).toEqual({});
+    }
+  });
+
   it("an adopted memory whose referenced file is gone classifies stale", async () => {
     const res = await postObserve(
       seedPayload({
@@ -166,6 +198,54 @@ describe("adopt: the sourced_unverified honesty contract", () => {
     const obs = await readProvenance("gone-sess");
     const verdict = classifyProvenance(obs.provenance, repo);
     expect(verdict.status).toBe("stale");
+  });
+});
+
+describe("adopt: every memory in the store actually lands", () => {
+  // A real CLAUDE.md pile is mostly unanchored prose. If dedup keys on the
+  // file list alone, every fileless memory collides and adopt reports
+  // "1 adopted · 46 already present" — silent data loss reported as success.
+  it("three DIFFERENT fileless memories all persist (no dedup collapse)", async () => {
+    const prompts = [
+      "Always use pnpm, never npm, in this repo.",
+      "Deploy runs on Tuesdays after the staging soak.",
+      "The staging DB password rotates monthly.",
+    ];
+    for (const [i, prompt] of prompts.entries()) {
+      const res = await postObserve(
+        seedPayload({
+          sessionId: "adopt-many-sess",
+          timestamp: new Date(Date.now() + i).toISOString(),
+          data: { prompt, tool_input: [] },
+        }),
+      );
+      expect(res.status).toBe(201);
+    }
+    const stored = await store.list<CompressedObservation>(
+      KV.observations("adopt-many-sess"),
+    );
+    expect(stored).toHaveLength(prompts.length);
+  });
+
+  it("two different memories citing the SAME file both persist", async () => {
+    const prompts = [
+      "Auth: refresh tokens rotate every 15 minutes, see src/config.ts.",
+      "The TTL in src/config.ts must never exceed 60 for compliance.",
+    ];
+    for (const [i, prompt] of prompts.entries()) {
+      const res = await postObserve(
+        seedPayload({
+          sessionId: "adopt-samefile-sess",
+          timestamp: new Date(Date.now() + i).toISOString(),
+          data: { prompt, tool_input: [{ file_path: "src/config.ts" }] },
+        }),
+      );
+      expect(res.status).toBe(201);
+    }
+    const stored = await store.list<CompressedObservation>(
+      KV.observations("adopt-samefile-sess"),
+    );
+    expect(stored).toHaveLength(prompts.length);
   });
 });
 
@@ -185,22 +265,33 @@ describe("adopt(): CLI seeds a foreign CLAUDE.md store into the brain", () => {
         "",
         "- Auth: refresh tokens rotate every 15 minutes, see src/config.ts.",
         "- Build: run `npm run build` before packing.",
+        // Two MORE unanchored bullets: a real CLAUDE.md is mostly fileless
+        // prose, and these share an (empty) file list with the one above —
+        // the exact shape a file-keyed dedup would collapse into one memory.
+        "- Always use pnpm, never npm, in this repo.",
+        "- Deploy runs on Tuesdays after the staging soak.",
         "",
       ].join("\n"),
     );
 
     try {
-      const { adopt } = await import("../src/cli/adopt.js");
+      const { adopt, adoptSessionId } = await import("../src/cli/adopt.js");
       // Flags BEFORE the positional store: --root's value must not be mistaken
       // for the store path.
       await adopt(["--root", repo, "--json", storeFile]);
 
       // Everything the CLI wrote is in the store under its stable session id.
-      const sessionId = "adopt-markdown-CLAUDE.md";
+      const sessionId = adoptSessionId("markdown", storeFile);
       const compressed = await store.list<CompressedObservation>(
         KV.observations(sessionId),
       );
-      expect(compressed.length).toBeGreaterThan(0);
+      // EVERY memory in the store must land — asserting only "> 0" is what let
+      // a dedup collapse (whole store -> one memory) hide.
+      const { memories } = await import("../src/functions/audit.js").then((m) =>
+        m.loadStore(storeFile),
+      );
+      expect(compressed).toHaveLength(memories.length);
+      expect(memories.length).toBeGreaterThan(1);
       for (const obs of compressed) {
         expect(obs.provenance?.fileHashes ?? {}).toEqual({});
         const verdict = classifyProvenance(obs.provenance, repo);

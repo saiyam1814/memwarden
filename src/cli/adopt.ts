@@ -22,8 +22,9 @@ import {
   type StoreKind,
 } from "../functions/audit.js";
 import { getSecret } from "../functions/config.js";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 // Resolved per call (not at module load) so the target follows MEMWARDEN_URL
 // even when it is set after import — the same late-binding getSecret() relies on.
@@ -50,14 +51,30 @@ interface AdoptResult {
   failed: number;
   sessionId: string;
   note: string;
+  /** The first error encountered, verbatim, so a failed run is diagnosable. */
+  firstError?: string;
 }
 
 // A stable, per-store session id so every adopted memory lands under one
 // "session" the doctor and recall can scope to — and re-adopting the same
 // store dedups against it rather than piling up duplicates.
-function adoptSessionId(kind: StoreKind, store: string): string {
-  const stem = basename(store).replace(/[^\w.-]/g, "-").slice(0, 48) || "store";
-  return `adopt-${kind}-${stem}`;
+//
+// The basename alone is not identity: ~/a/CLAUDE.md and ~/b/CLAUDE.md would
+// share a session, silently merging two stores under one root — or, under
+// different roots, tripping the session-project guard so every memory 409s.
+// Fold a short digest of the resolved absolute path in to keep the id stable
+// per store and distinct across stores.
+export function adoptSessionId(kind: StoreKind, store: string): string {
+  const abs = resolve(store);
+  const stem = basename(abs).replace(/[^\w.-]/g, "-").slice(0, 48) || "store";
+  const digest = createHash("sha256").update(abs).digest("hex").slice(0, 8);
+  return `adopt-${kind}-${stem}-${digest}`;
+}
+
+/** True when an absolute path resolves outside `root`. Pure string logic. */
+function escapesRoot(abs: string, root: string): boolean {
+  const rel = relative(root, abs);
+  return rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel);
 }
 
 // The files a memory can be anchored to, mirroring `memwarden audit` exactly
@@ -86,11 +103,14 @@ function observePayloadFor(
   const promptBody = mem.text.trim()
     ? `${mem.title}\n\n${mem.text}`
     : mem.title;
-  const files = anchorFiles(mem, opts.root).map((f) =>
+  const files = anchorFiles(mem, opts.root)
     // Absolute paths pass through; relatives are resolved under the repo so
     // classifyProvenance checks them against the checkout the memory is about.
-    isAbsolute(f) ? f : join(opts.root, f),
-  );
+    .map((f) => (isAbsolute(f) ? f : resolve(opts.root, f)))
+    // A ref mined from prose can escape the root ("../other/x.ts"). Anchoring
+    // a memory to a file outside the checkout it is about can never verify
+    // and only produces confusing provenance, so drop it.
+    .filter((abs) => !escapesRoot(abs, opts.root));
   return {
     hookType: "user_prompt",
     sessionId,
@@ -177,6 +197,14 @@ export async function adopt(rest: string[]): Promise<void> {
   let adopted = 0;
   let deduplicated = 0;
   let failed = 0;
+  // A bare "47 failed" is useless: the causes are actionable and specific (a
+  // 409 project mismatch means the wrong --root, a 401 means a bad secret).
+  // Keep the first one and surface it verbatim.
+  let firstError: string | undefined;
+  const noteError = (msg: string): void => {
+    failed++;
+    if (!firstError) firstError = msg;
+  };
   for (const mem of memories) {
     try {
       const res = await fetch(`${daemonUrl()}/memwarden/observe`, {
@@ -186,16 +214,33 @@ export async function adopt(rest: string[]): Promise<void> {
       });
       const body = (await res.json().catch(() => ({}))) as {
         deduplicated?: boolean;
+        error?: string;
       };
-      if (!res.ok) failed++;
-      else if (body.deduplicated) deduplicated++;
+      if (!res.ok) {
+        noteError(`HTTP ${res.status}${body.error ? `: ${body.error}` : ""}`);
+      } else if (body.deduplicated) deduplicated++;
       else adopted++;
-    } catch {
-      failed++;
+    } catch (err) {
+      noteError(err instanceof Error ? err.message : String(err));
     }
   }
 
-  report({ store, kind, root, scanned: memories.length, adopted, deduplicated, failed, sessionId, note }, opts, false);
+  const result: AdoptResult = {
+    store,
+    kind,
+    root,
+    scanned: memories.length,
+    adopted,
+    deduplicated,
+    failed,
+    sessionId,
+    note,
+  };
+  if (firstError) result.firstError = firstError;
+  report(result, opts, false);
+  // Nothing landed but the store had memories: that is a failed run, and the
+  // shell deserves to know (scripts and CI read exit codes, not prose).
+  if (failed > 0 && adopted === 0 && deduplicated === 0) process.exitCode = 1;
 }
 
 // Auth mirrors the other CLI commands: getSecret() resolves the env var first,
@@ -218,15 +263,28 @@ function report(r: AdoptResult, opts: AdoptOptions, dryRun: boolean): void {
     tty ? `\x1b[${code}m${s}\x1b[0m` : s;
   const bold = (s: string): string => paint("1", s);
   const green = (s: string): string => paint("32", s);
+  const red = (s: string): string => paint("31", s);
   const gray = (s: string): string => paint("90", s);
 
   console.log(`\n${bold("memwarden adopt")} — ${r.store} (${r.kind})`);
   console.log(`${" ".repeat(18)}into brain, anchored to ${r.root}\n`);
   if (dryRun) {
-    console.log(`  ${r.scanned} memories would be adopted (dry run — nothing written)`);
+    console.log(
+      `  ${r.scanned} memories would be adopted (dry run — nothing written)`,
+    );
   } else {
-    console.log(green(`  ${r.adopted} adopted`) + ` · ${r.deduplicated} already present · ${r.failed} failed  (of ${r.scanned} scanned)`);
+    console.log(
+      green(`  ${r.adopted} adopted`) +
+        ` · ${r.deduplicated} already present · ${r.failed} failed` +
+        `  (of ${r.scanned} scanned)`,
+    );
     console.log(gray(`  session: ${r.sessionId}`));
+    if (r.firstError) {
+      console.log(red(`\n  first error: ${r.firstError}`));
+      console.log(
+        gray("  (a 409 usually means --root points at the wrong project)"),
+      );
+    }
   }
   console.log(gray(`\n  note: ${r.note}\n`));
 }

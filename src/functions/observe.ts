@@ -145,16 +145,25 @@ export function registerObserveFunction(
           ? (payload.data as Record<string, unknown>)
           : {};
       const toolName = (d["tool_name"] as string) || payload.hookType;
-      // Prompt events carry no tool_input; hash the prompt text instead so
-      // two DIFFERENT prompts in the same session never collide (only an
-      // identical retried prompt inside the TTL window dedups).
+      // A prompt event's identity is its PROMPT, so two DIFFERENT prompts in
+      // the same session never collide (only an identical retried prompt
+      // inside the TTL window dedups). It is keyed on the prompt even when
+      // tool_input rides along: `memwarden adopt` seeds foreign memories as
+      // user_prompt events carrying tool_input for file provenance, and most
+      // of a CLAUDE.md pile is unanchored prose sharing an empty file list —
+      // keying on tool_input alone would collapse the whole store into one
+      // memory and report the loss as "already present". The prompt leads the
+      // object so it dominates the hash's leading-500-char window.
       // session_end is special: per-turn Stop hosts (Codex, Kiro) end EVERY
       // turn, and each stop should refresh the handoff — so its dedup input
       // includes the full data (assistant_response and all) AND the event
       // timestamp. Only a true duplicate delivery (same timestamp, same
       // data) dedups; a new turn's stop never gets swallowed.
-      const dedupInput =
-        d["tool_input"] !== undefined
+      const isPromptHook =
+        payload.hookType === "prompt_submit" || payload.hookType === "user_prompt";
+      const dedupInput = isPromptHook
+        ? { prompt: d["prompt"], tool_input: d["tool_input"] }
+        : d["tool_input"] !== undefined
           ? d["tool_input"]
           : payload.hookType === "session_end"
             ? { data: d, ts: payload.timestamp }
