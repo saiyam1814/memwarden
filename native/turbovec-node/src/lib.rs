@@ -14,6 +14,13 @@
 #[macro_use]
 extern crate napi_derive;
 
+// Force the statically-linked OpenBLAS backend to be linked in on Linux so
+// ndarray's `blas` feature (pulled in transitively by turbovec) resolves to
+// a vendored static libopenblas instead of a runtime libopenblas.so.0.
+// macOS resolves BLAS to the system Accelerate framework and needs nothing.
+#[cfg(target_os = "linux")]
+extern crate blas_src;
+
 use napi::bindgen_prelude::*;
 use turbovec::IdMapIndex;
 

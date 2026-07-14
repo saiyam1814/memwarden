@@ -64,9 +64,13 @@ This produces `memwarden-turbovec.<platform>.node` (e.g.
 `memwarden-turbovec.darwin-arm64.node`). The binary is gitignored — it is
 always rebuilt from source or shipped as a CI prebuild.
 
-BLAS linkage comes from the turbovec crate's build: Accelerate on macOS,
-OpenBLAS on Linux (`libopenblas-dev` / `openblas-devel`), and a pure-Rust
-`matrixmultiply` fallback elsewhere.
+BLAS linkage (turbovec pulls in `ndarray`'s `blas` feature): macOS resolves
+to the system **Accelerate** framework, so the binary is self-contained with
+no extra deps. **Linux statically links OpenBLAS** — `openblas-src` builds it
+from vendored source (needs a Fortran toolchain: `gfortran make gcc perl`)
+and `blas-src` + `extern crate blas_src` route ndarray to it, so the shipped
+`.node` has no runtime `libopenblas.so` dependency and loads on a bare
+machine. A CI clean-container gate (no OpenBLAS installed) enforces this.
 
 ## Prebuild CI matrix (plan)
 

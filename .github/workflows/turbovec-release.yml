@@ -24,9 +24,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS links Accelerate (in the OS); Linux links OpenBLAS, so the
-          # runners install it and we build natively per-arch — GitHub's arm64
-          # runners avoid the OpenBLAS cross-compile swamp entirely.
+          # macOS links the system Accelerate framework (always present).
+          # Linux STATICALLY links OpenBLAS built from source by openblas-src,
+          # so the runners need a Fortran toolchain, not the runtime -dev pkg,
+          # and the shipped .node has no external BLAS dependency. Built
+          # natively per-arch — GitHub's arm64 runner avoids cross-compiling.
           - host: macos-14
             target: aarch64-apple-darwin
           # macos-13 (the last free Intel image) was retired in Dec 2025;
@@ -35,10 +37,10 @@ jobs:
             target: x86_64-apple-darwin
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            setup: sudo apt-get update && sudo apt-get install -y libopenblas-dev
+            setup: sudo apt-get update && sudo apt-get install -y gfortran make gcc perl
           - host: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            setup: sudo apt-get update && sudo apt-get install -y libopenblas-dev
+            setup: sudo apt-get update && sudo apt-get install -y gfortran make gcc perl
     runs-on: ${{ matrix.host }}
     steps:
       - uses: actions/checkout@v4

@@ -5,7 +5,7 @@
 
 [package]
 name = "memwarden-turbovec"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 description = "Node bindings for turbovec::IdMapIndex (memwarden's optional native vector backend)"
@@ -19,6 +19,19 @@ crate-type = ["cdylib"]
 napi = { version = "2", default-features = false, features = ["napi6"] }
 napi-derive = "2"
 turbovec = "0.9"
+
+# --- BLAS backend ---------------------------------------------------------
+# turbovec pulls in ndarray with the `blas` feature (not toggleable from
+# here), which needs a cblas implementation. On macOS that resolves to the
+# always-present Accelerate framework, so the binary is self-contained with
+# no extra work. On Linux the default resolves to a DYNAMIC libopenblas.so.0
+# that a user's machine won't have (the clean-container CI gate caught this).
+# So on Linux we STATICALLY link OpenBLAS (built from vendored source by
+# openblas-src) and pull it in via blas-src + `extern crate blas_src` in
+# lib.rs — the .node then has no external BLAS NEEDED and loads anywhere.
+[target.'cfg(target_os = "linux")'.dependencies]
+blas-src = { version = "0.10", default-features = false, features = ["openblas"] }
+openblas-src = { version = "0.10", default-features = false, features = ["cblas", "lapacke", "static"] }
 
 [build-dependencies]
 napi-build = "2"
