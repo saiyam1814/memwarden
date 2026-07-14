@@ -38,12 +38,15 @@ jobs:
           # macos-15-intel is GitHub's designated replacement.
           - host: macos-15-intel
             target: x86_64-apple-darwin
+          # node:20-bullseye is MULTI-ARCH (Docker pulls amd64 on the x64
+          # runner, arm64 on the arm runner — native each, no cross-compile)
+          # and Debian bullseye's glibc 2.31 is old enough to load broadly.
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            buildImage: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-debian
+            buildImage: node:20-bullseye
           - host: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            buildImage: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-debian-aarch64
+            buildImage: node:20-bullseye
     runs-on: ${{ matrix.host }}
     steps:
       - uses: actions/checkout@v4
@@ -67,12 +70,13 @@ jobs:
           docker run --rm -v "$PWD":/w -w /w/native/turbovec-node ${{ matrix.buildImage }} \
             bash -lc '
               set -e
-              # The napi-rs image ships an old Rust that cannot parse newer
-              # transitive Cargo.toml files (generativity 1.2.1). Update to
-              # current stable; the OLD GLIBC of the image is what we want and
-              # it is unaffected by the toolchain version.
-              rustup update stable && rustup default stable
-              apt-get update && apt-get install -y --no-install-recommends gfortran make gcc perl build-essential
+              # node:20-bullseye has node + build tools + curl; add gfortran for
+              # the openblas-src static compile and a current Rust via rustup
+              # (bullseye repos ship no rustc). Old glibc (2.31) stays, so the
+              # binary loads broadly; the toolchain version is independent of it.
+              apt-get update && apt-get install -y --no-install-recommends gfortran make gcc g++ perl
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+              . "$HOME/.cargo/env"
               npm ci
               npx napi build --release --target ${{ matrix.target }}
             '
