@@ -4,162 +4,232 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>memwarden — the memory firewall for AI coding agents</title>
-<meta name="description" content="Your agent's memory is lying to you. Prove yours isn't. Verified, self-custodied memory for AI coding agents: memory whose provenance no longer checks out is blocked before injection. Local-first, cross-tool, no API key." />
+<meta name="description" content="Your agent's memory is lying to you. Prove yours isn't. Self-custodied memory for AI coding agents: memory whose provenance no longer checks out is blocked before injection. Local-first, cross-tool, no API key." />
 <meta property="og:title" content="memwarden — the memory firewall for AI coding agents" />
-<meta property="og:description" content="Your agent's memory is lying to you. Prove yours isn't. Self-custodied memory: known-stale context is blocked before injection." />
+<meta property="og:description" content="Your agent's memory is lying to you. Prove yours isn't. Known-stale memory is blocked before injection; what passes is trust-labeled." />
 <meta property="og:type" content="website" />
 <meta property="og:url" content="https://github.com/saiyam1814/memwarden" />
 <meta property="og:site_name" content="memwarden" />
-<!-- og:image: add a hosted 1200x630 social card here before launch, e.g.
-     <meta property="og:image" content="https://.../memwarden-card.png" /> -->
+<!-- og:image: add a hosted 1200x630 social card here before launch. -->
 <meta name="twitter:card" content="summary" />
 <meta name="twitter:title" content="memwarden — the memory firewall for AI coding agents" />
-<meta name="twitter:description" content="Your agent's memory is lying to you. Prove yours isn't. Known-stale memory is blocked before injection; what passes is trust-labeled." />
+<meta name="twitter:description" content="Known-stale memory is blocked before injection; what passes is trust-labeled. Local-first, cross-tool, no API key." />
 <link rel="canonical" href="https://github.com/saiyam1814/memwarden" />
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%A7%A0%3C/text%3E%3C/svg%3E" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='24' y2='24'%3E%3Cstop stop-color='%235CFF68'/%3E%3Cstop offset='1' stop-color='%2305CAFF'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M12 1.5 L20.5 4.8 V11 C20.5 16.4 16.8 20.6 12 22.5 C7.2 20.6 3.5 16.4 3.5 11 V4.8 Z' fill='url(%23g)'/%3E%3Cpath d='M8 12 l2.6 2.6 L16 8.6' fill='none' stroke='%23041016' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
+  /* ---- KubeSimplify design system (brand: #5CFF68 green -> #05CAFF cyan) ---- */
   :root{
-    --bg:#0a0d14; --bg2:#0e131d; --card:#121826; --card2:#0f1521; --line:#1f2839;
-    --fg:#e8edf5; --mut:#93a0b4; --dim:#6b7689;
-    --accent:#7c6cff; --accent2:#3ad1c9; --good:#46d18a; --warn:#f0b75e;
-    --radius:16px; --max:1080px;
+    --brand-green:#5CFF68; --brand-cyan:#05CAFF; --brand-green-dim:#2bb534; --brand-cyan-dim:#0098cc;
+    --grad:linear-gradient(135deg,#5CFF68 0%,#30E8A0 38%,#05CAFF 100%);
+    --radius:16px; --max:1120px;
+    /* light theme (default) */
+    --bg:#ffffff; --bg2:#f8fafc; --card:#ffffff; --elevated:#f1f5f9;
+    --fg:#0f172a; --mut:#475569; --dim:#94a3b8;
+    --line:rgba(2,6,23,.09); --line2:rgba(2,6,23,.14);
+    --accent:#0098cc; --accent2:#2bb534;
+    --good:#16a34a; --warn:#d97706; --bad:#dc2626;
+    --shadow:0 1px 3px rgba(2,6,23,.06),0 8px 30px rgba(2,6,23,.05);
+    --shadow-h:0 12px 44px rgba(5,202,255,.14);
+    --glow:rgba(5,202,255,.10);
+    --code-bg:#0b1220; --code-fg:#e2e8f0;
+  }
+  :root[data-theme="dark"]{
+    --bg:#030712; --bg2:#0a0f1a; --card:#111827; --elevated:#1e293b;
+    --fg:#f9fafb; --mut:#a3b0c2; --dim:#64748b;
+    --line:rgba(255,255,255,.08); --line2:rgba(255,255,255,.14);
+    --accent:#05CAFF; --accent2:#5CFF68;
+    --good:#5CFF68; --warn:#f0b75e; --bad:#f87171;
+    --shadow:0 4px 24px rgba(0,0,0,.4); --shadow-h:0 20px 60px rgba(5,202,255,.16);
+    --glow:rgba(5,202,255,.18);
+    --code-bg:#060b16; --code-fg:#dbe4f0;
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme]){
+      --bg:#030712; --bg2:#0a0f1a; --card:#111827; --elevated:#1e293b;
+      --fg:#f9fafb; --mut:#a3b0c2; --dim:#64748b;
+      --line:rgba(255,255,255,.08); --line2:rgba(255,255,255,.14);
+      --accent:#05CAFF; --accent2:#5CFF68;
+      --good:#5CFF68; --warn:#f0b75e; --bad:#f87171;
+      --shadow:0 4px 24px rgba(0,0,0,.4); --shadow-h:0 20px 60px rgba(5,202,255,.16);
+      --glow:rgba(5,202,255,.18);
+      --code-bg:#060b16; --code-fg:#dbe4f0;
+    }
   }
   *{box-sizing:border-box}
-  html{scroll-behavior:smooth}
+  html{scroll-behavior:smooth; max-width:100%; overflow-x:hidden}
   body{
-    margin:0; background:radial-gradient(1200px 640px at 50% -12%, #1a2440 0%, var(--bg) 56%);
-    color:var(--fg); font:16px/1.65 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Inter,sans-serif;
-    -webkit-font-smoothing:antialiased;
+    margin:0; background:var(--bg); color:var(--fg);
+    font:16px/1.65 "Inter",ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale;
+    transition:background-color .3s ease,color .3s ease;
+    max-width:100%; overflow-x:hidden;
   }
-  a{color:var(--accent2); text-decoration:none}
+  /* ambient brand glow behind the hero */
+  body::before{content:""; position:fixed; inset:0 0 auto 0; height:620px; z-index:-1; pointer-events:none;
+    background:radial-gradient(900px 460px at 50% -8%, var(--glow), transparent 70%);}
+  a{color:var(--accent); text-decoration:none}
   a:hover{text-decoration:underline}
-  .wrap{max-width:var(--max); margin:0 auto; padding:0 24px}
-  code,pre,kbd{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
-  kbd{background:#070a11; border:1px solid var(--line); border-radius:6px; padding:2px 7px; font-size:13px; color:var(--accent2)}
+  :focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:6px}
+  .wrap{max-width:var(--max); margin:0 auto; padding:0 24px; overflow-x:clip}
+  code,pre,kbd{font-family:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+  kbd{background:var(--elevated); border:1px solid var(--line); border-radius:6px; padding:2px 7px; font-size:13px; color:var(--accent)}
+  code{color:var(--accent)}
 
-  nav{display:flex; align-items:center; justify-content:space-between; padding:22px 0}
-  .brand{font-weight:800; font-size:18px; letter-spacing:.2px}
-  .brand span{color:var(--accent)}
-  .nav-links a{color:var(--mut); margin-left:22px; font-size:14px}
+  /* ---- nav ---- */
+  nav{position:sticky; top:0; z-index:50; display:flex; align-items:center; justify-content:space-between;
+    padding:14px 24px; margin:0 -24px 0; backdrop-filter:saturate(160%) blur(12px);
+    background:color-mix(in srgb,var(--bg) 78%,transparent); border-bottom:1px solid var(--line)}
+  .brand{display:flex; align-items:center; gap:10px; font-weight:800; font-size:18px; letter-spacing:-.01em}
+  .brand .mark{width:26px; height:26px; flex:0 0 auto}
+  .brand b{font-weight:800}
+  .brand .g{background:var(--grad); -webkit-background-clip:text; background-clip:text; color:transparent}
+  .nav-links{display:flex; align-items:center; gap:22px}
+  .nav-links a{color:var(--mut); font-size:14px; font-weight:500}
+  .nav-links a:hover{color:var(--fg); text-decoration:none}
+  .nav-right{display:flex; align-items:center; gap:12px}
+  .icon-btn{display:inline-grid; place-items:center; width:38px; height:38px; border-radius:10px; cursor:pointer;
+    border:1px solid var(--line); background:var(--card); color:var(--fg)}
+  .icon-btn:hover{border-color:var(--accent)}
+  .icon-btn svg{width:18px; height:18px}
+  .star-btn{display:inline-flex; align-items:center; gap:8px; padding:9px 16px; border-radius:11px; font-weight:700; font-size:14px;
+    color:#041016; background:var(--grad); border:0; box-shadow:0 6px 20px var(--glow)}
+  .star-btn:hover{filter:brightness(1.06); text-decoration:none; transform:translateY(-1px)}
+  .star-btn svg{width:16px; height:16px}
+  .star-btn .n{background:rgba(4,16,22,.16); padding:1px 8px; border-radius:20px; font-variant-numeric:tabular-nums}
 
-  header{text-align:center; padding:60px 0 36px}
-  .pill{display:inline-block; font-size:12.5px; color:var(--accent2); border:1px solid var(--line);
-    background:var(--bg2); padding:6px 14px; border-radius:999px; margin-bottom:24px}
-  h1{font-size:clamp(34px,5.6vw,62px); line-height:1.06; margin:0 0 18px; letter-spacing:-.02em; font-weight:830}
-  h1 .grad{background:linear-gradient(90deg,var(--accent),var(--accent2)); -webkit-background-clip:text; background-clip:text; color:transparent}
-  .sub{font-size:clamp(16px,2.2vw,20px); color:var(--mut); max-width:700px; margin:0 auto 30px}
-
-  .cmd{display:flex; align-items:center; justify-content:space-between; gap:14px; max-width:520px; margin:0 auto 18px;
-    background:#070a11; border:1px solid var(--line); border-radius:12px; padding:14px 16px; font-size:15px; text-align:left}
-  .cmd code{color:#cdd8ea}
-  .cmd code .p{color:var(--accent2)}
-  .copy{cursor:pointer; border:1px solid var(--line); background:var(--bg2); color:var(--mut); border-radius:8px; padding:6px 12px; font-size:12.5px}
-  .copy:hover{border-color:var(--accent); color:var(--fg)}
-  .cta{display:flex; gap:14px; justify-content:center; flex-wrap:wrap; margin-top:6px}
-  .btn{display:inline-flex; align-items:center; gap:8px; padding:12px 22px; border-radius:12px; font-weight:650; font-size:15px}
-  .btn.primary{background:linear-gradient(90deg,var(--accent),#6a8bff); color:#fff}
-  .btn.primary:hover{filter:brightness(1.08); text-decoration:none}
-  .btn.ghost{border:1px solid var(--line); color:var(--fg); background:var(--bg2)}
+  /* ---- hero ---- */
+  header{text-align:center; padding:72px 0 40px}
+  .pill{display:inline-flex; align-items:center; gap:8px; font-size:12.5px; font-weight:600; color:var(--accent);
+    border:1px solid var(--line2); background:var(--card); padding:7px 15px; border-radius:999px; margin-bottom:26px}
+  .pill .dot{width:7px; height:7px; border-radius:50%; background:var(--brand-green); box-shadow:0 0 10px var(--brand-green)}
+  h1{font-size:clamp(36px,6vw,66px); line-height:1.04; margin:0 0 20px; letter-spacing:-.03em; font-weight:900}
+  h1 .grad{background:var(--grad); -webkit-background-clip:text; background-clip:text; color:transparent}
+  .sub{font-size:clamp(16px,2.1vw,20px); color:var(--mut); max-width:720px; margin:0 auto 30px}
+  .cmd{display:flex; align-items:center; justify-content:space-between; gap:14px; max-width:540px; margin:0 auto 16px;
+    background:var(--code-bg); border:1px solid var(--line2); border-radius:13px; padding:15px 16px; font-size:15px; text-align:left; box-shadow:var(--shadow)}
+  .cmd code{color:#dbe4f0} .cmd code .p{color:var(--brand-cyan)}
+  .copy{cursor:pointer; border:1px solid rgba(255,255,255,.16); background:rgba(255,255,255,.06); color:#c7d2e0; border-radius:8px; padding:6px 12px; font-size:12.5px; font-weight:600}
+  .copy:hover{border-color:var(--brand-cyan); color:#fff}
+  .cta{display:flex; gap:13px; justify-content:center; flex-wrap:wrap; margin-top:8px}
+  .btn{display:inline-flex; align-items:center; gap:8px; padding:13px 22px; border-radius:12px; font-weight:700; font-size:15px}
+  .btn.primary{background:var(--grad); color:#041016; box-shadow:0 8px 24px var(--glow)}
+  .btn.primary:hover{filter:brightness(1.06); text-decoration:none; transform:translateY(-1px)}
+  .btn.ghost{border:1px solid var(--line2); color:var(--fg); background:var(--card)}
   .btn.ghost:hover{border-color:var(--accent); text-decoration:none}
+  .btn svg{width:17px; height:17px}
 
-  .stats{display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin:44px 0 8px}
-  .stat{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:20px; text-align:center}
-  .stat b{display:block; font-size:26px; font-weight:800}
-  .stat .accent{color:var(--accent2)}
+  .stats{display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin:52px 0 8px}
+  .stat{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:22px 18px; text-align:center; box-shadow:var(--shadow)}
+  .stat b{display:block; font-size:30px; font-weight:900; letter-spacing:-.02em}
+  .stat .accent{background:var(--grad); -webkit-background-clip:text; background-clip:text; color:transparent}
   .stat small{color:var(--dim); font-size:12.5px}
 
-  section{padding:50px 0; border-top:1px solid var(--line)}
-  h2{font-size:clamp(22px,3vw,32px); margin:0 0 10px; letter-spacing:-.01em}
-  .lead{color:var(--mut); max-width:720px; margin:0 0 28px}
+  /* ---- sections ---- */
+  section{padding:56px 0; border-top:1px solid var(--line)}
+  h2{font-size:clamp(23px,3vw,34px); margin:0 0 12px; letter-spacing:-.02em; font-weight:800}
+  .lead{color:var(--mut); max-width:760px; margin:0 0 30px; font-size:16.5px}
 
   .grid{display:grid; grid-template-columns:repeat(3,1fr); gap:16px}
   .grid.two{grid-template-columns:repeat(2,1fr)}
-  .feat{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:22px}
-  .feat h3{margin:0 0 8px; font-size:16px}
+  .feat{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:24px; box-shadow:var(--shadow); transition:transform .2s,box-shadow .2s,border-color .2s}
+  .feat:hover{transform:translateY(-3px); box-shadow:var(--shadow-h); border-color:var(--line2)}
+  .feat h3{margin:0 0 8px; font-size:16.5px; font-weight:700}
   .feat p{margin:0; color:var(--mut); font-size:14.5px}
-  .feat .ic{font-size:20px; margin-bottom:10px}
+  .feat .ic{font-size:22px; margin-bottom:12px; line-height:1}
+  .dotc{display:inline-block; width:11px; height:11px; border-radius:50%; margin-bottom:12px}
 
-  .tools{display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-top:10px}
-  .tool{background:var(--card2); border:1px solid var(--line); border-radius:12px; padding:14px 16px}
-  .tool b{font-size:14.5px}
-  .tool small{display:block; color:var(--dim); font-size:12px; margin-top:3px}
-  .tool .auto{color:var(--good)} .tool .inst{color:var(--accent2)}
+  .tools{display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-top:12px}
+  .tool{background:var(--bg2); border:1px solid var(--line); border-radius:12px; padding:15px 16px}
+  .tool b{font-size:14.5px} .tool small{display:block; color:var(--dim); font-size:12px; margin-top:4px}
+  .tool .auto{color:var(--accent2)} .tool .inst{color:var(--accent)}
 
   .doors{display:grid; grid-template-columns:repeat(3,1fr); gap:16px}
-  .door{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:22px}
-  .door .n{font-size:12px; color:var(--dim); letter-spacing:.08em; text-transform:uppercase}
-  .door h3{margin:6px 0 8px; font-size:17px}
+  .door{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:24px; box-shadow:var(--shadow)}
+  .door .n{font-size:11.5px; color:var(--dim); letter-spacing:.09em; text-transform:uppercase; font-weight:700}
+  .door h3{margin:7px 0 9px; font-size:17px; font-weight:700}
   .door p{margin:0; color:var(--mut); font-size:14px}
-  .door .tag{display:inline-block; margin-top:12px; font-size:12px; padding:3px 10px; border-radius:999px; border:1px solid var(--line)}
-  .tag.mech{color:var(--good)} .tag.soft{color:var(--accent2)}
+  .door .tag{display:inline-block; margin-top:14px; font-size:12px; font-weight:600; padding:4px 11px; border-radius:999px; border:1px solid var(--line2)}
+  .tag.mech{color:var(--accent2)} .tag.soft{color:var(--accent)}
 
-  pre{background:#070a11; border:1px solid var(--line); border-radius:var(--radius); padding:20px 22px;
-    overflow:auto; font-size:14px; line-height:1.7; color:#cdd8ea}
-  pre .c{color:var(--dim)} pre .g{color:var(--good)} pre .y{color:var(--warn)} pre .a{color:var(--accent2)}
+  pre{background:var(--code-bg); border:1px solid var(--line2); border-radius:var(--radius); padding:20px 22px;
+    overflow-x:auto; font-size:13.5px; line-height:1.7; color:var(--code-fg); box-shadow:var(--shadow)}
+  pre .c{color:#64748b} pre .g{color:var(--brand-green)} pre .y{color:#f0b75e} pre .a{color:var(--brand-cyan)} pre .ok{color:var(--brand-green)}
 
-  .flow{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:22px; color:var(--mut); font-size:14.5px}
-  .flow b{color:var(--fg)}
-  .diagram{padding:18px}
-  .diagram svg{width:100%; height:auto; display:block}
+  .diagram{background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:18px; box-shadow:var(--shadow); overflow-x:auto}
+  .diagram svg{width:100%; height:auto; display:block; min-width:640px}
+  .attrib{display:flex; align-items:center; justify-content:flex-end; gap:9px; margin-top:12px; color:var(--dim); font-size:12.5px}
+  .attrib img{width:22px; height:22px}
+  .attrib b{color:var(--fg); font-weight:700}
 
-  table{width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; font-size:14.5px}
-  th,td{padding:12px 16px; text-align:left; border-bottom:1px solid var(--line)}
-  th{color:var(--mut); font-weight:600}
+  table{width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; font-size:14.5px; box-shadow:var(--shadow); margin-bottom:16px}
+  th,td{padding:13px 16px; text-align:left; border-bottom:1px solid var(--line)}
+  th{color:var(--mut); font-weight:700; font-size:13px; text-transform:uppercase; letter-spacing:.03em; background:var(--bg2)}
   tr:last-child td{border-bottom:none}
-  td .ok{color:var(--good)}
+  td .ok{color:var(--good); font-weight:700}
 
-  .note{color:var(--dim); font-size:13px; margin-top:14px; max-width:720px}
-  footer{padding:48px 0 64px; color:var(--dim); text-align:center; font-size:14px; border-top:1px solid var(--line)}
-  @media(max-width:820px){ .stats,.tools{grid-template-columns:repeat(2,1fr)} .grid,.doors{grid-template-columns:1fr} .nav-links{display:none} }
-  /* The page body must never scroll sideways; the ASCII architecture flow
-     scrolls inside its own box. (Desktop tables keep wrapping cells.) */
-  html,body{max-width:100%; overflow-x:hidden}
-  .flow{overflow-x:auto; -webkit-overflow-scrolling:touch}
-  /* Mobile (320/390px): wide tables scroll inside their own box instead of
-     pushing the whole layout; narrow the grids and stack the install command. */
+  .note{color:var(--dim); font-size:13.5px; margin-top:14px; max-width:760px}
+  footer{padding:52px 0 72px; color:var(--dim); text-align:center; font-size:14px; border-top:1px solid var(--line)}
+  footer a{font-weight:600}
+
+  @media(max-width:900px){ .nav-links{display:none} }
+  @media(max-width:820px){ .stats,.tools{grid-template-columns:repeat(2,1fr)} .grid,.grid.two,.doors{grid-template-columns:1fr} }
   @media(max-width:480px){
+    header{padding:44px 0 28px}
     .stats,.tools{grid-template-columns:1fr}
-    table{display:block; overflow-x:auto; -webkit-overflow-scrolling:touch}
+    table{display:block; overflow-x:auto}
     .cmd{flex-direction:column; align-items:stretch; gap:10px}
     .cmd code{overflow-x:auto; white-space:nowrap}
-    pre{font-size:12.5px}
+    .star-btn .label{display:none}
+    pre{font-size:12px}
   }
 </style>
 </head>
 <body>
-<div class="wrap">
 
-  <nav>
-    <div class="brand">🧠 mem<span>warden</span></div>
-    <div class="nav-links">
-      <a href="#setup">Setup</a>
-      <a href="#trust">Verified Recall</a>
-      <a href="#dejafix">Déjà Fix</a>
-      <a href="#ground">Ground truth</a>
-      <a href="#proof">Measured</a>
-      <a href="#cross">Cross-tool</a>
-      <a href="https://github.com/saiyam1814/memwarden">GitHub</a>
-    </div>
-  </nav>
+<nav>
+  <a class="brand" href="#top" aria-label="memwarden home">
+    <svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="mwmark" x1="0" y1="0" x2="24" y2="24"><stop stop-color="#5CFF68"/><stop offset="1" stop-color="#05CAFF"/></linearGradient></defs><path d="M12 1.5 L20.5 4.8 V11 C20.5 16.4 16.8 20.6 12 22.5 C7.2 20.6 3.5 16.4 3.5 11 V4.8 Z" fill="url(#mwmark)"/><path d="M8 12 l2.6 2.6 L16 8.6" fill="none" stroke="#041016" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <span>mem<b class="g">warden</b></span>
+  </a>
+  <div class="nav-links">
+    <a href="#trust">Verified Recall</a>
+    <a href="#dejafix">Déjà Fix</a>
+    <a href="#setup">Setup</a>
+    <a href="#cross">Cross-tool</a>
+    <a href="#proof">Measured</a>
+  </div>
+  <div class="nav-right">
+    <button class="icon-btn" id="theme" aria-label="Toggle light/dark theme" title="Toggle theme">
+      <svg id="theme-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+    </button>
+    <a class="star-btn" href="https://github.com/saiyam1814/memwarden" target="_blank" rel="noopener">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .3a12 12 0 00-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.3-1.8-1.3-1.8-1.1-.7.1-.7.1-.7 1.2 0 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2 0-.4-.5-1.6.2-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 016 0C17.3 4.7 18.3 5 18.3 5c.7 1.6.2 2.8.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0012 .3z"/></svg>
+      <span class="label">Star</span><span class="n">★</span>
+    </a>
+  </div>
+</nav>
+
+<div class="wrap" id="top">
 
   <header>
-    <span class="pill">one command · native hooks across your agents · trust-labeled &amp; self-custodied</span>
-    <h1>Every agent remembers.<br/>One command: <span class="grad">memwarden&nbsp;up</span></h1>
-    <p class="sub">Native lifecycle hooks in Claude Code, Codex, Cursor, Gemini CLI, Kiro and
-      OpenCode: your work is captured as it happens and recalled before you type a word, in every
-      tool, with no instruction files and no "please remember to remember". And memory whose
-      source no longer checks out is blocked before it reaches the model, so what your agent
-      recalls is memory you can actually trust.</p>
+    <span class="pill"><span class="dot"></span> the memory firewall for AI coding agents</span>
+    <h1>Your agent's memory<br/>is lying to you.<br/><span class="grad">Prove yours isn't.</span></h1>
+    <p class="sub">Self-custodied, cross-tool memory that ties every fact to your repo. Memory whose
+      source no longer checks out is <b>blocked before it reaches the model</b> — and what passes is
+      labeled for exactly what it is. One command wires every agent you use.</p>
 
     <div class="cmd">
       <code>$ <span class="p">npm install -g memwarden && memwarden up</span></code>
-      <button class="copy" onclick="navigator.clipboard&&navigator.clipboard.writeText('npm install -g memwarden && memwarden up');this.textContent='copied'">copy</button>
+      <button class="copy" onclick="navigator.clipboard&&navigator.clipboard.writeText('npm install -g memwarden && memwarden up').then(()=>{this.textContent='copied ✓';setTimeout(()=>this.textContent='copy',1500)})">copy</button>
     </div>
-    <p class="sub" style="margin-top:10px;font-size:15px;opacity:.8">Starts a self-healing daemon, installs on-device semantic embeddings, and wires hooks + MCP into every installed tool, in each tool's own config. That's the whole setup — and <code>memwarden status</code> proves it's flowing.</p>
     <div class="cta">
-      <a class="btn primary" href="#setup">What <code>memwarden&nbsp;up</code> does</a>
-      <a class="btn ghost" href="https://www.npmjs.com/package/memwarden">npm</a>
-      <a class="btn ghost" href="https://github.com/saiyam1814/memwarden">View on GitHub</a>
+      <a class="btn primary" href="#setup">See what <code style="color:#041016">memwarden&nbsp;up</code> does</a>
+      <a class="btn ghost" href="https://github.com/saiyam1814/memwarden" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .3a12 12 0 00-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.3-1.8-1.3-1.8-1.1-.7.1-.7.1-.7 1.2 0 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2 0-.4-.5-1.6.2-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 016 0C17.3 4.7 18.3 5 18.3 5c.7 1.6.2 2.8.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0012 .3z"/></svg>
+        Star on GitHub</a>
     </div>
 
     <div class="stats">
@@ -173,11 +243,10 @@
   <section id="why">
     <h2>The problem isn't forgetting. It's confidently wrong recall.</h2>
     <p class="lead">A stored fact silently goes stale — it points at code you've since changed or
-      deleted — and the agent injects it with full confidence anyway. The industry has started
-      naming this class of risk: OWASP added Memory Poisoning (ASI06) to its 2026 Agentic Top 10.
-      Most memory still stores everything and trusts everything. A memory that points at code you
-      deleted is worse than none. memwarden flips the default: memory is untrusted until its source
-      still checks out.</p>
+      deleted — and the agent injects it with full confidence anyway. OWASP added Memory Poisoning
+      (ASI06) to its 2026 Agentic Top 10. Most memory still stores everything and trusts everything.
+      A memory that points at code you deleted is worse than none. memwarden flips the default:
+      memory is untrusted until its source still checks out.</p>
     <div class="grid">
       <div class="feat"><div class="ic">🩺</div><h3>Verified Recall — the anti-feature</h3><p>Memory is firewalled before it reaches a model. Stale memory is never injected. <code>memwarden doctor</code> runs the same check as a red/yellow/green audit against any existing store. Point it at your own memory and watch it light up yellow.</p></div>
       <div class="feat"><div class="ic">🪂</div><h3>Self-custodied &amp; portable</h3><p>Your second brain shouldn't depend on a vendor's roadmap. memwarden is local-first, tamper-evident, and portable: one <code>export</code> produces a Brain Bundle you can move between machines or agents. Zero cloud — the data lives at <code>~/.memwarden</code> and nowhere else.</p></div>
@@ -188,70 +257,59 @@
   <section id="trust">
     <h2>Verified Recall — four states, one firewall</h2>
     <p class="lead">Every memory is classified against the live repo before it can reach a model.
-      <kbd>memory_resume</kbd>, the <kbd>/recall</kbd> prompt, the Claude Code SessionStart hook,
-      and the proxy all run with the firewall on. <b>It drops <code>stale</code> before injecting.
-      It does not drop <code>unsourced</code></b> — unsourced means <i>unverified</i>, not
-      <i>dangerous</i>, so it stays available for explicit lookups. What passes is labeled for
-      exactly what it is — never laundered into one pile.</p>
+      <kbd>memory_resume</kbd>, the recall prompt, the Claude Code SessionStart hook, and the proxy
+      all run with the firewall on. <b>It blocks <code>stale</code> before injecting. It does not
+      block <code>unsourced</code></b> — unsourced means <i>unverified</i>, not <i>dangerous</i>, so
+      it stays available for explicit lookups. What passes is firewall-passing, trust-labeled memory —
+      never laundered into one "verified" pile.</p>
     <div class="grid two">
-      <div class="feat"><div class="ic" style="color:var(--good)">●</div><h3>verified</h3><p>A captured source-file hash still matches the file on disk. Code-backed and current. Auto-injected.</p></div>
-      <div class="feat"><div class="ic" style="color:var(--accent2)">●</div><h3>sourced</h3><p>Has a source (a command, or files present but not hashable) but no content hash to re-check. Allowed, labeled, not content-verified.</p></div>
-      <div class="feat"><div class="ic" style="color:var(--warn)">●</div><h3>stale → dropped</h3><p>A referenced file was deleted, or its content changed since capture. Never injected into the model.</p></div>
-      <div class="feat"><div class="ic" style="color:var(--dim)">●</div><h3>unsourced</h3><p>No evidence trail. Kept for explicit lookups, labeled so the agent knows it is unverified — never silently promoted.</p></div>
+      <div class="feat"><span class="dotc" style="background:var(--good)"></span><h3>verified</h3><p>A captured source-file hash still matches the file on disk — code-backed and current. This is the only label reserved for content-hash-confirmed memory. Auto-injected.</p></div>
+      <div class="feat"><span class="dotc" style="background:var(--accent)"></span><h3>sourced</h3><p>Has a source (a command, or files present but not hashable) but no content hash to re-check. Allowed, labeled, not content-verified.</p></div>
+      <div class="feat"><span class="dotc" style="background:var(--warn)"></span><h3>stale → blocked</h3><p>A referenced file was deleted, or its content changed since capture. Never injected into the model.</p></div>
+      <div class="feat"><span class="dotc" style="background:var(--dim)"></span><h3>unsourced</h3><p>No evidence trail. Kept for explicit lookups, labeled so the agent knows it is unverified — never silently promoted.</p></div>
     </div>
-    <p class="lead" style="margin-top:24px">The shareable artifact: <kbd>memwarden doctor</kbd>
-      runs the same check as a report, plus conservative subject/value conflict detection — no LLM,
-      no fuzzy black box. <kbd>memwarden why &lt;id&gt;</kbd> explains one memory;
-      <kbd>doctor --fix-stale</kbd> forgets the whole stale inbox. And when the firewall refuses
-      something at SessionStart, the agent sees the refusal evidence — not a silent empty inject.</p>
+    <p class="lead" style="margin-top:26px">Two policies: <b>balanced</b> (default) blocks stale and
+      keeps the rest — sourced and unsourced — each labeled; <b>verified-only</b> raises the floor so
+      only hash-verified memory is ever auto-injected. <kbd>memwarden why &lt;id&gt;</kbd> explains one
+      memory; <kbd>doctor --fix-stale</kbd> clears the stale inbox. No LLM, no fuzzy black box.</p>
 <pre>$ <span class="a">memwarden doctor .</span>
 
-  <span class="g">VERIFIED:        8 memories (code-backed, current)</span>
-  SOURCED:         3 memories (sourced, not content-verified)
-  <span class="y">STALE:           2 memories reference files that changed/deleted</span>
-  <span class="y">UNSOURCED:       1 memory has no evidence</span>
-  <span class="y">CONFLICTS:       1 possible contradiction</span>
+  <span class="g">VERIFIED:   8 memories (code-backed, current)</span>
+  SOURCED:    3 memories (sourced, not content-verified)
+  <span class="y">STALE:      2 memories reference files that changed/deleted</span>
+  <span class="y">UNSOURCED:  1 memory has no evidence</span>
 
-  [stale]     Edit — references files that no longer match (changed: src/legacy.ts)
-  [conflict] Edit may contradict Edit — same subject "auth" has incompatible values</pre>
-    <p class="note">The foreign-store audit also emits an evidence-backed action plan in
-      <code>--json</code> and <code>--html</code>: quarantine missing-file memory, refresh drifted
-      code facts, promote PRESENT facts into hash-verified recall, anchor free-floating memory,
-      and wire live recall through the firewall. It recommends; it does not mutate your store.</p>
+  [stale] Edit (obs_…) — references files that no longer match (changed: src/legacy.ts)</pre>
   </section>
 
   <section id="dejafix">
     <h2>Déjà Fix — never solve the same error twice</h2>
-    <p class="lead">memwarden is the one process that sees <b>every</b> agent's sessions, so it can
-      do what no per-tool memory can: when any agent resolves an error, it captures
+    <p class="lead">memwarden is the one process that sees <b>every</b> agent's sessions, so it can do
+      what no per-tool memory can: when any agent resolves an error, it captures
       <code>{error&nbsp;signature&nbsp;&rarr;&nbsp;root&nbsp;cause&nbsp;+&nbsp;fix}</code> with
-      provenance file-hashes. When any agent later hits a matching error, the verified fix is
-      surfaced automatically &mdash; but only if its files still hash-match. A stale fix is never
-      surfaced.</p>
+      provenance file-hashes. When any agent later hits a matching error, the fix is surfaced
+      automatically &mdash; but only if its files still hash-match. A stale fix is never surfaced.</p>
 <pre><span class="c"># Codex solved a failing test yesterday. Today Claude Code hits the same failure:</span>
-<span class="ok">Déjà Fix (memwarden): this error was solved by codex on 2026-06-09</span>
-<span class="ok">and the fix is verified current against your working tree.</span>
-  root cause: clock skew   ·   fix: mock NTP in conftest
+<span class="ok">Déjà Fix (memwarden): a prior session resolved this error and the fix</span>
+<span class="ok">is verified current against your working tree.</span>
+  solved by: codex · root cause: clock skew · fix: mock NTP in conftest
 
 <span class="c"># scriptable too — pipe a failing command's output straight in:</span>
 npm test 2>&1 | npx memwarden <span class="a">dejafix lookup</span></pre>
     <p class="note"><b>Cross-agent</b> (a fix learned in Codex helps Claude Code), <b>project-scoped</b>
-      (a fix never leaks across repos), and <b>safe by construction</b> &mdash; it reuses Verified
-      Recall, so file drift or deletion auto-suppresses it. Only <code>verified current</code> fixes
-      auto-inject; sourced-but-unverified ones stay available on demand, never silently pushed.</p>
+      (a fix never leaks across repos), and <b>safe by construction</b> — it reuses Verified Recall, so
+      file drift or deletion auto-suppresses it. Only <code>verified current</code> fixes auto-inject.</p>
   </section>
 
   <section id="ground">
     <h2>Source-file hashes: the ground truth</h2>
     <p class="lead">A coding agent has something general-purpose memory doesn't: the repository on
-      disk is the source of truth. When memwarden captures a code-backed memory it records a
-      SHA-256 content hash for each referenced file (best-effort, files up to ~2&nbsp;MB). On recall
-      it re-hashes the live file and compares. If the file moved or vanished, the memory is provably
-      stale — not by heuristic, by hash. That's what lets the repo tell us, on every recall, whether
-      a memory is still earned.</p>
+      disk is the source of truth. When memwarden captures a code-backed memory it records a SHA-256
+      content hash for each referenced file. On recall it re-hashes the live file and compares. If the
+      file moved or vanished, the memory is provably stale — not by heuristic, by hash.</p>
     <div class="grid">
-      <div class="feat"><div class="ic">🔗</div><h3>Tamper-evident, honestly</h3><p>Every write lands in an append-only SHA-256 hash-chained oplog. <kbd>memory_verify</kbd> recomputes the chain, so an edit or reorder of any past entry breaks it. <b>Tamper-evident, not tamper-proof:</b> there is no signing, and the chain does not detect tail-truncation (dropping the newest entries).</p></div>
-      <div class="feat"><div class="ic">🧾</div><h3>Erasure with receipts</h3><p><kbd>memwarden forget &lt;id&gt;</kbd> returns an offline-checkable delete receipt (create + delete entry hashes, chain head). <kbd>forget --erase</kbd> nulls payloads and re-chains; <kbd>memwarden compact</kbd> reclaims bytes so content actually leaves the file. Receipts carry a real <code>contentErased</code> boolean — no silent lies about deletion.</p></div>
+      <div class="feat"><div class="ic">🔗</div><h3>Tamper-evident, honestly</h3><p>Every write lands in an append-only SHA-256 hash-chained oplog. <kbd>memory_verify</kbd> recomputes the chain, so an edit or reorder of any past entry breaks it. <b>Tamper-evident, not tamper-proof:</b> no signing, and the chain does not detect tail-truncation.</p></div>
+      <div class="feat"><div class="ic">🧾</div><h3>Erasure with receipts</h3><p><kbd>forget &lt;id&gt;</kbd> returns an offline-checkable delete receipt. <kbd>forget --erase</kbd> nulls payloads and re-chains; <kbd>compact</kbd> reclaims bytes so content leaves the file. A post-erase residual scan refuses to claim <code>contentErased</code> while a copy survives.</p></div>
       <div class="feat"><div class="ic">🔒</div><h3>Self-custodied</h3><p>The brain lives at <code>~/.memwarden</code> and nowhere else. On-device embeddings, two runtime dependencies, no cloud, no vendor in the loop. Once it is up you never touch it — self-healing on crash and at login.</p></div>
     </div>
   </section>
@@ -259,274 +317,251 @@ npm test 2>&1 | npx memwarden <span class="a">dejafix lookup</span></pre>
   <section id="setup">
     <h2>Setup is one command</h2>
     <p class="lead"><kbd>memwarden up</kbd> starts a self-healing daemon (one global brain at
-      <code>~/.memwarden</code>), installs the on-device embedding runtime so recall is semantic
-      from day one, and wires hooks + MCP into every installed tool, in that tool's own config
-      schema, without clobbering anything you already have. No keys to paste, no cloud, no config
-      files to hand-edit.</p>
+      <code>~/.memwarden</code>), installs the on-device embedding runtime so recall is semantic from
+      day one, and wires hooks + MCP into every installed tool — in that tool's own config schema,
+      without clobbering anything you already have. No keys to paste, no cloud, no config files to
+      hand-edit.</p>
 <pre>$ <span class="a">memwarden up</span>
-  secret    <span class="g">✓</span> generated (~/.memwarden/secret)
-  semantic  <span class="g">✓</span> local embeddings ready (all-MiniLM-L6-v2 — on-device, nothing leaves)
   daemon    <span class="g">✓</span> http://localhost:3111   brain: ~/.memwarden
+  semantic  <span class="g">✓</span> local embeddings ready (all-MiniLM-L6-v2 — on-device)
   <span class="g">✓</span> Claude Code   MCP + hooks — auto inject + auto capture
-  <span class="g">✓</span> Codex         MCP + hooks (~/.codex/hooks.json — run /hooks once to trust)
-  <span class="g">✓</span> Cursor        MCP + hooks (~/.cursor/hooks.json)
-  <span class="g">✓</span> Gemini CLI    hooks (~/.gemini/settings.json)
+  <span class="g">✓</span> Codex         MCP + hooks (run /hooks once to trust)
+  <span class="g">✓</span> Cursor        MCP + hooks
+  <span class="g">✓</span> Gemini CLI    hooks
   <span class="g">✓</span> Kiro          MCP + hooks (per custom agent)
-  <span class="g">✓</span> OpenCode      MCP + plugin (~/.config/opencode/plugins/)
+  <span class="g">✓</span> OpenCode      MCP + plugin
 
   Done. Every agent on this machine now shares one verified brain.</pre>
-    <div class="tools">
-      <div class="tool"><b>Claude Code</b><small class="auto">hooks · fully automatic</small></div>
-      <div class="tool"><b>Codex</b><small class="auto">hooks · trust once via /hooks</small></div>
-      <div class="tool"><b>Cursor</b><small class="auto">hooks · fully automatic</small></div>
-      <div class="tool"><b>Gemini CLI</b><small class="auto">hooks · fully automatic</small></div>
-      <div class="tool"><b>Kiro</b><small class="auto">hooks · per custom agent</small></div>
-      <div class="tool"><b>OpenCode</b><small class="auto">plugin · capture automatic</small></div>
-      <div class="tool"><b>Antigravity</b><small class="inst">MCP + /recall (rides ~/.gemini hooks)</small></div>
-      <div class="tool"><b>OpenClaw</b><small class="inst">AGENTS.md instruction + /recall</small></div>
-    </div>
-    <p class="note">Then prove it's flowing, per tool — <b>detected</b> (installed),
-      <b>configured</b> (MCP + hooks on disk), <b>live</b> (a hook from that host actually reached
-      the daemon). Wired-but-never-live is the failure every other memory layer hides; here it's a
-      column:</p>
-<pre>$ <span class="a">memwarden status</span>
-  daemon    <span class="g">✓</span> running  http://localhost:3111  brain: ~/.memwarden
-  memory    412 memories, 37 sessions, 412 vectors
-  semantic  <span class="g">✓</span> local:Xenova/all-MiniLM-L6-v2 (384d)
-  vectors   TurboQuant 4-bit, 5.9x smaller (typescript/turboquant-4bit)
-
-  tool          detected  mcp     hooks      live
-  Claude Code   yes       wired   wired      <span class="g">live (2m ago)</span>
-  Codex         yes       wired   wired      <span class="g">live (1h ago)</span>
-  Cursor        yes       wired   wired      <span class="y">never seen</span>   <span class="c">&larr; restart Cursor</span>
-  Gemini CLI    yes       —       wired      <span class="g">live (3d ago)</span></pre>
+    <p class="note" style="margin-bottom:0">Then prove it's flowing, per tool — <b>detected</b>
+      (installed), <b>configured</b> (MCP + hooks on disk), <b>live</b> (a hook from that host actually
+      reached the daemon). Wired-but-never-live is the failure every other memory layer hides; here
+      it's a column in <kbd>memwarden status</kbd>.</p>
   </section>
 
   <section id="cross">
     <h2>How memory crosses your tools</h2>
     <p class="lead">Cross-tool reach is table stakes — the trust layer is the point. Still, the
-      mechanics matter, so here they are honestly. There are exactly three ways memory reaches a
-      tool, and <kbd>up</kbd> wires whichever ones each tool supports. We do not pretend any of it
-      is magic.</p>
+      mechanics matter, so here they are honestly, with no "native hooks everywhere" hand-waving.
+      There are three ways memory reaches a tool, and <kbd>up</kbd> wires whichever each supports.</p>
     <div class="doors">
       <div class="door">
-        <div class="n">Door 1 · mechanical</div>
-        <h3>Native hooks, everywhere</h3>
-        <p>Claude Code, Codex, Cursor, Gemini CLI, Kiro and OpenCode all get real lifecycle
-          hooks in their own config format: a session-start hook injects this project's verified
-          memory before you type, and capture happens as tools run. The agent cannot forget to do
-          it — there is no instruction to follow. One canonical event layer speaks each host's
-          dialect (<code>memwarden hook &lt;event&gt; --host cursor</code>, etc.).</p>
-        <span class="tag mech">guaranteed</span>
+        <div class="n">Path 1 · automatic</div>
+        <h3>Native lifecycle hooks</h3>
+        <p>Claude Code, Codex, Cursor, Gemini CLI, Kiro and OpenCode get real hooks in their own
+          config format: session-start injects this project's firewall-passing memory before you
+          type; capture happens as tools run. The agent cannot forget — there's no instruction to
+          follow.</p>
+        <span class="tag mech">mechanical</span>
       </div>
       <div class="door">
-        <div class="n">Door 2 · mechanical</div>
+        <div class="n">Path 2 · automatic</div>
         <h3>The proxy</h3>
-        <p>Point a tool's model base URL at the memwarden proxy on <code>:3141</code> and every
-          turn is recalled and captured with no agent cooperation. On a secured install the
-          tool's API key is your memwarden secret — the proxy refuses other local processes, so
-          nothing else can spend your upstream key or poison capture. Works where you control
-          the endpoint: Ollama, LM Studio, custom OpenAI base URLs.</p>
-        <span class="tag mech">guaranteed</span>
+        <p>Point a tool's model base URL at the memwarden proxy on <code>:3141</code> and every turn
+          is recalled and captured with no agent cooperation. On a secured install the tool's API key
+          is your memwarden secret, so nothing else can spend your upstream key. Works where you
+          control the endpoint: Ollama, LM Studio, custom OpenAI base URLs.</p>
+        <span class="tag mech">mechanical</span>
       </div>
       <div class="door">
-        <div class="n">Door 3 · fallback</div>
+        <div class="n">Path 3 · manual MCP</div>
         <h3>MCP + AGENTS.md</h3>
-        <p>Tools without a hook surface (today: OpenClaw) still get the MCP server, plus an
-          AGENTS.md instruction to recall first and save as they go — explicitly the fallback,
-          not the mechanism, and <kbd>/recall</kbd> forces it on demand.</p>
-        <span class="tag soft">agent follows it</span>
+        <p>Tools without a hook surface (Antigravity, OpenClaw) still get the MCP server — ask the
+          agent to call <code>memory_resume</code> — plus an AGENTS.md instruction as a soft fallback.
+          Explicitly the fallback, not the mechanism.</p>
+        <span class="tag soft">agent-driven</span>
       </div>
     </div>
-    <p class="note">Honest small print: Codex requires one-time hook trust-pinning (run
-      <kbd>/hooks</kbd> inside Codex); Kiro hooks attach per custom agent; OpenCode capture is
-      mechanical while injection is best-effort. <kbd>memwarden status</kbd> shows exactly which
-      of these are live rather than assumed — that column is the difference between "configured"
-      and "working".</p>
+    <table style="margin-top:22px">
+      <tr><th>Tool</th><th>Capture / recall</th><th>Explicit recall</th></tr>
+      <tr><td><b>Claude Code</b></td><td class="ok">automatic (hooks)</td><td><code>/mcp__memwarden__recall</code></td></tr>
+      <tr><td><b>Cursor</b></td><td class="ok">automatic (hooks)</td><td>call <code>memory_resume</code></td></tr>
+      <tr><td><b>Gemini CLI</b></td><td class="ok">automatic (hooks)</td><td>call <code>memory_resume</code></td></tr>
+      <tr><td><b>Codex</b></td><td class="ok">automatic (after /hooks)</td><td>call <code>memory_resume</code></td></tr>
+      <tr><td><b>Kiro</b></td><td>best-effort (per agent)</td><td>call <code>memory_resume</code></td></tr>
+      <tr><td><b>OpenCode</b></td><td>best-effort (plugin)</td><td>call <code>memory_resume</code></td></tr>
+      <tr><td><b>Antigravity · OpenClaw</b></td><td>manual (MCP only)</td><td>call <code>memory_resume</code></td></tr>
+      <tr><td><b>Ollama · LM Studio · any OpenAI URL</b></td><td class="ok">automatic (proxy)</td><td>n/a — automatic</td></tr>
+    </table>
   </section>
 
-  <section id="how">
+  <section id="arch">
     <h2>How it works</h2>
-    <p class="lead">Capture, compress on-device, store with integrity, recall the right slice
-      under a token budget. Scoping is by canonical path, so recall never silently misses.</p>
-    <div class="flow diagram">
+    <p class="lead">Capture compresses on-device, redacts, and hashes into the store down the left;
+      recall scopes, searches, classifies, and frames firewall-passing memory back up the right.
+      Scoping is by canonical path, so recall never silently misses.</p>
+    <div class="diagram">
       <svg viewBox="0 0 1040 720" role="img" aria-label="memwarden architecture: agents reach the daemon over hooks, MCP, or the proxy; capture compresses, redacts, and hashes into the store; recall scopes, searches, classifies, and frames firewall-passing memory back to the agent." xmlns="http://www.w3.org/2000/svg">
         <defs>
           <style>
-            .n{fill:#0f1521;stroke:#243047;stroke-width:1.5;rx:12}
-            .t{fill:#e8edf5;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;font-size:15px;font-weight:600}
-            .ts{fill:#93a0b4;font-family:ui-sans-serif,system-ui,sans-serif;font-size:12px;font-weight:500}
-            .code{font-family:ui-monospace,"SF Mono",Menlo,monospace;fill:#93a0b4;font-size:12px}
-            .lane{font-family:ui-sans-serif,system-ui,sans-serif;font-size:12px;font-weight:700;letter-spacing:.12em}
-            .al{fill:#6b7689;font-family:ui-sans-serif,system-ui,sans-serif;font-size:11.5px}
+            .n{fill:var(--bg2);stroke:var(--line2);stroke-width:1.5}
+            .t{fill:var(--fg);font-family:"Inter",ui-sans-serif,system-ui,sans-serif;font-size:15px;font-weight:600}
+            .ts{fill:var(--mut);font-family:"Inter",ui-sans-serif,sans-serif;font-size:12px}
+            .cd{font-family:"JetBrains Mono",ui-monospace,monospace;fill:var(--mut);font-size:12px}
+            .lane{font-family:"Inter",ui-sans-serif,sans-serif;font-size:12px;font-weight:800;letter-spacing:.14em}
+            .al{fill:var(--dim);font-family:"Inter",ui-sans-serif,sans-serif;font-size:11.5px}
           </style>
-          <marker id="ahMut" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="#6b7689"/></marker>
-          <marker id="ahPur" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="#7c6cff"/></marker>
-          <marker id="ahTeal" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="#3ad1c9"/></marker>
+          <marker id="aMut" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="#94a3b8"/></marker>
+          <marker id="aGreen" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="#2bb534"/></marker>
+          <marker id="aCyan" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 z" fill="#0098cc"/></marker>
         </defs>
 
-        <!-- Agents -->
         <rect class="n" x="170" y="24" width="700" height="60" rx="12"/>
         <text class="t" x="520" y="46" text-anchor="middle">Your agents</text>
-        <text class="code" x="520" y="66" text-anchor="middle">Claude Code · Codex · Cursor · Gemini CLI · Kiro · OpenCode</text>
+        <text class="cd" x="520" y="66" text-anchor="middle">Claude Code · Codex · Cursor · Gemini CLI · Kiro · OpenCode</text>
 
-        <!-- Agents <-> Daemon transport -->
-        <line x1="486" y1="84" x2="486" y2="118" stroke="#6b7689" stroke-width="2" marker-end="url(#ahMut)"/>
-        <line x1="554" y1="118" x2="554" y2="86" stroke="#3ad1c9" stroke-width="2" marker-end="url(#ahTeal)"/>
+        <line x1="486" y1="84" x2="486" y2="118" stroke="#94a3b8" stroke-width="2" marker-end="url(#aMut)"/>
+        <line x1="554" y1="118" x2="554" y2="86" stroke="#0098cc" stroke-width="2" marker-end="url(#aCyan)"/>
         <text class="al" x="474" y="104" text-anchor="end">Hooks · MCP · Proxy</text>
-        <text class="al" x="566" y="104" fill="#3ad1c9">firewall-passing memory</text>
+        <text class="al" x="566" y="104" fill="#0098cc">firewall-passing memory</text>
 
-        <!-- Daemon -->
-        <rect class="n" x="356" y="120" width="328" height="58" rx="12" stroke="#7c6cff"/>
+        <rect class="n" x="356" y="120" width="328" height="58" rx="12" stroke="#05CAFF" stroke-width="2"/>
         <text class="t" x="520" y="143" text-anchor="middle">memwarden daemon</text>
-        <text class="code" x="520" y="163" text-anchor="middle">~/.memwarden · one brain, self-healing</text>
+        <text class="cd" x="520" y="163" text-anchor="middle">~/.memwarden · one brain, self-healing</text>
 
-        <!-- lane headers -->
-        <text class="lane" x="250" y="212" text-anchor="middle" fill="#7c6cff">CAPTURE</text>
-        <text class="lane" x="790" y="212" text-anchor="middle" fill="#3ad1c9">RECALL</text>
+        <text class="lane" x="250" y="212" text-anchor="middle" fill="#2bb534">CAPTURE</text>
+        <text class="lane" x="790" y="212" text-anchor="middle" fill="#0098cc">RECALL</text>
 
-        <!-- Daemon -> capture lane -->
-        <path d="M400 178 C300 200 250 208 250 232" fill="none" stroke="#7c6cff" stroke-width="2" marker-end="url(#ahPur)"/>
-        <!-- recall lane -> Daemon -->
-        <path d="M790 232 C790 200 700 196 640 178" fill="none" stroke="#3ad1c9" stroke-width="2" marker-end="url(#ahTeal)"/>
-        <text class="al" x="946" y="196" text-anchor="end" fill="#3ad1c9">recall policy + framing</text>
+        <path d="M400 178 C300 200 250 208 250 232" fill="none" stroke="#2bb534" stroke-width="2" marker-end="url(#aGreen)"/>
+        <path d="M790 232 C790 200 700 196 640 178" fill="none" stroke="#0098cc" stroke-width="2" marker-end="url(#aCyan)"/>
+        <text class="al" x="946" y="196" text-anchor="end" fill="#0098cc">recall policy + framing</text>
 
-        <!-- CAPTURE lane (top -> down) -->
         <rect class="n" x="110" y="234" width="280" height="54" rx="12"/>
         <text class="t" x="250" y="256" text-anchor="middle">Compress</text>
         <text class="ts" x="250" y="275" text-anchor="middle">on-device, no LLM</text>
-
         <rect class="n" x="110" y="330" width="280" height="54" rx="12"/>
         <text class="t" x="250" y="352" text-anchor="middle">Redact private data</text>
         <text class="ts" x="250" y="371" text-anchor="middle">secrets stripped before storage</text>
-
         <rect class="n" x="110" y="426" width="280" height="54" rx="12"/>
         <text class="t" x="250" y="448" text-anchor="middle">Hash referenced files</text>
         <text class="ts" x="250" y="467" text-anchor="middle">SHA-256 provenance</text>
+        <line x1="250" y1="288" x2="250" y2="326" stroke="#2bb534" stroke-width="2" marker-end="url(#aGreen)"/>
+        <line x1="250" y1="384" x2="250" y2="422" stroke="#2bb534" stroke-width="2" marker-end="url(#aGreen)"/>
+        <path d="M250 480 C250 520 340 528 420 560" fill="none" stroke="#2bb534" stroke-width="2" marker-end="url(#aGreen)"/>
 
-        <line x1="250" y1="288" x2="250" y2="326" stroke="#7c6cff" stroke-width="2" marker-end="url(#ahPur)"/>
-        <line x1="250" y1="384" x2="250" y2="422" stroke="#7c6cff" stroke-width="2" marker-end="url(#ahPur)"/>
-        <path d="M250 480 C250 520 340 528 420 560" fill="none" stroke="#7c6cff" stroke-width="2" marker-end="url(#ahPur)"/>
-
-        <!-- RECALL lane (bottom -> up) -->
         <rect class="n" x="650" y="426" width="300" height="54" rx="12"/>
         <text class="t" x="800" y="448" text-anchor="middle">Project scoping</text>
         <text class="ts" x="800" y="467" text-anchor="middle">canonical path — never silently misses</text>
-
         <rect class="n" x="650" y="330" width="300" height="54" rx="12"/>
         <text class="t" x="800" y="352" text-anchor="middle">Hybrid search · BM25 + vector</text>
         <text class="ts" x="800" y="371" text-anchor="middle">RRF, TurboQuant / native turbovec</text>
-
-        <rect class="n" x="650" y="234" width="300" height="54" rx="12" stroke="#3ad1c9"/>
+        <rect class="n" x="650" y="234" width="300" height="54" rx="12" stroke="#05CAFF" stroke-width="2"/>
         <text class="t" x="800" y="255" text-anchor="middle">Provenance classifier</text>
         <text class="ts" x="800" y="274" text-anchor="middle">verified · sourced · stale · unsourced</text>
+        <line x1="800" y1="426" x2="800" y2="388" stroke="#0098cc" stroke-width="2" marker-end="url(#aCyan)"/>
+        <line x1="800" y1="330" x2="800" y2="292" stroke="#0098cc" stroke-width="2" marker-end="url(#aCyan)"/>
+        <path d="M620 560 C700 528 800 520 800 484" fill="none" stroke="#0098cc" stroke-width="2" marker-end="url(#aCyan)"/>
 
-        <line x1="800" y1="426" x2="800" y2="388" stroke="#3ad1c9" stroke-width="2" marker-end="url(#ahTeal)"/>
-        <line x1="800" y1="330" x2="800" y2="292" stroke="#3ad1c9" stroke-width="2" marker-end="url(#ahTeal)"/>
-        <path d="M620 560 C700 528 800 520 800 484" fill="none" stroke="#3ad1c9" stroke-width="2" marker-end="url(#ahTeal)"/>
-
-        <!-- Store -->
-        <rect class="n" x="170" y="560" width="700" height="66" rx="12" stroke="#46d18a"/>
+        <rect class="n" x="170" y="560" width="700" height="66" rx="12" stroke="#5CFF68" stroke-width="2"/>
         <text class="t" x="520" y="586" text-anchor="middle">libSQL store</text>
-        <text class="code" x="520" y="607" text-anchor="middle">hash-chained oplog (tamper-evident) · BM25 + vector index</text>
-
-        <!-- KubeSimplify wordmark -->
-        <g transform="translate(866,656)" opacity="0.9">
-          <path d="M12 0 L23 6 L23 18 L12 24 L1 18 L1 6 Z" fill="none" stroke="#3ad1c9" stroke-width="1.6"/>
-          <path d="M12 0 L12 12 L1 6 M12 12 L23 6 M12 12 L12 24" fill="none" stroke="#7c6cff" stroke-width="1.4"/>
-          <text x="32" y="10" class="ts" fill="#93a0b4" font-size="11">diagram by</text>
-          <text x="32" y="23" font-family="ui-sans-serif,system-ui,sans-serif" font-size="13" font-weight="700" fill="#e8edf5">Kube<tspan fill="#3ad1c9">Simplify</tspan></text>
-        </g>
+        <text class="cd" x="520" y="607" text-anchor="middle">hash-chained oplog (tamper-evident) · BM25 + vector index</text>
       </svg>
     </div>
+    <div class="attrib"><img src="kubesimplify.svg" alt="Kubesimplify" /> diagram by <b>Kubesimplify</b></div>
   </section>
 
   <section id="proof">
     <h2>Measured, not claimed</h2>
-    <p class="lead">The launch claim is a <b>memory firewall</b>, so the first number is the
-      firewall itself — not retrieval. A deterministic corpus of 250 memories (file-backed,
-      command-sourced, and unsourced) across 5 projects with 50 controlled staleness events and
-      5 poisoned-handoff traps. Reproduce with <code>npm run eval</code> (CI-gated at 100% on
-      every metric).</p>
+    <p class="lead">The launch claim is a <b>memory firewall</b>, so the first number is the firewall
+      itself — not retrieval. A deterministic corpus of 250 memories (file-backed, command-sourced,
+      and unsourced) across 5 projects with 50 controlled staleness events, 5 poisoned-handoff traps,
+      and 5 delimiter forgeries. Reproduce with <code>npm run eval</code> (CI-gated at 100% on all
+      eight gates).</p>
     <table>
       <tr><th>Firewall eval</th><th>Result</th></tr>
-      <tr><td>Stale retrievable — every stale memory first proven retrievable unfiltered (so "refused" measures work, not absence)</td><td class="ok">100%</td></tr>
+      <tr><td>Stale retrievable — each stale memory first proven retrievable unfiltered (so "blocked" measures work, not absence)</td><td class="ok">100%</td></tr>
       <tr><td>Stale refusal — known-stale memories blocked under <code>safe_only</code></td><td class="ok">100%</td></tr>
       <tr><td>Fresh retention — verified-current memories not wrongly blocked</td><td class="ok">100%</td></tr>
       <tr><td>Project isolation — out-of-project results under scoping</td><td class="ok">0 leaks</td></tr>
-      <tr><td>Label accuracy — recall labels match ground truth across all three classes (verified / sourced / unsourced)</td><td class="ok">100%</td></tr>
-      <tr><td>Handoff traps — hostile unsourced prompts beside fresh file hashes never laundered to <code>verified</code></td><td class="ok">0 laundered</td></tr>
-      <tr><td>Verified-only policy — sourced, unsourced, and handoff digests refused; verified memory still flows</td><td class="ok">100%</td></tr>
-      <tr><td>Injection containment — forged <code>&lt;/memwarden-memory&gt;</code> delimiters stored as real memory cannot escape the untrusted-data block on any surface</td><td class="ok">100%</td></tr>
+      <tr><td>Label accuracy — labels match ground truth across all three classes</td><td class="ok">100%</td></tr>
+      <tr><td>Handoff traps — hostile prompts beside fresh file hashes never laundered to <code>verified</code></td><td class="ok">0 laundered</td></tr>
+      <tr><td>Verified-only policy — sourced/unsourced/handoff refused; verified still flows</td><td class="ok">100%</td></tr>
+      <tr><td>Injection containment — forged delimiters can't escape the untrusted-data block on any surface</td><td class="ok">100%</td></tr>
     </table>
-    <p class="note">Labels (<code>verified</code> / <code>sourced</code> / <code>unsourced</code>)
-      appear on compact and narrative recall formats — the ones agents actually read. The raw
-      <code>full</code> format stays a machine SearchResult without narrative labels.</p>
-
-    <p class="lead" style="margin-top:34px">Retrieval next. Real on-device model (all-MiniLM-L6-v2),
-      30 labelled memories buried in 2,000 plausible distractors, 14 paraphrased queries worded
-      differently than the answers, and the compressed index running with <b>no exact rescoring</b>
-      — pure quantized codes. Reproduce with <code>npm run benchmark</code>.</p>
+    <p class="lead" style="margin-top:30px">Retrieval next. Real on-device model
+      (all-MiniLM-L6-v2), 30 labelled memories buried in 2,000 plausible distractors, 14 paraphrased
+      queries, and the compressed index running with <b>no exact rescoring</b>. Reproduce with
+      <code>npm run benchmark</code>.</p>
     <table>
       <tr><th>Retrieval — gold answer in top-k</th><th>R@1</th><th>R@5</th><th>R@10</th></tr>
       <tr><td>Full-precision vectors</td><td>57%</td><td>79%</td><td>86%</td></tr>
       <tr><td><b>TurboQuant (4-bit, no rescore)</b></td><td class="ok">57%</td><td class="ok">79%</td><td class="ok">86%</td></tr>
       <tr><td>Keyword search (lexical baseline)</td><td>7%</td><td>57%</td><td>57%</td></tr>
     </table>
-    <p class="note">At this scale pure 4-bit codes match full precision on every metric at 5.9×
-      smaller vectors; at 10,000 distractors they give up ~7 points of R@10 unless exact
-      rescoring is enabled (which keeps full vectors resident) — run the benchmark with
-      <code>--distractors 10000</code> to see both sides.</p>
-
-    <p class="lead" style="margin-top:34px">And the retrieval engine: a native Rust backend built
-      on <a href="https://github.com/RyanCodrai/turbovec">turbovec</a> (Google's TurboQuant
-      algorithm, real <code>IdMapIndex</code> — stable IDs, O(1) deletion, allowlist filtering
-      inside the SIMD kernel). Measured at 10,000 × 384-dim vectors, reproduce with
-      <code>npm run benchmark:backends</code>:</p>
+    <p class="lead" style="margin-top:30px">And the engine: an optional native Rust backend built on
+      <a href="https://github.com/RyanCodrai/turbovec" target="_blank" rel="noopener">turbovec</a>
+      (Google's TurboQuant algorithm — real <code>IdMapIndex</code>, O(1) deletion, allowlist filtering
+      inside the SIMD kernel). Measured at 10,000 × 384-dim vectors.</p>
     <table>
       <tr><th>Vector backend</th><th>recall@10 vs FP32</th><th>search p50 / p95</th><th>bytes / vector</th></tr>
       <tr><td>typescript/full (baseline)</td><td>100%</td><td>14.96 / 16.21 ms</td><td>1536</td></tr>
       <tr><td>typescript/turboquant-4bit</td><td>100%</td><td>18.90 / 19.53 ms</td><td>260</td></tr>
       <tr><td><b>turbovec/native-4bit</b></td><td class="ok">100%</td><td class="ok">0.15 / 0.20 ms</td><td class="ok">196</td></tr>
     </table>
-    <p class="note">~125× faster search, zero recall drop, 7.8× smaller vectors, and the firewall's
-      scope filters can run <i>inside</i> the search kernel as allowlists. Honest defaults: the
-      native backend is quietly selected when the prebuilt binary loads (pin with
-      <code>MEMWARDEN_VECTOR_BACKEND</code>), and <code>memwarden status</code> always names the
-      backend actually serving — a native backend that failed to load reports its TypeScript
-      fallback, never a silent claim. 602 tests, including a Verified Recall suite, the Déjà Fix
-      engine, HTTP security (auth / host firewall / content-type), per-host hook dialects, and a
-      cross-tool reliability harness that proves memory captured in one tool is recalled in
-      another.</p>
+    <p class="note">~125× faster search, zero recall drop. Honest defaults: the native backend is
+      quietly selected when its prebuilt binary loads (pin with <code>MEMWARDEN_VECTOR_BACKEND</code>),
+      and <code>memwarden status</code> always names the backend actually serving — a native backend
+      that failed to load reports its TypeScript fallback, never a silent claim. 602 tests across the
+      Verified Recall suite, Déjà Fix, HTTP security, per-host hook dialects, and a cross-tool
+      reliability harness.</p>
   </section>
 
-  <section id="start">
-    <h2>Quick start</h2>
-    <p class="lead">Two runtime dependencies. No API key. No cloud. Embeddings run on your machine.</p>
-<pre><span class="c"># start here — audit the memory you ALREADY have, zero install, read-only:</span>
-npx memwarden <span class="a">audit</span> ~/.claude-mem/claude-mem.db --root ~/code/my-repo
-npx memwarden <span class="a">audit</span> CLAUDE.md             <span class="c"># or any markdown pile / Mem0 JSON export</span>
+  <section id="mcp">
+    <h2>MCP tools &amp; the recall command</h2>
+    <table>
+      <tr><th>Tool</th><th>What it does</th></tr>
+      <tr><td><code>memory_resume</code></td><td>Verified recall of this project across all past sessions and tools</td></tr>
+      <tr><td><code>memory_search</code></td><td>Hybrid semantic + keyword search (unfiltered, for explicit lookups)</td></tr>
+      <tr><td><code>memory_remember</code></td><td>Save a memory explicitly</td></tr>
+      <tr><td><code>memory_verify</code></td><td>Confirm the oplog hash chain is intact (tamper-evident; not signed)</td></tr>
+      <tr><td><code>memory_stats</code></td><td>Live counts, compression ratio, token reduction, latency</td></tr>
+    </table>
+    <p class="note">Plus the <code>recall</code> MCP prompt, surfaced in Claude Code as
+      <code>/mcp__memwarden__recall &lt;query&gt;</code>. On other MCP hosts, ask the agent to call
+      <code>memory_resume</code>; where hooks are automatic, recall arrives on its own at session start.</p>
+  </section>
 
-<span class="c"># then wire everything — one stable install:</span>
-npm install -g memwarden && memwarden <span class="a">up</span>
-
-<span class="c"># restart a tool, then in any of them:</span>
-<span class="g">/recall</span>                                <span class="c"># or just ask "what were we working on here?"</span>
-
-<span class="c"># audit your own brain (verified / sourced / stale / unsourced + footprint):</span>
-npx memwarden <span class="a">doctor</span> .
-
-<span class="c"># delete with a tamper-evident receipt (contentErased:false until --erase):</span>
-npx memwarden <span class="a">forget</span> &lt;observationId&gt;
-npx memwarden <span class="a">forget</span> &lt;observationId&gt; --erase   <span class="c"># null payloads + re-chain</span>
-npx memwarden <span class="a">compact</span>                          <span class="c"># reclaim bytes; content leaves the file</span></pre>
+  <section id="get" style="text-align:center">
+    <h2>Start where you are</h2>
+    <p class="lead" style="margin:0 auto 26px">Audit the memory you already have — zero install,
+      read-only — then wire every tool with one command.</p>
+    <div class="cmd" style="margin-bottom:14px">
+      <code>$ <span class="p">npx memwarden audit ~/.claude-mem/claude-mem.db --root ~/code/my-repo</span></code>
+      <button class="copy" onclick="navigator.clipboard&&navigator.clipboard.writeText('npx memwarden audit ~/.claude-mem/claude-mem.db --root ~/code/my-repo').then(()=>{this.textContent='copied ✓';setTimeout(()=>this.textContent='copy',1500)})">copy</button>
+    </div>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/saiyam1814/memwarden" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .3a12 12 0 00-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.3-1.8-1.3-1.8-1.1-.7.1-.7.1-.7 1.2 0 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2 0-.4-.5-1.6.2-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 016 0C17.3 4.7 18.3 5 18.3 5c.7 1.6.2 2.8.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0012 .3z"/></svg>
+        Star on GitHub</a>
+      <a class="btn ghost" href="https://www.npmjs.com/package/memwarden" target="_blank" rel="noopener">View on npm</a>
+    </div>
   </section>
 
   <footer>
-    <p><b>🧠 memwarden</b> — the memory firewall for AI coding agents. Verified, self-custodied, tamper-evident. Apache-2.0.</p>
-    <p><a href="https://www.npmjs.com/package/memwarden">npmjs.com/package/memwarden</a> · <a href="https://github.com/saiyam1814/memwarden">github.com/saiyam1814/memwarden</a></p>
+    <p>memwarden — self-custodied, verified memory for AI coding agents · Apache-2.0 ·
+      <a href="https://github.com/saiyam1814/memwarden" target="_blank" rel="noopener">GitHub</a> ·
+      <a href="https://www.npmjs.com/package/memwarden" target="_blank" rel="noopener">npm</a></p>
+    <p class="attrib" style="justify-content:center; margin-top:12px"><img src="kubesimplify.svg" alt="Kubesimplify" /> a <b>Kubesimplify</b> project</p>
   </footer>
 
 </div>
+
+<script>
+  (function(){
+    var root=document.documentElement, key='mw-theme';
+    var saved=null; try{saved=localStorage.getItem(key)}catch(e){}
+    if(saved==='light'||saved==='dark') root.setAttribute('data-theme',saved);
+    function current(){
+      var a=root.getAttribute('data-theme');
+      if(a) return a;
+      return matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';
+    }
+    var btn=document.getElementById('theme');
+    btn&&btn.addEventListener('click',function(){
+      var next=current()==='dark'?'light':'dark';
+      root.setAttribute('data-theme',next);
+      try{localStorage.setItem(key,next)}catch(e){}
+    });
+  })();
+</script>
 </body>
 </html>
