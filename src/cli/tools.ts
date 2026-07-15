@@ -258,6 +258,26 @@ export const TOOLS: ToolAdapter[] = [
     unmerge: unmergeOpenclaw,
     auto: "agents-md",
   },
+  {
+    id: "grok",
+    label: "Grok CLI",
+    // Grok keeps MCP servers in ~/.grok/config.toml under the SAME
+    // [mcp_servers.<name>] table Codex uses, so the surgical TOML merge is
+    // reused as-is. `grok mcp add` writes a [mcp_servers.x.env] sub-table and
+    // an `enabled` key, but TOML treats an inline `env = { … }` as equivalent
+    // and `enabled` defaults on — verified against `grok mcp list`, which
+    // lists a server written in the Codex shape. Keeping one writer means
+    // one unmerge to keep correct.
+    configPath: (home) => join(home, ".grok", "config.toml"),
+    detect: (home) => existsSync(join(home, ".grok")),
+    merge: mergeCodexToml,
+    unmerge: unmergeCodexToml,
+    // Hooks CAPTURE for Grok, but they cannot INJECT: Grok ignores hook stdout
+    // on every event except PreToolUse (see formatInjection in hook.ts). So
+    // recall arrives the way Codex's does — the MCP server plus the AGENTS.md
+    // block — not as true hook-driven auto-injection.
+    auto: "agents-md",
+  },
 ];
 
 export function toolById(id: string): ToolAdapter | undefined {
