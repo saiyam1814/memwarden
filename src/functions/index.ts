@@ -10,6 +10,7 @@ import { registerObserveFunction } from "./observe.js";
 import { registerContextFunction } from "./context.js";
 import { registerSearchFunction } from "./search.js";
 import { registerForgetFunction } from "./forget.js";
+import { registerConsolidateFunction } from "./consolidate.js";
 import { registerDoctorFunction } from "./doctor.js";
 import { registerDejaFixFunctions } from "./dejafix.js";
 import { registerReceiptFunction } from "./receipt.js";
@@ -24,6 +25,7 @@ export {
 export { registerContextFunction } from "./context.js";
 export { registerSearchFunction } from "./search.js";
 export { registerForgetFunction } from "./forget.js";
+export { registerConsolidateFunction } from "./consolidate.js";
 export { registerDoctorFunction } from "./doctor.js";
 export type { DoctorReport } from "./doctor.js";
 export { registerReceiptFunction } from "./receipt.js";
@@ -95,6 +97,7 @@ export function registerCoreFunctions(
   registerContextFunction(sdk, kv, tokenBudget);
   registerSearchFunction(sdk, kv);
   registerForgetFunction(sdk, kv);
+  registerConsolidateFunction(sdk, kv);
   registerDoctorFunction(sdk, kv);
   registerDejaFixFunctions(sdk, kv);
   registerReceiptFunction(sdk, kv);
