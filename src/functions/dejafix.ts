@@ -294,26 +294,33 @@ export async function recordFix(
   if (!input.fix || !input.fix.trim()) return null;
   if (!input.cwd || !input.cwd.trim()) return null;
 
-  // Build provenance: prefer an explicit one, else derive from files. Hash the
-  // referenced files under cwd now so content drift is detectable at recall.
+  // Build provenance: prefer an explicit one, else derive from files.
   let provenance: Provenance;
   if (input.provenance) {
+    // The CALLER already decided what this memory's evidence is — never
+    // re-hash it here. observe.ts hashes at capture for a normal capture (so
+    // the hashes are already on the provenance it hands us), and deliberately
+    // does NOT for an adopted memory seeded from a foreign store, which had no
+    // capture-time hashes to begin with. Hashing here would invent evidence
+    // for a state we never observed and surface an adopted memory to the next
+    // agent as a "verified current" fix.
     provenance = { ...input.provenance };
   } else {
     // An explicitly recorded fix is itself the evidence — the agent/user
     // asserted "this resolved the error". That makes it sourced (userConfirmed)
     // even with no referenced files, so it surfaces as "sourced, unverified"
     // rather than being dropped as unsourced. File-backed fixes additionally
-    // verify by content hash.
+    // verify by content hash: hash them under cwd now so content drift is
+    // detectable at recall.
     provenance = { userConfirmed: true, cwd: input.cwd };
     if (input.files && input.files.length > 0) provenance.files = input.files;
+    const files = provenance.files;
+    if (files && files.length > 0) {
+      const hashes = hashFiles(files, input.cwd);
+      if (Object.keys(hashes).length > 0) provenance.fileHashes = hashes;
+    }
   }
   if (!provenance.cwd) provenance.cwd = input.cwd;
-  const files = provenance.files;
-  if (files && files.length > 0) {
-    const hashes = hashFiles(files, input.cwd);
-    if (Object.keys(hashes).length > 0) provenance.fileHashes = hashes;
-  }
 
   const record: FixMemory = {
     signature,
