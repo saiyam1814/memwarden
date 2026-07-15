@@ -44,4 +44,23 @@ describe("service tuning-env passthrough", () => {
       delete process.env.MEMWARDEN_QUANT_SEED;
     }
   });
+
+  // `up --lexical-only` used to only skip the transformers.js INSTALL. That is
+  // a no-op the moment the model is cached: the daemon decides on AVAILABILITY,
+  // not intent (index.ts asks LocalEmbeddingProvider.isAvailable()), so after
+  // any earlier plain `up` the flag silently did nothing and the daemon loaded
+  // the model anyway (~93MB, measured). The flag now sets
+  // MEMWARDEN_EMBEDDING_PROVIDER=none, which createEmbeddingProvider honours —
+  // and this passthrough is what carries that choice into the installed
+  // service so it survives restarts. If this row ever stops forwarding the
+  // provider, --lexical-only silently regresses to a no-op again.
+  it("forwards MEMWARDEN_EMBEDDING_PROVIDER=none — what makes --lexical-only real", () => {
+    process.env.MEMWARDEN_EMBEDDING_PROVIDER = "none";
+    try {
+      const entries = Object.fromEntries(__tuningEnvForTests());
+      expect(entries["MEMWARDEN_EMBEDDING_PROVIDER"]).toBe("none");
+    } finally {
+      delete process.env.MEMWARDEN_EMBEDDING_PROVIDER;
+    }
+  });
 });

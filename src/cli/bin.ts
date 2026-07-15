@@ -927,10 +927,21 @@ async function up(rest: string[]): Promise<void> {
   //      Runs BEFORE the daemon starts so the daemon boots with it available.
   //      Skippable (--lexical-only / MEMWARDEN_EMBEDDING_PROVIDER=none) and
   //      never fatal: on failure the daemon honestly reports BM25-only.
+  const lexicalOnly = rest.includes("--lexical-only");
   const embeddingOff =
-    rest.includes("--lexical-only") ||
+    lexicalOnly ||
     (process.env.MEMWARDEN_EMBEDDING_PROVIDER ?? "local").trim().toLowerCase() ===
       "none";
+  // --lexical-only has to reach the DAEMON, not just skip the installer.
+  // Skipping the install alone is a no-op the moment the model is cached: the
+  // daemon decides on AVAILABILITY, not intent (index.ts asks
+  // LocalEmbeddingProvider.isAvailable()), so after any earlier plain `up` it
+  // loads the model regardless and the flag silently does nothing. Setting the
+  // env var is what actually turns the provider off (createEmbeddingProvider
+  // returns null for "none"), and SERVICE_ENV_PASSTHROUGH carries it into the
+  // service environment so the choice survives restarts — the same mechanism
+  // the generated secret already relies on.
+  if (lexicalOnly) process.env.MEMWARDEN_EMBEDDING_PROVIDER = "none";
   if (embeddingOff) {
     console.log("  semantic  - skipped (lexical-only requested)");
   } else {
