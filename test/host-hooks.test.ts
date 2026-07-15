@@ -39,6 +39,54 @@ afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
+describe("grok hooks (~/.grok/hooks/memwarden.json — a drop-in file we own)", () => {
+  const grok = () => hostHookById("grok")!;
+  const hookFile = (home: string) => join(home, ".grok", "hooks", "memwarden.json");
+
+  it("writes the Claude-schema events under a `hooks` key, addressed --host grok", () => {
+    const home = tempHome();
+    mkdirSync(join(home, ".grok"), { recursive: true });
+    const [res] = grok().write(home, BASE);
+    expect(res!.status).toBe("wired");
+
+    const out = JSON.parse(readFileSync(hookFile(home), "utf8"));
+    expect(out.hooks.SessionStart[0].hooks[0].command).toContain(
+      "hook session-start --host grok",
+    );
+    expect(out.hooks.PostToolUse[0].hooks[0].command).toContain("hook capture --host grok");
+    expect(out.hooks.UserPromptSubmit[0].hooks[0].command).toContain("hook prompt --host grok");
+    expect(out.hooks.SessionEnd[0].hooks[0].command).toContain("hook session-end --host grok");
+  });
+
+  it("is idempotent, and removal deletes only our file — never a user's other hook file", () => {
+    const home = tempHome();
+    mkdirSync(join(home, ".grok", "hooks"), { recursive: true });
+    // A neighbouring hook file the user owns. Grok reads every *.json here, so
+    // `down` must not touch it.
+    const theirs = join(home, ".grok", "hooks", "their-hook.json");
+    writeFileSync(theirs, JSON.stringify({ hooks: { SessionStart: [] } }), "utf8");
+
+    grok().write(home, BASE);
+    const first = readFileSync(hookFile(home), "utf8");
+    grok().write(home, BASE);
+    expect(readFileSync(hookFile(home), "utf8")).toBe(first);
+    expect(grok().wired(home)).toBe(true);
+
+    const [removed] = grok().remove(home);
+    expect(removed!.status).toBe("removed");
+    expect(existsSync(hookFile(home))).toBe(false);
+    expect(existsSync(theirs)).toBe(true); // untouched
+    expect(grok().wired(home)).toBe(false);
+  });
+
+  it("removing when nothing of ours exists reports unchanged, not an error", () => {
+    const home = tempHome();
+    mkdirSync(join(home, ".grok"), { recursive: true });
+    const [res] = grok().remove(home);
+    expect(res!.status).toBe("unchanged");
+  });
+});
+
 describe("codex hooks (Claude-style schema in ~/.codex/hooks.json)", () => {
   it("writes SessionStart + PostToolUse with --host codex", () => {
     const out = JSON.parse(mergeCodexHooks(null, BASE));

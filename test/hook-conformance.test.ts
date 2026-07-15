@@ -165,6 +165,38 @@ const FIXTURES: Record<HookHost, HostFixtures> = {
     sessionEnd: { session_id: "ki-1", cwd: "/w/ki", hook_event_name: "stop" },
     want: { sessionId: "ki-1", cwd: "/w/ki", reason: "unknown" },
   },
+  grok: {
+    // Grok's runner emits camelCase natively (verified: documented stdin
+    // example + key set in the grok binary). cwd arrives as `cwd`, with
+    // `workspaceRoot` alongside it; tool output is `toolResult`.
+    sessionStart: {
+      hookEventName: "session_start",
+      sessionId: "gk-1",
+      cwd: "/w/gk",
+      workspaceRoot: "/w/gk",
+    },
+    prompt: {
+      hookEventName: "user_prompt_submit",
+      sessionId: "gk-1",
+      cwd: "/w/gk",
+      prompt: PROMPT_TEXT,
+    },
+    capture: {
+      hookEventName: "post_tool_use",
+      sessionId: "gk-1",
+      cwd: "/w/gk",
+      toolName: "run_terminal_cmd",
+      toolInput: { command: "ls" },
+      toolResult: "ok",
+    },
+    sessionEnd: {
+      hookEventName: "session_end",
+      sessionId: "gk-1",
+      cwd: "/w/gk",
+      reason: "exit",
+    },
+    want: { sessionId: "gk-1", cwd: "/w/gk", reason: "exit" },
+  },
   opencode: {
     // Our own plugin speaks the canonical field names.
     sessionStart: { sessionId: "oc-1", cwd: "/w/oc" },
@@ -203,6 +235,12 @@ function checkSessionStartResponse(host: HookHost, out: string): void {
       expect(parsed.additional_context).toContain(MEM);
       break;
     }
+    case "grok":
+      // Grok ignores hook stdout outside PreToolUse, so there is NO injection
+      // channel: it captures via hooks and recalls via MCP / AGENTS.md. Emit
+      // nothing rather than a payload Grok would silently drop.
+      expect(out).toBe("");
+      break;
     case "kiro":
     case "opencode":
       // stdout IS the context: plain text, not JSON
