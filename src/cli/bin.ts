@@ -58,7 +58,44 @@ import { ensureDaemon, daemonAlive, DAEMON_ENTRY } from "../daemon/ensure.js";
 import { installService, uninstallService } from "../daemon/service.js";
 import { getSecret } from "../functions/config.js";
 
-const DAEMON_URL = process.env.MEMWARDEN_URL ?? "http://localhost:3111";
+const DEFAULT_URL = "http://localhost:3111";
+const DAEMON_URL = process.env.MEMWARDEN_URL ?? DEFAULT_URL;
+
+/**
+ * Is this invocation aimed at the ONE user-global daemon — default URL, default
+ * port?
+ *
+ * MEMWARDEN_URL / MEMWARDEN_REST_PORT scope the DAEMON, and it is natural to
+ * assume they scope everything. They do not. The service (launchd/systemd) and
+ * every tool's user-scope config are user-global, and the wiring BAKES THIS
+ * RUN'S URL AND SECRET INTO THEM — so `up` against a throwaway daemon on :3199
+ * repoints the user's real tools at it, and when that daemon goes away every
+ * tool is left aimed at a dead port. `down` is worse: it would unload the real
+ * service as a side effect of tidying up an experiment.
+ *
+ * Deliberately keyed on URL/PORT only, NOT on MEMWARDEN_DATA_DIR. A relocated
+ * brain on the default port is a legitimate permanent install whose tools
+ * should still be wired to :3111 — blocking that would break those users. The
+ * harm comes exclusively from baking a NON-DEFAULT ADDRESS into global config.
+ *
+ * Conservative: only an explicit override that DIFFERS from the default counts;
+ * unset or default-valued vars are the default daemon.
+ */
+export function targetsDefaultDaemon(env: NodeJS.ProcessEnv = process.env): boolean {
+  const url = env["MEMWARDEN_URL"];
+  if (url && url.trim() && url.trim() !== DEFAULT_URL) return false;
+  const port = env["MEMWARDEN_REST_PORT"];
+  if (port && port.trim() && port.trim() !== "3111") return false;
+  return true;
+}
+
+/** One-line description of the override, for the messages below. */
+function nonDefaultTarget(env: NodeJS.ProcessEnv = process.env): string {
+  const bits: string[] = [];
+  if (env["MEMWARDEN_URL"]) bits.push(`MEMWARDEN_URL=${env["MEMWARDEN_URL"]}`);
+  if (env["MEMWARDEN_REST_PORT"]) bits.push(`MEMWARDEN_REST_PORT=${env["MEMWARDEN_REST_PORT"]}`);
+  return bits.join(" ");
+}
 
 // Absolute paths to the installed CLI and MCP bins. The configs/hooks/service
 // we write bake these in, so they must point at a STABLE install — a global
@@ -913,6 +950,29 @@ async function up(rest: string[]): Promise<void> {
 
   console.log(`\nmemwarden up\n`);
 
+  // Wiring is USER-GLOBAL even when the daemon is not: every tool's config gets
+  // this run's URL + secret baked in. So `up` against a throwaway daemon
+  // repoints the user's REAL tools at it, and when that daemon goes away every
+  // tool is aimed at a dead port with a dead secret. The failure is SILENT:
+  // hooks embed no URL and keep hitting :3111, so `status` still reports a live
+  // host while every MCP entry is broken.
+  //
+  // A warning is not enough — it was tried, and the configs were still
+  // clobbered while the warning printed. Refuse by default; `--wire` is the
+  // explicit opt-in for someone who really does want their tools pointed at a
+  // non-default address.
+  const forceWire = rest.includes("--wire");
+  const wireTools = targetsDefaultDaemon() || forceWire;
+  if (!wireTools) {
+    console.log(
+      `  ⚠ NON-DEFAULT daemon (${nonDefaultTarget()})\n` +
+        `    Tool configs and the service are user-global and would be repointed\n` +
+        `    at ${daemonUrl}, breaking your real install when this daemon goes\n` +
+        `    away. Starting the daemon ONLY; nothing global will be touched.\n` +
+        `    Pass --wire if you really do want every tool pointed at ${daemonUrl}.\n`,
+    );
+  }
+
   // 0. secret — generate one on first run (defense-in-depth alongside the
   //    Host-header firewall). resolveSecret persists it under the data dir,
   //    reuses an existing one across runs, and puts it in process.env so the
@@ -979,6 +1039,25 @@ async function up(rest: string[]): Promise<void> {
   //    Either way the wiring continues; the configs point at this daemon.
   const sleep = (ms: number): Promise<void> =>
     new Promise((r) => setTimeout(r, ms));
+  // The OS service is user-global and bakes in dataDir + secret, so a
+  // non-default daemon must not install one — it would hijack the real
+  // install's service. Start it detached instead: it lives for this session,
+  // which is all an experiment needs.
+  if (!wireTools) {
+    const state = await ensureDaemon(daemonUrl, dataDir);
+    console.log(
+      state === "failed"
+        ? `  daemon    ⚠ could not start at ${daemonUrl} (port in use?)`
+        : `  daemon    ✓ ${daemonUrl}  brain: ${dataDir} (detached, no service)`,
+    );
+    console.log(
+      `\n  Nothing global was touched. Stop it with:\n` +
+        `    MEMWARDEN_URL=${daemonUrl} memwarden down${
+          dataDir.includes("tmp") ? " --data" : ""
+        }\n`,
+    );
+    return;
+  }
   const svc = installService(dataDir, secret);
   if (svc.ok) {
     let alive = await daemonAlive(daemonUrl);
@@ -1158,6 +1237,23 @@ function down(rest: string[]): void {
   const home = homedir();
   const dataDir = process.env.MEMWARDEN_DATA_DIR ?? join(home, ".memwarden");
 
+  // The service and every tool config are USER-GLOBAL. When this run points at
+  // a throwaway daemon (custom URL/port/brain), removing them would tear down
+  // the user's real installation as a side effect of tidying up an experiment.
+  // Scope the damage to what was actually targeted.
+  const isDefault = targetsDefaultDaemon();
+  if (!isDefault) {
+    console.log(
+      `[memwarden] this run targets a NON-DEFAULT memwarden (${nonDefaultTarget()}),\n` +
+        `so the user-global launchd/systemd service and tool configs were LEFT ALONE.\n` +
+        `Stop that daemon directly, or unset those variables to act on the real install.`,
+    );
+    if (purgeData) {
+      purgeBrain(dataDir);
+    }
+    return;
+  }
+
   const r = uninstallService();
   if (r.ok) {
     console.log(`[memwarden] stopped and removed the ${r.kind} service.`);
@@ -1212,16 +1308,23 @@ function down(rest: string[]): void {
   );
 
   if (purgeData) {
-    rmSync(dataDir, { recursive: true, force: true });
-    console.log(
-      `[memwarden] deleted ${dataDir} (memories, oplog, secret, embedding runtime).`,
-    );
+    purgeBrain(dataDir);
   } else {
     console.log(
       `[memwarden] your brain is untouched at ${dataDir} — delete it with\n` +
         `'memwarden down --all --data' or keep it for a future 'memwarden up'.`,
     );
   }
+}
+
+/** Delete one brain directory. Always scoped to the dataDir it is handed —
+ * which is MEMWARDEN_DATA_DIR when set, so `--data` already only ever removes
+ * the brain this run targeted. */
+function purgeBrain(dataDir: string): void {
+  rmSync(dataDir, { recursive: true, force: true });
+  console.log(
+    `[memwarden] deleted ${dataDir} (memories, oplog, secret, embedding runtime).`,
+  );
 }
 
 // --- `memwarden status` --------------------------------------------
