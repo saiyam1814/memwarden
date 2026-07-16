@@ -111,7 +111,6 @@ async function registerFunctions(sdk: Kernel): Promise<number> {
   // Functions still being wired; absent modules are no-ops.
   const tasks: Array<Promise<boolean>> = [
     tryRegister("./functions/smart-search.js", "registerSmartSearchFunction", sdk),
-    tryRegister("./functions/remember.js", "registerRememberFunction", sdk),
     tryRegister("./functions/enrich.js", "registerEnrichFunction", sdk),
     tryRegister("./triggers/events.js", "registerEventTriggers", sdk),
     tryRegister("./health/monitor.js", "registerHealthMonitor", sdk),
@@ -184,8 +183,12 @@ function installSweeps(sdk: Kernel): Array<NodeJS.Timeout> {
     {},
   );
   schedule(true, HOUR, "mem::diagnostic::recent-searches-sweep", {});
+  // On by default (opt out with CONSOLIDATION_ENABLED=false): without it,
+  // observations are never distilled into KV.memories, so /stats reports 0
+  // memories and hot files accumulate hundreds of duplicate observations. The
+  // handler (mem::consolidate-pipeline) is wired in registerCoreFunctions.
   schedule(
-    process.env.CONSOLIDATION_ENABLED === "true",
+    process.env.CONSOLIDATION_ENABLED !== "false",
     consolidationInterval,
     "mem::consolidate-pipeline",
     {},
