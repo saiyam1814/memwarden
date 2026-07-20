@@ -69,6 +69,7 @@ audit), a `fleet` command group in `src/cli/bin.ts`, `/memwarden/fleet/*` routes
 | 4 | #28 | per-agent / per-worktree trust boundary + verified-only swarm default |
 | 5 | #29 | `memwarden fleet audit` + CI/GitHub Action gate |
 | 6 | #30 | flagship orchestrator adapter + fleet MCP tools |
+| 6b | design note below | memory-native fleet conductor (own the conductor, reuse an existing loop as the worker) |
 | 7 | #4 | benchmark on the real REST/MCP path at swarm scale |
 
 **MVP** = Phases 1-3 (#6, #5, #25, #26, #27). It already carries the flagship demo.
@@ -87,6 +88,43 @@ Three agents, one repo, worktrees:
    plus the flagged conflict, not a coin-flip.
 5. Before merge, `memwarden fleet audit` shows which agent's PR was built on
    now-stale memory.
+
+## Design note: memory-native fleet conductor (Phase 6b)
+
+Credit: raised by Rohit Ghumare (author of agentmemory). The observation: every
+harness today is just an agent loop, and memory is always bolted on as an extension.
+An extension is structurally limited because it lives outside the loop:
+
+- it *guesses* when to capture (via hooks) instead of knowing, which is exactly why
+  hook-less tools and the proxy (#6) are hard;
+- it can *label* recall but cannot *gate* the loop (it can say "stale" but cannot stop
+  the agent from acting on it);
+- it cannot drive planning with verified context or route the loop around a conflict.
+
+So the ceiling of the extension play (Phases 1-6) is real. Phase 6b is the answer,
+scoped so it does not turn into "build a better Cursor":
+
+- **Do not** build a general single-agent harness. That is a crowded, mature fight on
+  the loop, which is not memwarden's edge, and it would dilute the memory work.
+- **Do** build a thin **fleet conductor** (a meta-harness) where verified shared memory
+  is the control plane, not a plugin. The conductor spawns and coordinates workers,
+  and every step reads/writes/gates on verified memory natively. Reuse an existing
+  agent loop (e.g. pi, or Claude Code) as the **worker**, so we own the
+  conductor + memory integration and never rebuild the loop.
+
+Why the conductor and not the single agent: the single-agent loop is crowded and
+mature; the conductor over a fleet is young and is fundamentally a memory +
+coordination problem, which is our home turf. This is the same territory as Phase 6,
+promoted from "adapt into other people's orchestrators" to "also own a thin conductor
+with memory as its spine."
+
+**Sequencing (do not derail the MVP):** ship the extension play first (Phases 1-3)
+because it is cheap, rides existing adoption, and proves the memory thesis with the
+conflict-firewall demo. Graduate to the memory-native conductor only once the "an
+extension cannot gate the loop" pain is demonstrably real. The extension is how
+memwarden gets adopted; the memory-native conductor is how it becomes indispensable.
+This is the top rung of the plan, not a separate direction. It will get its own
+tracked spike issue when the extension play has validated demand.
 
 ## How to contribute
 
