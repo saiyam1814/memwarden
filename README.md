@@ -169,6 +169,7 @@ verifiable-erasure model - is in **[docs/architecture.md](docs/architecture.md)*
 - **[Benchmarks](docs/benchmarks.md)** - retrieval quality, vector backends (~125× native), the 8-gate firewall eval
 - **[Configuration](docs/configuration.md)** - every env var, per-project switches, the proxy
 - **[Limitations](docs/limitations.md)** - what memwarden does *not* do, honestly
+- **[Fleet mode (roadmap)](docs/fleet-mode.md)** - verified shared memory + conflict firewall for agent swarms ([epic #24](https://github.com/saiyam1814/memwarden/issues/24))
 - **[Security](SECURITY.md)** · **[Contributing](CONTRIBUTING.md)** · **[Changelog](CHANGELOG.md)**
 
 ## License
