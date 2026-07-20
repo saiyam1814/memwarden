@@ -118,6 +118,31 @@ coordination problem, which is our home turf. This is the same territory as Phas
 promoted from "adapt into other people's orchestrators" to "also own a thin conductor
 with memory as its spine."
 
+### Concrete worker candidate: pi (pi.dev)
+
+[pi](https://pi.dev) (`earendil-works/pi`, MIT, by Mario Zechner) is a strong worker
+loop for this, and a strong deeper-than-hooks host in its own right:
+
+- **Drivable as a worker.** Four modes: interactive TUI, print/JSON event stream,
+  **RPC (JSON over stdin/stdout)**, and **SDK/programmatic** embedding. MIT license.
+  The conductor can spawn and steer N pi workers (one per worktree) cleanly.
+- **Its extension surface is memwarden's insertion points, but inside the loop.** pi
+  extensions can inject messages before each turn, filter message history, implement
+  custom retrieval, build long-term memory, and add permission gates. So a memwarden
+  pi extension can inject verified recall at planning time, gate/defang what the loop
+  sees, and capture at the exact tool-event, none of which a hook-based bolt-on can
+  do. This is the answer to "an extension cannot gate the loop": as a pi extension it
+  can, without us building a loop.
+- pi deliberately ships no MCP / sub-agents / memory (all left to extensions), so
+  memwarden is complementary, not competitive.
+
+Two deliverables fall out of this:
+1. **pi as a first-class host via a `@memwarden/pi` extension** (in-loop recall +
+   capture-on-event + history gating). This also advances the extension play now, not
+   only Phase 6b, and is a better integration than any current hook-based host.
+2. **The conductor runs pi workers** in RPC / print-JSON mode, owning worktrees + the
+   shared verified brain + the conflict firewall.
+
 **Sequencing (do not derail the MVP):** ship the extension play first (Phases 1-3)
 because it is cheap, rides existing adoption, and proves the memory thesis with the
 conflict-firewall demo. Graduate to the memory-native conductor only once the "an
