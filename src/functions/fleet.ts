@@ -20,6 +20,10 @@ const DEFAULT_WINDOW_MS = 15 * 60 * 1000;
 // Bounded so a long session's row doesn't grow without limit; recent files
 // are what matters for "what is this agent touching right now".
 const MAX_RECENT_FILES = 20;
+// Rows are evicted two ways: a session_end capture deletes its own row, and
+// listActiveAgents lazily prunes anything not seen for this long — so the
+// registry stays bounded by recently active agents, not every session ever.
+const FLEET_ROW_TTL_MS = 24 * 60 * 60 * 1000;
 
 export interface FleetAgent {
   sessionId: string;
@@ -47,6 +51,8 @@ export interface FleetActivity {
   projectKey?: string;
   files?: string[];
   timestamp?: string;
+  /** The session ended — remove its registry row instead of upserting. */
+  ended?: boolean;
 }
 
 /** Walk up from `startDir` to the nearest `.git` entry (dir or worktree file). */
@@ -100,6 +106,11 @@ export async function recordFleetActivity(
   kv: StateKV,
   activity: FleetActivity,
 ): Promise<void> {
+  if (activity.ended) {
+    await kv.delete(KV.fleetAgents, activity.sessionId);
+    return;
+  }
+
   const existing = await kv.get<FleetAgent>(KV.fleetAgents, activity.sessionId);
 
   const files = existing?.files ? [...existing.files] : [];
@@ -118,11 +129,20 @@ export async function recordFleetActivity(
   const cwd = activity.cwd ?? existing?.cwd;
   const projectKeyVal = activity.projectKey ?? existing?.projectKey;
 
+  // Trust the host's timestamp only backwards: a skewed-future clock would
+  // otherwise pin this agent "active" past reality. Old stamps are fine —
+  // they just age out of the window naturally.
+  const now = Date.now();
+  const stamped = activity.timestamp ? Date.parse(activity.timestamp) : NaN;
+  const lastSeen = new Date(
+    Number.isFinite(stamped) ? Math.min(stamped, now) : now,
+  ).toISOString();
+
   const row: FleetAgent = {
     sessionId: activity.sessionId,
     files,
     captureCount: (existing?.captureCount ?? 0) + 1,
-    lastSeen: activity.timestamp ?? new Date().toISOString(),
+    lastSeen,
     ...(agentId ? { agentId } : {}),
     ...(host ? { host } : {}),
     ...(project ? { project } : {}),
@@ -147,7 +167,19 @@ export async function listActiveAgents(
   const all = await kv.list<FleetAgent>(KV.fleetAgents);
   const wantPath = canonicalizePath(project);
   const wantKey = computeProjectKey(project);
-  const cutoff = Date.now() - withinMs;
+  const now = Date.now();
+  const cutoff = now - withinMs;
+
+  // Lazy prune: sessions that never sent session_end (crash, kill -9) would
+  // otherwise accumulate forever and make this scan grow with ALL history.
+  // An unparseable lastSeen is a zombie row — prune it too.
+  for (const a of all) {
+    const t = Date.parse(a.lastSeen);
+    if (!Number.isFinite(t) || t < now - FLEET_ROW_TTL_MS) {
+      await kv.delete(KV.fleetAgents, a.sessionId);
+    }
+  }
+
   return all
     .filter((a) => {
       if (a.projectKey && a.projectKey === wantKey) return true;

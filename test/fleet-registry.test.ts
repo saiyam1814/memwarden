@@ -109,6 +109,58 @@ describe("fleet registry", () => {
     expect(agents.map((a) => a.sessionId)).toEqual(["s1"]);
   });
 
+  it("caps the recent-files list at 20, dropping the oldest", async () => {
+    const cwd = "/tmp/memwarden-fleet-cap";
+    for (let i = 0; i < 25; i++) {
+      await capture({ sessionId: "s1", cwd, agent: "claude-code", file: `src/f${i}.ts` });
+    }
+    const [agent] = await listActiveAgents(kv, cwd);
+    expect(agent?.files).toHaveLength(20);
+    expect(agent?.files[0]).toBe("src/f5.ts"); // oldest 5 dropped
+    expect(agent?.files[19]).toBe("src/f24.ts");
+    expect(agent?.captureCount).toBe(25);
+  });
+
+  it("session_end removes the agent's row — it is no longer active", async () => {
+    const cwd = "/tmp/memwarden-fleet-end";
+    await capture({ sessionId: "s1", cwd, agent: "claude-code", file: "src/a.ts" });
+    expect(await listActiveAgents(kv, cwd)).toHaveLength(1);
+
+    await sdk.trigger({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "session_end",
+        sessionId: "s1",
+        project: cwd,
+        cwd,
+        timestamp: new Date().toISOString(),
+        agent: "claude-code",
+        data: { assistant_response: "done" },
+      },
+    });
+    expect(await listActiveAgents(kv, cwd)).toHaveLength(0);
+    expect(await kv.get(KV.fleetAgents, "s1")).toBeNull();
+  });
+
+  it("prunes rows beyond the 24h TTL so crashed sessions don't accumulate", async () => {
+    const cwd = "/tmp/memwarden-fleet-ttl";
+    const ancient = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+    await capture({ sessionId: "crashed", cwd, agent: "claude-code", file: "src/a.ts", timestamp: ancient });
+    expect(await kv.get(KV.fleetAgents, "crashed")).toBeTruthy();
+
+    await listActiveAgents(kv, cwd);
+    expect(await kv.get(KV.fleetAgents, "crashed")).toBeNull();
+  });
+
+  it("clamps a future lastSeen to now — a skewed clock can't pin an agent active", async () => {
+    const cwd = "/tmp/memwarden-fleet-skew";
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    await capture({ sessionId: "s1", cwd, agent: "claude-code", file: "src/a.ts", timestamp: future });
+    const [agent] = await listActiveAgents(kv, cwd);
+    expect(agent).toBeTruthy();
+    expect(Date.parse(agent!.lastSeen)).toBeLessThanOrEqual(Date.now());
+  });
+
   it("leaves capture behaviour unchanged when only one agent is active", async () => {
     const cwd = "/tmp/memwarden-fleet-single";
     const result = await capture({ sessionId: "s1", cwd, agent: "claude-code", file: "src/a.ts" });

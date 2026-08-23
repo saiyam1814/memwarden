@@ -311,6 +311,8 @@ export function registerObserveFunction(
       // Fleet registry (#25): record this agent as active in the project.
       // Mirrors the observation write above — every hookType that reaches
       // this point bumps captureCount/lastSeen, not just tool captures.
+      // session_end instead REMOVES the row: the agent is no longer active
+      // ("stop" doesn't count — per-turn Stop hosts fire it every turn).
       // Best-effort: the registry must never break a capture.
       try {
         await recordFleetActivity(kv, {
@@ -322,6 +324,7 @@ export function registerObserveFunction(
           ...(stableProjectKey ? { projectKey: stableProjectKey } : {}),
           files: extractProvenance(payload).files ?? [],
           timestamp: payload.timestamp,
+          ...(payload.hookType === "session_end" ? { ended: true } : {}),
         });
       } catch (err) {
         logger.warn("fleet registry update failed", {
