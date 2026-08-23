@@ -10,8 +10,13 @@
 //   codex        ~/.codex/hooks.json              same Claude-style schema; SessionStart/PostToolUse
 //   cursor       ~/.cursor/hooks.json             {version:1, hooks:{sessionStart:[{command}],postToolUse:[{command}]}}
 //   gemini       ~/.gemini/settings.json          hooks key, PascalCase events (SessionStart/AfterTool)
+//   grok         ~/.grok/hooks/memwarden.json     {hooks:{…}} in the Claude schema, in a drop-in dir
 //   kiro         ~/.kiro/agents/*.json            hooks key per custom agent (agentSpawn/postToolUse)
 //   opencode     ~/.config/opencode/plugins/      a self-contained plugin file that shells to the CLI
+//
+// Grok is capture-only: it ignores hook stdout outside PreToolUse, so it has
+// no channel to inject recalled memory through (see formatInjection). Its
+// hooks feed the daemon; recall comes back via MCP / AGENTS.md.
 //
 // The merges are pure string->string (unit-testable without a filesystem);
 // the thin fs wrappers never clobber a file they cannot parse. Removal is
@@ -172,6 +177,23 @@ export function mergeCodexHooks(existing: string | null, hookBase: string): stri
 }
 export function removeCodexHooks(existing: string): string | null {
   return removeClaudeStyleHooks(existing);
+}
+
+/** Grok CLI: every ~/.grok/hooks/*.json is read, each holding a Claude-style
+ * {hooks:{Event:[…]}}. We own our file outright, so this builds the whole
+ * document rather than merging into a user's. Grok's event names are the
+ * Claude ones (SessionStart / UserPromptSubmit / PostToolUse / SessionEnd);
+ * its payload is camelCase and its stdout is ignored outside PreToolUse, so
+ * these hooks capture only — recall arrives via MCP / AGENTS.md. */
+export function buildGrokHooks(hookBase: string): string {
+  return serialize({
+    hooks: {
+      SessionStart: [claudeStyleGroup(sessionStartCmd(hookBase, "grok"))],
+      PostToolUse: [claudeStyleGroup(captureCmd(hookBase, "grok"))],
+      UserPromptSubmit: [claudeStyleGroup(promptCmd(hookBase, "grok"))],
+      SessionEnd: [claudeStyleGroup(sessionEndCmd(hookBase, "grok"))],
+    },
+  });
 }
 
 /** Gemini CLI: hooks key in ~/.gemini/settings.json, PascalCase events.
@@ -473,6 +495,15 @@ function opencodePluginPath(home: string): string {
   return join(home, ".config", "opencode", "plugins", "memwarden.ts");
 }
 
+// Grok reads every ~/.grok/hooks/*.json, each holding {hooks:{Event:[…]}} in
+// the Claude schema. That drop-in directory is a gift: our hooks live in a
+// file we own outright, so there is no user config to merge with and nothing
+// to clobber — write it whole, delete it whole. Grok's events are a superset
+// of the four we use (it also has PostToolUseFailure).
+function grokHookPath(home: string): string {
+  return join(home, ".grok", "hooks", "memwarden.json");
+}
+
 export const HOST_HOOKS: HostHookAdapter[] = [
   {
     id: "claude-code",
@@ -510,6 +541,46 @@ export const HOST_HOOKS: HostHookAdapter[] = [
       ];
     },
     wired: (home) => fileMentionsOurHooks(join(home, ".claude", "settings.json")),
+  },
+  {
+    id: "grok",
+    label: "Grok CLI",
+    detect: (home) => existsSync(join(home, ".grok")),
+    write: (home, hookBase) => {
+      const path = grokHookPath(home);
+      try {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, buildGrokHooks(hookBase), "utf8");
+        return [{ id: "grok", label: "Grok CLI", path, status: "wired" }];
+      } catch (err) {
+        return [
+          {
+            id: "grok",
+            label: "Grok CLI",
+            path,
+            status: "skipped",
+            reason: `could not write (${err instanceof Error ? err.message : err})`,
+          },
+        ];
+      }
+    },
+    remove: (home) => {
+      const path = grokHookPath(home);
+      // The file is ours alone, so removing our hooks means removing the file
+      // — never touch the user's other ~/.grok/hooks/*.json.
+      if (!existsSync(path)) {
+        return [{ id: "grok", label: "Grok CLI", path, status: "unchanged" }];
+      }
+      try {
+        rmSync(path);
+        return [{ id: "grok", label: "Grok CLI", path, status: "removed" }];
+      } catch {
+        return [{ id: "grok", label: "Grok CLI", path, status: "unchanged" }];
+      }
+    },
+    wired: (home) => fileMentionsOurHooks(grokHookPath(home)),
+    note:
+      "Grok hooks CAPTURE only — Grok ignores hook stdout outside PreToolUse, so memory is recalled through the MCP server / AGENTS.md, not injected at session start. (Grok also scans Claude's config by default via [compat.claude] in ~/.grok/config.toml; these native entries keep it wired if that is turned off.)",
   },
   {
     id: "codex",

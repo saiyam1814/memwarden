@@ -55,6 +55,7 @@ import {
   type HookHost,
 } from "./hook.js";
 import { ensureDaemon, daemonAlive, DAEMON_ENTRY } from "../daemon/ensure.js";
+import { adopt } from "./adopt.js";
 import { installService, uninstallService } from "../daemon/service.js";
 import { getSecret } from "../functions/config.js";
 
@@ -987,10 +988,21 @@ async function up(rest: string[]): Promise<void> {
   //      Runs BEFORE the daemon starts so the daemon boots with it available.
   //      Skippable (--lexical-only / MEMWARDEN_EMBEDDING_PROVIDER=none) and
   //      never fatal: on failure the daemon honestly reports BM25-only.
+  const lexicalOnly = rest.includes("--lexical-only");
   const embeddingOff =
-    rest.includes("--lexical-only") ||
+    lexicalOnly ||
     (process.env.MEMWARDEN_EMBEDDING_PROVIDER ?? "local").trim().toLowerCase() ===
       "none";
+  // --lexical-only has to reach the DAEMON, not just skip the installer.
+  // Skipping the install alone is a no-op the moment the model is cached: the
+  // daemon decides on AVAILABILITY, not intent (index.ts asks
+  // LocalEmbeddingProvider.isAvailable()), so after any earlier plain `up` it
+  // loads the model regardless and the flag silently does nothing. Setting the
+  // env var is what actually turns the provider off (createEmbeddingProvider
+  // returns null for "none"), and SERVICE_ENV_PASSTHROUGH carries it into the
+  // service environment so the choice survives restarts — the same mechanism
+  // the generated secret already relies on.
+  if (lexicalOnly) process.env.MEMWARDEN_EMBEDDING_PROVIDER = "none";
   if (embeddingOff) {
     console.log("  semantic  - skipped (lexical-only requested)");
   } else {
@@ -1542,6 +1554,7 @@ function printUsage(): void {
       "                                                    # audit; --fix-stale forgets every stale memory\n" +
       "  memwarden why <observationId> [--root path] [--content] [--json]  # explain why a memory is verified/stale/refused\n" +
       "  memwarden audit <store> [--root repo] [--json] [--html [out.html]]  # audit a FOREIGN store (claude-mem db, CLAUDE.md, Mem0 json)\n" +
+      "  memwarden adopt <store> [--root repo] [--project path] [--agent name] [--dry-run] [--json]  # seed a foreign store into the brain (labeled sourced_unverified)\n" +
       "  memwarden exclude [path] | include [path] | exclude --list   # per-project: no capture, no injection\n" +
       "  memwarden forget <observationId> [--erase] [--json]  # delete one memory, get a tamper-evident receipt; --erase nulls its oplog content too\n" +
       "  memwarden compact [--dry-run] [--json]          # erase all forgotten memories from the oplog, migrate the chain, VACUUM\n" +
@@ -1582,6 +1595,8 @@ async function main(): Promise<void> {
       return why(rest);
     case "audit":
       return audit(rest);
+    case "adopt":
+      return adopt(rest);
     case "exclude":
       return exclude(rest);
     case "include":

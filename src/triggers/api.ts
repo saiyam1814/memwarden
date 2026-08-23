@@ -159,6 +159,9 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
       // agentId (provenance) and the liveness heartbeat.
       const agent = asNonEmptyString(body["agent"]);
       if (agent) payload.agent = agent;
+      // `memwarden adopt` marks seeded foreign memories so the capture path
+      // records their files without hashing — see HookPayload.adopted.
+      if (body["adopted"] === true) payload.adopted = true;
       await recordHostHeartbeat(agent);
       const result = await sdk.trigger({
         function_id: "mem::observe",

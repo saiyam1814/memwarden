@@ -18,6 +18,18 @@ const FILE_KEYS = [
 ];
 // Looks like a path: has a slash or a dotted extension.
 const PATH_RE = /(^|\/)[\w.\-/]+\.\w{1,8}$|\//;
+// ...but a URL is not a file, and PATH_RE's "contains a slash" branch matches
+// every one of them. Fetch-style tools (WebFetch and friends) carry a `url` in
+// their tool_input, so without this guard the URL is captured as a referenced
+// file, existsSync() is false for it forever, and Verified Recall reports the
+// memory as `stale — deleted: https://…`. Every such memory is born stale and
+// refused for life. audit.ts::extractFileRefs already strips URLs for exactly
+// this reason ("URLs are not file references"); this is the capture-side mirror
+// of that rule.
+const URL_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
+function isUrl(value: string): boolean {
+  return URL_RE.test(value.trim());
+}
 // Bounded, best-effort extraction: hosts can nest arbitrarily deep and wide;
 // provenance only needs the referenced files, not a full input walk.
 //
@@ -56,7 +68,7 @@ export function collectFilesBounded(toolInput: unknown): {
     const obj = node as Record<string, unknown>;
     for (const k of FILE_KEYS) {
       const v = obj[k];
-      if (typeof v === "string" && v.trim() && files.size < limit) {
+      if (typeof v === "string" && v.trim() && !isUrl(v) && files.size < limit) {
         files.add(v.trim());
       }
     }
@@ -71,6 +83,7 @@ export function collectFilesBounded(toolInput: unknown): {
           depth === 0 &&
           !FILE_KEYS.includes(k) &&
           v.length < 400 &&
+          !isUrl(v) &&
           PATH_RE.test(v) &&
           !v.includes(" ") &&
           files.size < limit

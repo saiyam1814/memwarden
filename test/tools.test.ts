@@ -50,7 +50,16 @@ function merged(id: string, existing: string | null = null): Record<string, any>
 describe("tool registry", () => {
   it("has all target tools", () => {
     expect(TOOLS.map((t) => t.id).sort()).toEqual(
-      ["antigravity", "claude-code", "codex", "cursor", "kiro", "opencode", "openclaw"].sort(),
+      [
+        "antigravity",
+        "claude-code",
+        "codex",
+        "cursor",
+        "grok",
+        "kiro",
+        "opencode",
+        "openclaw",
+      ].sort(),
     );
   });
 
