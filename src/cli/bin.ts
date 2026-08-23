@@ -1017,7 +1017,8 @@ async function up(rest: string[]): Promise<void> {
 
   // 1. daemon — install a self-healing OS service (starts at login, restarts
   //    on crash). Fall back to a detached spawn if there's no service manager.
-  //    Either way the wiring continues; the configs point at this daemon.
+  //    For the default daemon the wiring then continues; a non-default daemon
+  //    starts detached and stops here.
   const sleep = (ms: number): Promise<void> =>
     new Promise((r) => setTimeout(r, ms));
   // The OS service is user-global and bakes in dataDir + secret, so a
@@ -1031,11 +1032,19 @@ async function up(rest: string[]): Promise<void> {
         ? `  daemon    ⚠ could not start at ${daemonUrl} (port in use?)`
         : `  daemon    ✓ ${daemonUrl}  brain: ${dataDir} (detached, no service)`,
     );
+    // `down` deliberately leaves non-default daemons alone (see below), so
+    // pointing people at it here would be a lie — the honest stop is a kill.
+    // Killing the daemon is #16's territory either way.
+    let port = "";
+    try {
+      port = new URL(daemonUrl).port || "80";
+    } catch {
+      /* unparseable URL — omit the kill hint */
+    }
     console.log(
-      `\n  Nothing global was touched. Stop it with:\n` +
-        `    MEMWARDEN_URL=${daemonUrl} memwarden down${
-          dataDir.includes("tmp") ? " --data" : ""
-        }\n`,
+      `\n  Nothing global was touched. The daemon stays up until killed or reboot.\n` +
+        (port ? `    stop it:   kill $(lsof -ti tcp:${port})\n` : "") +
+        `    clean up:  MEMWARDEN_URL=${daemonUrl} MEMWARDEN_DATA_DIR=${dataDir} memwarden down --data\n`,
     );
     return;
   }
@@ -1230,7 +1239,19 @@ function down(rest: string[]): void {
         `Stop that daemon directly, or unset those variables to act on the real install.`,
     );
     if (purgeData) {
-      purgeBrain(dataDir);
+      // A non-default daemon with NO explicit brain dir means dataDir resolved
+      // to the user-global ~/.memwarden — `--data` here would delete the REAL
+      // brain while "cleaning up an experiment". Refuse; the throwaway brain
+      // must be named explicitly.
+      if (!process.env.MEMWARDEN_DATA_DIR) {
+        console.log(
+          `[memwarden] refusing --data: MEMWARDEN_DATA_DIR is not set, so it would\n` +
+            `delete the DEFAULT brain at ${dataDir} while targeting a non-default daemon.\n` +
+            `Set MEMWARDEN_DATA_DIR to the brain you mean, or unset the URL/port overrides.`,
+        );
+      } else {
+        purgeBrain(dataDir);
+      }
     }
     return;
   }

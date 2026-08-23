@@ -79,4 +79,29 @@ describe("targetsDefaultDaemon — may this run touch user-global state?", () =>
       }),
     ).toBe(false);
   });
+
+  // Spellings of the default address must not be misread as overrides — a
+  // false "non-default" here refuses to manage the user's REAL install.
+  it("a trailing slash is still the default daemon", () => {
+    expect(targetsDefaultDaemon({ MEMWARDEN_URL: "http://localhost:3111/" })).toBe(true);
+  });
+
+  it("scheme/host case does not matter (RFC 3986)", () => {
+    expect(targetsDefaultDaemon({ MEMWARDEN_URL: "HTTP://LOCALHOST:3111" })).toBe(true);
+  });
+
+  it("127.0.0.1 and [::1] are the same loopback daemon as localhost", () => {
+    expect(targetsDefaultDaemon({ MEMWARDEN_URL: "http://127.0.0.1:3111" })).toBe(true);
+    expect(targetsDefaultDaemon({ MEMWARDEN_URL: "http://[::1]:3111" })).toBe(true);
+  });
+
+  it("https on the default host/port is NOT the default daemon", () => {
+    expect(targetsDefaultDaemon({ MEMWARDEN_URL: "https://localhost:3111" })).toBe(false);
+  });
+
+  // Conservative failure direction: something we cannot parse must not be
+  // allowed to touch user-global state.
+  it("an unparseable URL is treated as non-default", () => {
+    expect(targetsDefaultDaemon({ MEMWARDEN_URL: "not a url" })).toBe(false);
+  });
 });

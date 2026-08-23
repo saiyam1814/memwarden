@@ -11,6 +11,29 @@ export const DEFAULT_URL = "http://localhost:3111";
 export const DEFAULT_PORT = "3111";
 
 /**
+ * Normalize a daemon URL for comparison: lowercase scheme/host, loopback
+ * aliases (127.0.0.1, ::1) folded into localhost, trailing slash dropped,
+ * explicit port always present. Unparseable input returns null, which the
+ * guard treats as non-default — refusing global writes is the safe failure
+ * direction.
+ */
+export function normalizeDaemonUrl(raw: string): string | null {
+  try {
+    const u = new URL(raw.trim());
+    let host = u.hostname.toLowerCase();
+    if (host === "127.0.0.1" || host === "::1" || host === "[::1]") {
+      host = "localhost";
+    }
+    const port = u.port || (u.protocol === "https:" ? "443" : "80");
+    return `${u.protocol}//${host}:${port}`;
+  } catch {
+    return null;
+  }
+}
+
+const DEFAULT_URL_NORMALIZED = normalizeDaemonUrl(DEFAULT_URL);
+
+/**
  * Is this invocation aimed at the ONE user-global daemon — default URL, default
  * port?
  *
@@ -32,7 +55,9 @@ export const DEFAULT_PORT = "3111";
  */
 export function targetsDefaultDaemon(env: NodeJS.ProcessEnv = process.env): boolean {
   const url = env["MEMWARDEN_URL"];
-  if (url && url.trim() && url.trim() !== DEFAULT_URL) return false;
+  if (url && url.trim() && normalizeDaemonUrl(url) !== DEFAULT_URL_NORMALIZED) {
+    return false;
+  }
   const port = env["MEMWARDEN_REST_PORT"];
   if (port && port.trim() && port.trim() !== DEFAULT_PORT) return false;
   return true;
