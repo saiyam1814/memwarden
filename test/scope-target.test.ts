@@ -21,7 +21,7 @@
 // harm comes exclusively from baking a non-default ADDRESS into global config.
 //
 import { describe, expect, it } from "vitest";
-import { targetsDefaultDaemon } from "../src/cli/bin.js";
+import { targetsDefaultDaemon } from "../src/cli/scope.js";
 
 describe("targetsDefaultDaemon — may this run touch user-global state?", () => {
   it("a clean env targets the default daemon", () => {

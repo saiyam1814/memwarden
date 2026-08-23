@@ -59,44 +59,13 @@ import { adopt } from "./adopt.js";
 import { installService, uninstallService } from "../daemon/service.js";
 import { getSecret } from "../functions/config.js";
 
-const DEFAULT_URL = "http://localhost:3111";
+import {
+  DEFAULT_URL,
+  targetsDefaultDaemon,
+  nonDefaultTarget,
+} from "./scope.js";
+
 const DAEMON_URL = process.env.MEMWARDEN_URL ?? DEFAULT_URL;
-
-/**
- * Is this invocation aimed at the ONE user-global daemon — default URL, default
- * port?
- *
- * MEMWARDEN_URL / MEMWARDEN_REST_PORT scope the DAEMON, and it is natural to
- * assume they scope everything. They do not. The service (launchd/systemd) and
- * every tool's user-scope config are user-global, and the wiring BAKES THIS
- * RUN'S URL AND SECRET INTO THEM — so `up` against a throwaway daemon on :3199
- * repoints the user's real tools at it, and when that daemon goes away every
- * tool is left aimed at a dead port. `down` is worse: it would unload the real
- * service as a side effect of tidying up an experiment.
- *
- * Deliberately keyed on URL/PORT only, NOT on MEMWARDEN_DATA_DIR. A relocated
- * brain on the default port is a legitimate permanent install whose tools
- * should still be wired to :3111 — blocking that would break those users. The
- * harm comes exclusively from baking a NON-DEFAULT ADDRESS into global config.
- *
- * Conservative: only an explicit override that DIFFERS from the default counts;
- * unset or default-valued vars are the default daemon.
- */
-export function targetsDefaultDaemon(env: NodeJS.ProcessEnv = process.env): boolean {
-  const url = env["MEMWARDEN_URL"];
-  if (url && url.trim() && url.trim() !== DEFAULT_URL) return false;
-  const port = env["MEMWARDEN_REST_PORT"];
-  if (port && port.trim() && port.trim() !== "3111") return false;
-  return true;
-}
-
-/** One-line description of the override, for the messages below. */
-function nonDefaultTarget(env: NodeJS.ProcessEnv = process.env): string {
-  const bits: string[] = [];
-  if (env["MEMWARDEN_URL"]) bits.push(`MEMWARDEN_URL=${env["MEMWARDEN_URL"]}`);
-  if (env["MEMWARDEN_REST_PORT"]) bits.push(`MEMWARDEN_REST_PORT=${env["MEMWARDEN_REST_PORT"]}`);
-  return bits.join(" ");
-}
 
 // Absolute paths to the installed CLI and MCP bins. The configs/hooks/service
 // we write bake these in, so they must point at a STABLE install — a global
