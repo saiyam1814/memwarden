@@ -27,7 +27,7 @@ import { logger } from "./logger.js";
 import { detectConflicts, type MemoryConflict } from "./conflicts.js";
 
 /** Recursive size of a directory in bytes; 0 when it doesn't exist. */
-function dirSizeBytes(dir: string): number {
+export function dirSizeBytes(dir: string): number {
   let total = 0;
   let entries;
   try {

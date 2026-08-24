@@ -58,6 +58,15 @@ import { ensureDaemon, daemonAlive, DAEMON_ENTRY } from "../daemon/ensure.js";
 import { adopt } from "./adopt.js";
 import { installService, uninstallService } from "../daemon/service.js";
 import { getSecret } from "../functions/config.js";
+import { dirSizeBytes } from "../functions/doctor.js";
+import {
+  canonPath,
+  readCanon,
+  recordFromMemory,
+  verifyCanon,
+  writeCanon,
+  type CanonRecord,
+} from "./canon.js";
 
 import {
   DEFAULT_URL,
@@ -1329,6 +1338,279 @@ function purgeBrain(dataDir: string): void {
   );
 }
 
+// --- `memwarden canon` ---------------------------------------------
+//
+// The portable half of Verified Recall: promote distilled memories into the
+// repo as a committed, reviewable artifact that ANY checkout can re-verify.
+// See src/cli/canon.ts for the format and the honesty boundary.
+
+async function canon(rest: string[]): Promise<void> {
+  const [sub, ...args] = rest;
+  switch (sub) {
+    case "push":
+      return canonPush(args);
+    case "verify":
+      return canonVerify(args);
+    case "pull":
+      return canonPull(args);
+    default:
+      console.log(
+        "usage:\n" +
+          "  memwarden canon push [--root dir] [--all] [--dry-run] [--json]\n" +
+          "        promote this project's verified memories into .memwarden/canon.jsonl\n" +
+          "  memwarden canon verify [--root dir] [--json] [--strict]\n" +
+          "        re-hash the committed canon against THIS checkout (CI gate; --strict exits 1 on stale)\n" +
+          "  memwarden canon pull [--root dir] [--json]\n" +
+          "        load the committed canon into this machine's brain",
+      );
+      process.exit(sub ? 1 : 0);
+  }
+}
+
+function canonRoot(rest: string[]): string {
+  const i = rest.indexOf("--root");
+  return i !== -1 && rest[i + 1] ? resolve(rest[i + 1]!) : process.cwd();
+}
+
+async function canonPush(rest: string[]): Promise<void> {
+  const root = canonRoot(rest);
+  const asJson = rest.includes("--json");
+  const dryRun = rest.includes("--dry-run");
+  // Default refuses to promote memory that is ALREADY stale here — committing a
+  // known-broken memory would poison every clone that trusts the artifact.
+  // --all promotes regardless, for deliberate archaeology.
+  const onlyGreen = !rest.includes("--all");
+
+  const res = await fetch(`${DAEMON_URL}/memwarden/search`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({
+      query: "",
+      project: root,
+      limit: 1000,
+      include_memories: true,
+      all_projects: false,
+    }),
+  });
+  if (!res.ok) throw new Error(`canon push failed: HTTP ${res.status}`);
+  const body = (await res.json()) as {
+    results?: Array<Record<string, unknown>>;
+    memories?: Array<Record<string, unknown>>;
+  };
+  const candidates = [...(body.memories ?? []), ...(body.results ?? [])];
+
+  const nowIso = new Date().toISOString();
+  const seen = new Set<string>();
+  const records: CanonRecord[] = [];
+  let skippedNoEvidence = 0;
+  for (const c of candidates) {
+    const mem = c as Parameters<typeof recordFromMemory>[0];
+    if (!mem?.id || seen.has(mem.id)) continue;
+    seen.add(mem.id);
+    const rec = recordFromMemory(mem, root, nowIso);
+    if (!rec) {
+      skippedNoEvidence++;
+      continue;
+    }
+    records.push(rec);
+  }
+
+  // Promote only what verifies green right now.
+  let refusedStale = 0;
+  let promoted = records;
+  if (onlyGreen) {
+    const checked = verifyCanon(records, root);
+    promoted = checked.filter((c) => c.verdict === "verified").map((c) => c.record);
+    refusedStale = checked.length - promoted.length;
+  }
+
+  // Preserve promotedAt for records already in the canon so an unchanged brain
+  // re-pushes byte-identically (a churning artifact trains reviewers to ignore it).
+  const existing = readCanon(root);
+  const priorById = new Map(existing.records.map((r) => [r.id, r]));
+  const merged = promoted.map((r) => {
+    const prior = priorById.get(r.id);
+    return prior &&
+      prior.content === r.content &&
+      JSON.stringify(prior.fileHashes) === JSON.stringify(r.fileHashes)
+      ? prior
+      : r;
+  });
+
+  if (asJson) {
+    console.log(
+      JSON.stringify(
+        {
+          root,
+          path: canonPath(root),
+          promoted: merged.length,
+          refusedStale,
+          skippedNoEvidence,
+          dryRun,
+        },
+        null,
+        2,
+      ),
+    );
+    if (!dryRun) writeCanon(root, merged);
+    return;
+  }
+
+  console.log(`\nmemwarden canon push — ${root}\n`);
+  console.log(`  promoted   ${merged.length} verified memories`);
+  if (refusedStale > 0) {
+    console.log(
+      `  refused    ${refusedStale} already stale against this checkout (use --all to promote anyway)`,
+    );
+  }
+  if (skippedNoEvidence > 0) {
+    console.log(
+      `  skipped    ${skippedNoEvidence} without capture-time file hashes (nothing portable to prove)`,
+    );
+  }
+  if (dryRun) {
+    console.log(`\n  --dry-run: nothing written.\n`);
+    return;
+  }
+  const path = writeCanon(root, merged);
+  console.log(
+    `\n  wrote ${path}\n\n` +
+      `  Commit it. Every clone can now re-verify this memory against its own\n` +
+      `  checkout with 'memwarden canon verify' — no daemon, no account, no vendor.\n`,
+  );
+}
+
+async function canonVerify(rest: string[]): Promise<void> {
+  const root = canonRoot(rest);
+  const asJson = rest.includes("--json");
+  const strict = rest.includes("--strict");
+  const { records, skipped, path, exists } = readCanon(root);
+
+  if (!exists) {
+    if (asJson) {
+      console.log(JSON.stringify({ root, path, exists: false }, null, 2));
+      return;
+    }
+    console.log(
+      `\nno canon at ${path}\n\n` +
+        `  Create one from this machine's verified memories:\n` +
+        `    memwarden canon push\n`,
+    );
+    return;
+  }
+
+  const checked = verifyCanon(records, root);
+  const verified = checked.filter((c) => c.verdict === "verified");
+  const stale = checked.filter((c) => c.verdict === "stale");
+  const missing = checked.filter((c) => c.verdict === "missing");
+
+  if (asJson) {
+    console.log(
+      JSON.stringify(
+        {
+          root,
+          path,
+          total: checked.length,
+          verified: verified.length,
+          stale: stale.length,
+          unverifiable: missing.length,
+          malformedLines: skipped,
+          staleDetail: stale.map((c) => ({
+            id: c.record.id,
+            title: c.record.title,
+            drifted: c.drifted,
+          })),
+        },
+        null,
+        2,
+      ),
+    );
+    if (strict && stale.length > 0) process.exit(1);
+    return;
+  }
+
+  console.log(`\nmemwarden canon verify — ${root}\n`);
+  console.log(`  VERIFIED      ${verified.length} memories still hold against this checkout`);
+  console.log(`  STALE         ${stale.length} reference code that changed or vanished`);
+  if (missing.length > 0) {
+    console.log(`  UNVERIFIABLE  ${missing.length} carry no hashes (cannot be checked)`);
+  }
+  if (skipped > 0) {
+    console.log(`  MALFORMED     ${skipped} unreadable lines (merge conflict?)`);
+  }
+  console.log("");
+  for (const c of stale.slice(0, 10)) {
+    console.log(`  [stale]  ${c.record.title}\n           drifted: ${c.drifted.join(", ")}`);
+  }
+  if (stale.length > 10) console.log(`  ... and ${stale.length - 10} more`);
+  console.log(
+    stale.length > 0
+      ? `\n  Stale canon is refused at recall, not silently injected. Refresh it on a\n` +
+          `  machine with current memory ('memwarden canon push'), or drop the dead\n` +
+          `  records in review.\n`
+      : `\n  A matching hash proves the source is unchanged, not that the claim is\n` +
+          `  correct — the canon narrows staleness, it is not a correctness oracle.\n`,
+  );
+  if (strict && stale.length > 0) process.exit(1);
+}
+
+async function canonPull(rest: string[]): Promise<void> {
+  const root = canonRoot(rest);
+  const asJson = rest.includes("--json");
+  const { records, path, exists } = readCanon(root);
+  if (!exists) {
+    console.log(`no canon at ${path} — nothing to pull.`);
+    return;
+  }
+
+  // Load through the normal capture path so the firewall governs these exactly
+  // like anything else: provenance (files + capture-time hashes) is carried
+  // verbatim, so a record that no longer holds here is classified stale and
+  // refused rather than injected.
+  const checked = verifyCanon(records, root);
+  let loaded = 0;
+  let refused = 0;
+  for (const c of checked) {
+    if (c.verdict !== "verified") {
+      refused++;
+      continue;
+    }
+    const r = c.record;
+    const res = await fetch(`${DAEMON_URL}/memwarden/observe`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        hookType: "post_tool_use",
+        sessionId: `canon-${root.replace(/[^a-zA-Z0-9]/g, "").slice(-24)}`,
+        project: root,
+        cwd: root,
+        timestamp: new Date().toISOString(),
+        agent: "canon",
+        data: {
+          tool_name: "CanonPull",
+          tool_input: { files: r.files },
+          tool_output: `${r.title}\n${r.content}`,
+        },
+        provenance: { files: r.files, fileHashes: r.fileHashes, cwd: root },
+      }),
+    });
+    if (res.ok) loaded++;
+  }
+
+  if (asJson) {
+    console.log(JSON.stringify({ root, path, loaded, refused }, null, 2));
+    return;
+  }
+  console.log(
+    `\nmemwarden canon pull — ${root}\n\n` +
+      `  loaded    ${loaded} verified memories into this machine's brain\n` +
+      (refused > 0
+        ? `  refused   ${refused} that do not hold against this checkout (stale or unverifiable)\n`
+        : "") +
+      `\n  Your agents now start with the team's verified canon instead of nothing.\n`,
+  );
+}
+
 // --- `memwarden fleet` ---------------------------------------------
 //
 // Fleet mode: the coordination surface for many agents sharing one brain.
@@ -1551,6 +1833,34 @@ async function status(rest: string[]): Promise<void> {
     console.log(
       `  memory    ${stats.observations ?? 0} observations, ${stats.memories ?? 0} memories, ${stats.sessions ?? 0} sessions, ${stats.vectors ?? 0} vectors`,
     );
+    // Self-diagnosis. A store with thousands of raw captures and zero distilled
+    // memories is BROKEN, not idle — that exact state (15,771 observations, 0
+    // memories) shipped in 0.0.5 and went unnoticed for weeks because status
+    // reported it as though it were normal. A number a user cannot interpret is
+    // not honesty. Say what is wrong and what to run.
+    const obs = stats.observations ?? 0;
+    const mems = stats.memories ?? 0;
+    if (obs >= 200 && mems === 0) {
+      console.log(
+        `            ⚠ ${obs} captures but 0 distilled memories — distillation is not running.\n` +
+          `              Upgrade (npm i -g memwarden@latest) and restart: 'memwarden down && memwarden up'.`,
+      );
+    }
+    // Storage honesty: a resident daemon that quietly grows to hundreds of MB
+    // is a bad neighbor, and the footprint is invisible unless we print it.
+    const bytes = dirSizeBytes(dataDir);
+    if (bytes > 0) {
+      const mb = bytes / (1024 * 1024);
+      const human = mb >= 1024 ? `${(mb / 1024).toFixed(1)}GB` : `${Math.round(mb)}MB`;
+      const heavy = mb >= 300;
+      console.log(
+        `  storage   ${heavy ? "⚠" : "✓"} ${human} at ${dataDir}` +
+          (heavy
+            ? `\n              reclaim it: 'memwarden compact --prune-history' (keeps the` +
+              ` verifiable chain, drops superseded payload copies)`
+            : ""),
+      );
+    }
     console.log(
       stats.embedding
         ? `  semantic  ✓ ${stats.embedding.provider} (${stats.embedding.dimensions}d)`
@@ -1635,6 +1945,8 @@ function printUsage(): void {
       "  memwarden exclude [path] | include [path] | exclude --list   # per-project: no capture, no injection\n" +
       "  memwarden forget <observationId> [--erase] [--json]  # delete one memory, get a tamper-evident receipt; --erase nulls its oplog content too\n" +
       "  memwarden compact [--dry-run] [--json]          # erase all forgotten memories from the oplog, migrate the chain, VACUUM\n" +
+      "  memwarden canon push | verify | pull            # git-native verified memory: promote to .memwarden/canon.jsonl,\n" +
+      "                                                    re-verify it against any checkout, load it into this brain\n" +
       "  memwarden fleet status [--cwd dir] [--json]     # live swarm view: agents active in this project\n" +
       "  memwarden dejafix lookup [--cwd dir] < err.txt  # find a verified prior fix for an error\n" +
       '  memwarden dejafix record --fix "…" [--file f] [--root-cause s] < err.txt\n' +
@@ -1685,6 +1997,8 @@ async function main(): Promise<void> {
       return compact(rest);
     case "fleet":
       return fleet(rest);
+    case "canon":
+      return canon(rest);
     case "dejafix":
       return dejafix(rest);
     case "export":
