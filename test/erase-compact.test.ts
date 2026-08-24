@@ -18,6 +18,10 @@
 //    -wal) finds no trace. Survives close/reopen.
 // 5. END TO END: mem::forget {erase:true} / mem::erase produce receipts with
 //    contentErased:true + chainHead, and the content is gone from the oplog.
+// 6. SUPERSEDED-HISTORY PRUNING (--prune-history): outdated versions lose
+//    their payload while keeping payload_hash, so the chain still verifies;
+//    the newest version of every key, the recency window, and the erasure
+//    guarantees are all untouched. Off by default.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createClient } from "@libsql/client";
@@ -36,6 +40,8 @@ import {
   hashOplogEntry,
   hashOplogEntryV2,
   hashPayload,
+  pairKey,
+  planCompaction,
   verifyChain,
 } from "../src/state/oplog.js";
 import {
@@ -1347,5 +1353,612 @@ describe("residual detection catches short ALPHABETIC values (the admin class)",
     expect(r.receipt!.contentErased).toBe(false);
     expect(r.receipt!.residualScan).toBe("limited");
     expect(r.receipt!.eraseIncomplete).toMatch(/below the residual-detection floor/);
+  });
+});
+
+// --- superseded-history pruning: the storage lever --------------------------
+//
+// A mature oplog is ~95% outdated versions of live keys (the same key written
+// dozens of times, every historical payload retained forever). Pruning nulls
+// those payloads and keeps payload_hash, so tamper-evidence — which lives in
+// the hash CHAIN, not in the payload column — survives intact.
+
+const PRUNE_SCOPE = "mem:obs:sessP";
+
+/** Build a v2 chain with explicit ids/timestamps (window tests need both). */
+function buildChain(
+  specs: Array<{ op: OplogOp; key: string; payload: unknown; ts?: string; scope?: string }>,
+): OplogEntry[] {
+  const out: OplogEntry[] = [];
+  let prev = GENESIS_PREV_HASH;
+  specs.forEach((s, i) => {
+    const id = i + 1;
+    const ts = s.ts ?? `2026-01-01T00:00:${String(i).padStart(2, "0")}.000Z`;
+    const scope = s.scope ?? PRUNE_SCOPE;
+    const payload_hash = hashPayload(s.payload);
+    const hash = hashOplogEntryV2({
+      id, ts, op: s.op, scope, key: s.key, payload_hash, prev_hash: prev,
+    });
+    out.push({
+      id, ts, op: s.op, scope, key: s.key, payload: s.payload,
+      v: 2, payload_hash, prev_hash: prev, hash,
+    });
+    prev = hash;
+  });
+  return out;
+}
+
+const PRUNE = { pruneSuperseded: true } as const;
+
+describe("planCompaction: superseded-history pruning", () => {
+  it("nulls every superseded version, keeps the newest, chain verifies end to end", () => {
+    const entries = buildChain([
+      { op: "set", key: "a", payload: { gen: 1, note: "v1-needle" } },
+      { op: "update", key: "a", payload: { gen: 2, note: "v2-needle" } },
+      { op: "set", key: "a", payload: { gen: 3, note: "v3-keep" } },
+    ]);
+    const live = new Set([pairKey(PRUNE_SCOPE, "a")]);
+    const plan = planCompaction(entries, live, "2026-02-01T00:00:00.000Z", PRUNE);
+
+    expect(plan.prunedCount).toBe(2);
+    expect(plan.erasedCount).toBe(0);
+    expect(plan.entries[0]!.payload).toBeNull();
+    expect(plan.entries[1]!.payload).toBeNull();
+    expect(plan.entries[2]!.payload).toEqual({ gen: 3, note: "v3-keep" });
+    // the whole rewritten chain (plus its anchor) verifies
+    expect(verifyChain([...plan.entries, plan.compactRecord])).toBeNull();
+    const bytes = JSON.stringify([...plan.entries, plan.compactRecord]);
+    expect(bytes).not.toContain("v1-needle");
+    expect(bytes).not.toContain("v2-needle");
+    expect(bytes).toContain("v3-keep");
+  });
+
+  it("keeps the payload_hash of every pruned entry (the content commitment survives)", () => {
+    const entries = buildChain([
+      { op: "set", key: "a", payload: { gen: 1 } },
+      { op: "set", key: "a", payload: { gen: 2 } },
+    ]);
+    const plan = planCompaction(
+      entries,
+      new Set([pairKey(PRUNE_SCOPE, "a")]),
+      "2026-02-01T00:00:00.000Z",
+      PRUNE,
+    );
+    expect(plan.entries[0]!.payload).toBeNull();
+    expect(plan.entries[0]!.payload_hash).toBe(hashPayload({ gen: 1 }));
+    expect(plan.entries[0]!.payload_hash).toBe(entries[0]!.payload_hash);
+    expect(plan.entries[0]!.payload_hash).not.toBe(NULL_PAYLOAD_HASH);
+    // ... and the compact record authorizes exactly that null
+    const ids = (plan.compactRecord.payload as { erasedIds: number[] }).erasedIds;
+    expect(ids).toContain(1);
+    expect(ids).not.toContain(2);
+  });
+
+  it("is OFF by default: the 3-arg call plans exactly what it always did", () => {
+    const entries = buildChain([
+      { op: "set", key: "a", payload: { gen: 1 } },
+      { op: "set", key: "a", payload: { gen: 2 } },
+    ]);
+    const live = new Set([pairKey(PRUNE_SCOPE, "a")]);
+    const legacy = planCompaction(entries, live, "2026-02-01T00:00:00.000Z");
+    const explicitOff = planCompaction(entries, live, "2026-02-01T00:00:00.000Z", {
+      pruneSuperseded: false,
+    });
+    for (const plan of [legacy, explicitOff]) {
+      expect(plan.prunedCount).toBe(0);
+      expect(plan.entries[0]!.payload).toEqual({ gen: 1 });
+      // nothing dropped: "after" is "before" plus the anchor record's payload
+      const anchor = Buffer.byteLength(canonicalize(plan.compactRecord.payload), "utf8");
+      expect(plan.payloadBytesAfter).toBe(plan.payloadBytesBefore + anchor);
+    }
+    expect(canonicalize(legacy.entries)).toBe(canonicalize(explicitOff.entries));
+  });
+
+  it("NEVER prunes the newest version of a live key, however old it is", () => {
+    const entries = buildChain([
+      { op: "set", key: "ancient", payload: { note: "written-once-in-2020" }, ts: "2020-01-01T00:00:00.000Z" },
+      { op: "set", key: "other", payload: { n: 1 } },
+      { op: "set", key: "other", payload: { n: 2 } },
+    ]);
+    const plan = planCompaction(
+      entries,
+      new Set([pairKey(PRUNE_SCOPE, "ancient"), pairKey(PRUNE_SCOPE, "other")]),
+      "2026-02-01T00:00:00.000Z",
+      PRUNE,
+    );
+    expect(plan.entries[0]!.payload).toEqual({ note: "written-once-in-2020" });
+    expect(plan.prunedCount).toBe(1); // only other@n=1
+  });
+
+  it("keepPayloadsSince keeps the recency window in full", () => {
+    const entries = buildChain([
+      { op: "set", key: "a", payload: { gen: 1 }, ts: "2026-01-01T00:00:00.000Z" },
+      { op: "set", key: "a", payload: { gen: 2 }, ts: "2026-01-10T00:00:00.000Z" },
+      { op: "set", key: "a", payload: { gen: 3 }, ts: "2026-01-20T00:00:00.000Z" },
+      { op: "set", key: "a", payload: { gen: 4 }, ts: "2026-01-30T00:00:00.000Z" },
+    ]);
+    const plan = planCompaction(
+      entries,
+      new Set([pairKey(PRUNE_SCOPE, "a")]),
+      "2026-02-01T00:00:00.000Z",
+      { pruneSuperseded: true, keepPayloadsSince: "2026-01-10T00:00:00.000Z" },
+    );
+    expect(plan.prunedCount).toBe(1); // only gen 1 is outside the window
+    expect(plan.entries[0]!.payload).toBeNull();
+    expect(plan.entries[1]!.payload).toEqual({ gen: 2 }); // ts === cutoff -> kept
+    expect(plan.entries[2]!.payload).toEqual({ gen: 3 });
+    expect(plan.entries[3]!.payload).toEqual({ gen: 4 });
+    expect(verifyChain([...plan.entries, plan.compactRecord])).toBeNull();
+  });
+
+  it("a window covering everything prunes NOTHING", () => {
+    const entries = buildChain([
+      { op: "set", key: "a", payload: { gen: 1 } },
+      { op: "set", key: "a", payload: { gen: 2 } },
+    ]);
+    const plan = planCompaction(
+      entries,
+      new Set([pairKey(PRUNE_SCOPE, "a")]),
+      "2026-02-01T00:00:00.000Z",
+      { pruneSuperseded: true, keepPayloadsSince: "2020-01-01T00:00:00.000Z" },
+    );
+    expect(plan.prunedCount).toBe(0);
+    expect(plan.entries[0]!.payload).toEqual({ gen: 1 });
+  });
+
+  it("the recency window does NOT hold back ERASURE (a deletion is never deferred)", () => {
+    const entries = buildChain([
+      { op: "set", key: "gone", payload: { secret: "erase-needle" }, ts: "2026-01-30T00:00:00.000Z" },
+      { op: "delete", key: "gone", payload: null, ts: "2026-01-30T00:00:01.000Z" },
+    ]);
+    const plan = planCompaction(entries, new Set(), "2026-02-01T00:00:00.000Z", {
+      pruneSuperseded: true,
+      keepPayloadsSince: "2026-01-01T00:00:00.000Z", // window covers both entries
+    });
+    expect(plan.erasedCount).toBe(1);
+    expect(plan.prunedCount).toBe(0);
+    expect(plan.entries[0]!.payload).toBeNull();
+    expect(JSON.stringify(plan.entries)).not.toContain("erase-needle");
+  });
+
+  it("a delete-tailed pair keeps its ERASURE accounting when pruning is on", () => {
+    const entries = buildChain([
+      { op: "set", key: "dead", payload: { secret: "dead-1" } },
+      { op: "update", key: "dead", payload: { secret: "dead-2" } },
+      { op: "delete", key: "dead", payload: null },
+      { op: "set", key: "live", payload: { n: 1 } },
+      { op: "set", key: "live", payload: { n: 2 } },
+    ]);
+    const live = new Set([pairKey(PRUNE_SCOPE, "live")]);
+    const off = planCompaction(entries, live, "2026-02-01T00:00:00.000Z");
+    const on = planCompaction(entries, live, "2026-02-01T00:00:00.000Z", PRUNE);
+    // erasedCount means the same thing with pruning on: a deleted record's
+    // history, never double-counted as pruning.
+    expect(off.erasedCount).toBe(2);
+    expect(on.erasedCount).toBe(2);
+    expect(on.prunedCount).toBe(1); // live@n=1 only
+    expect(on.entries[4]!.payload).toEqual({ n: 2 });
+    expect(JSON.stringify(on.entries)).not.toContain("dead-");
+    expect(verifyChain([...on.entries, on.compactRecord])).toBeNull();
+  });
+
+  it("never prunes compact/erase anchor records (their payloads ARE the authorizations)", () => {
+    const entries = buildChain([
+      { op: "set", key: "a", payload: { gen: 1 } },
+      { op: "set", key: "a", payload: { gen: 2 } },
+      {
+        op: "erase",
+        key: ERASE_KEY,
+        scope: ERASE_SCOPE,
+        payload: { scope: PRUNE_SCOPE, key: "old", erased: [{ id: 1, payload_hash: "x" }] },
+      },
+      {
+        op: "compact",
+        key: COMPACT_KEY,
+        scope: COMPACT_SCOPE,
+        payload: {
+          previousHeadHash: "", entriesRewritten: 0, erasedCount: 0, prunedCount: 0,
+          erasedIds: [], compactedAt: "2026-01-05T00:00:00.000Z",
+        },
+      },
+    ]);
+    const plan = planCompaction(
+      entries,
+      new Set([pairKey(PRUNE_SCOPE, "a")]),
+      "2026-02-01T00:00:00.000Z",
+      PRUNE,
+    );
+    expect(plan.entries[2]!.payload).not.toBeNull();
+    expect(plan.entries[3]!.payload).not.toBeNull();
+    expect(plan.prunedCount).toBe(1);
+  });
+
+  it("is IDEMPOTENT: planning the pruned chain again changes nothing", () => {
+    const entries = buildChain([
+      { op: "set", key: "a", payload: { gen: 1 } },
+      { op: "set", key: "a", payload: { gen: 2 } },
+      { op: "set", key: "a", payload: { gen: 3 } },
+    ]);
+    const live = new Set([pairKey(PRUNE_SCOPE, "a")]);
+    const first = planCompaction(entries, live, "2026-02-01T00:00:00.000Z", PRUNE);
+    const chain1 = [...first.entries, first.compactRecord];
+    const second = planCompaction(chain1, live, "2026-02-02T00:00:00.000Z", PRUNE);
+    expect(second.prunedCount).toBe(0);
+    expect(second.erasedCount).toBe(0);
+    expect(second.entriesRewritten).toBe(0);
+    expect(canonicalize(second.entries)).toBe(canonicalize(chain1));
+    expect(verifyChain([...second.entries, second.compactRecord])).toBeNull();
+  });
+
+  it("reports honest payload bytes: before, after, and what the anchor record costs", () => {
+    const filler = "x".repeat(500);
+    const entries = buildChain([
+      { op: "set", key: "a", payload: { gen: 1, filler } },
+      { op: "set", key: "a", payload: { gen: 2, filler } },
+      { op: "set", key: "a", payload: { gen: 3, filler } },
+    ]);
+    const plan = planCompaction(
+      entries,
+      new Set([pairKey(PRUNE_SCOPE, "a")]),
+      "2026-02-01T00:00:00.000Z",
+      PRUNE,
+    );
+    const one = Buffer.byteLength(canonicalize({ gen: 1, filler }), "utf8");
+    expect(plan.payloadBytesBefore).toBe(3 * one);
+    // one surviving payload + the compact record's own payload
+    const anchor = Buffer.byteLength(canonicalize(plan.compactRecord.payload), "utf8");
+    expect(plan.payloadBytesAfter).toBe(one + anchor);
+    expect(plan.payloadBytesBefore - plan.payloadBytesAfter).toBeGreaterThan(2 * one - anchor - 1);
+  });
+});
+
+for (const { name, make } of factories) {
+  describe(`${name}: compactOplog --prune-history`, () => {
+    /** Write `n` versions of `key`, each carrying a findable needle. */
+    async function versions(s: StateStore, key: string, n: number): Promise<void> {
+      for (let i = 1; i <= n; i++) {
+        await s.set(PRUNE_SCOPE, key, { gen: i, note: `needle-${key}-${i}` });
+      }
+    }
+
+    it("drops superseded payloads, keeps live values, chain verifies", async () => {
+      const s = make();
+      try {
+        await versions(s, "a", 4);
+        await versions(s, "b", 2);
+        const before = await s.readOplog();
+
+        const r = await s.compactOplog({ pruneSuperseded: true });
+        expect(r.prunedCount).toBe(4); // a: 3 superseded, b: 1
+        expect(r.erasedCount).toBe(0);
+        expect(await s.verifyOplog()).toEqual({ ok: true });
+
+        const after = await s.readOplog();
+        const bytes = JSON.stringify(after);
+        for (const gone of ["needle-a-1", "needle-a-2", "needle-a-3", "needle-b-1"]) {
+          expect(bytes).not.toContain(gone);
+        }
+        expect(bytes).toContain("needle-a-4");
+        expect(bytes).toContain("needle-b-2");
+        // pruned rows keep their commitment; nothing else about them moved
+        for (let i = 0; i < before.length; i++) {
+          const b = before[i]!;
+          const a = after[i]!;
+          expect(a.id).toBe(b.id);
+          expect(a.ts).toBe(b.ts);
+          expect(a.payload_hash).toBe(b.payload_hash);
+          expect(a.hash).toBe(b.hash);
+        }
+        // the live values themselves are untouched
+        expect(await s.get(PRUNE_SCOPE, "a")).toEqual({ gen: 4, note: "needle-a-4" });
+        expect(await s.get(PRUNE_SCOPE, "b")).toEqual({ gen: 2, note: "needle-b-2" });
+      } finally {
+        await s.close();
+      }
+    });
+
+    it("prunes NOTHING without the flag (existing compactions unchanged)", async () => {
+      const s = make();
+      try {
+        await versions(s, "a", 3);
+        const r = await s.compactOplog();
+        expect(r.prunedCount).toBe(0);
+        expect(JSON.stringify(await s.readOplog())).toContain("needle-a-1");
+        expect(await s.verifyOplog()).toEqual({ ok: true });
+      } finally {
+        await s.close();
+      }
+    });
+
+    it("keepPayloadsSince spares fresh history", async () => {
+      const s = make();
+      try {
+        await versions(s, "a", 3);
+        // every entry was just written, so a one-hour window covers them all
+        const r = await s.compactOplog({
+          pruneSuperseded: true,
+          keepPayloadsSince: new Date(Date.now() - 3_600_000).toISOString(),
+        });
+        expect(r.prunedCount).toBe(0);
+        expect(JSON.stringify(await s.readOplog())).toContain("needle-a-1");
+        expect(await s.verifyOplog()).toEqual({ ok: true });
+      } finally {
+        await s.close();
+      }
+    });
+
+    it("is idempotent: a second pruning compaction prunes nothing new", async () => {
+      const s = make();
+      try {
+        await versions(s, "a", 3);
+        const r1 = await s.compactOplog({ pruneSuperseded: true });
+        expect(r1.prunedCount).toBe(2);
+        const log1 = await s.readOplog();
+
+        const r2 = await s.compactOplog({ pruneSuperseded: true });
+        expect(r2.prunedCount).toBe(0);
+        expect(r2.erasedCount).toBe(0);
+        expect(r2.entriesRewritten).toBe(0);
+        expect(await s.verifyOplog()).toEqual({ ok: true });
+        // only the new anchor record was appended
+        const log2 = await s.readOplog();
+        expect(log2.length).toBe(log1.length + 1);
+        expect(canonicalize(log2.slice(0, log1.length))).toBe(canonicalize(log1));
+      } finally {
+        await s.close();
+      }
+    });
+
+    it("still erases delete-tailed history, and forget --erase keeps working after", async () => {
+      const s = make();
+      try {
+        await versions(s, "dead", 2);
+        await s.delete(PRUNE_SCOPE, "dead");
+        await versions(s, "live", 3);
+
+        const r = await s.compactOplog({ pruneSuperseded: true });
+        expect(r.erasedCount).toBe(2); // both versions of the deleted record
+        expect(r.prunedCount).toBe(2); // live: 2 superseded
+        expect(JSON.stringify(await s.readOplog())).not.toContain("needle-dead");
+        expect(await s.verifyOplog()).toEqual({ ok: true });
+
+        // in-place erasure still works on the pruned chain
+        await s.delete(PRUNE_SCOPE, "live");
+        const erase = await s.eraseOplogPayloads(PRUNE_SCOPE, "live");
+        expect(erase.erased).toBe(1); // the one surviving payload
+        expect(JSON.stringify(await s.readOplog())).not.toContain("needle-live");
+        expect(await s.verifyOplog()).toEqual({ ok: true });
+      } finally {
+        await s.close();
+      }
+    });
+
+    it("writes after a pruning compaction keep chaining", async () => {
+      const s = make();
+      try {
+        await versions(s, "a", 3);
+        await s.compactOplog({ pruneSuperseded: true });
+        const rec = (await s.readOplog()).at(-1)!;
+        await s.set(PRUNE_SCOPE, "a", { gen: 4, note: "needle-a-4" });
+        const log = await s.readOplog();
+        expect(log.at(-1)!.prev_hash).toBe(rec.hash);
+        expect(await s.verifyOplog()).toEqual({ ok: true });
+      } finally {
+        await s.close();
+      }
+    });
+
+    it("measured shrink: 40 versions of one key collapse to one payload", async () => {
+      const s = make();
+      try {
+        const filler = "y".repeat(1000);
+        for (let i = 1; i <= 40; i++) {
+          await s.set(PRUNE_SCOPE, "big", { gen: i, filler });
+        }
+        const payloadBytes = async (): Promise<number> =>
+          (await s.readOplog()).reduce(
+            (n, e) =>
+              n +
+              (e.payload === null || e.payload === undefined
+                ? 0
+                : Buffer.byteLength(canonicalize(e.payload), "utf8")),
+            0,
+          );
+        const measuredBefore = await payloadBytes();
+
+        const r = await s.compactOplog({ pruneSuperseded: true });
+        const measuredAfter = await payloadBytes();
+        const one = Buffer.byteLength(canonicalize({ gen: 40, filler }), "utf8");
+
+        expect(r.prunedCount).toBe(39);
+        expect(r.payloadBytesBefore).toBe(measuredBefore);
+        expect(r.payloadBytesAfter).toBe(measuredAfter);
+        // 39 of 40 payloads gone: the surviving cost is one payload plus the
+        // anchor record (which lists the 39 authorized nulls).
+        expect(measuredBefore).toBeGreaterThan(39 * 1000);
+        expect(measuredAfter).toBeLessThan(one + 2000);
+        expect(measuredBefore - measuredAfter).toBeGreaterThan(38 * 1000);
+        expect(await s.verifyOplog()).toEqual({ ok: true });
+        expect(await s.get(PRUNE_SCOPE, "big")).toEqual({ gen: 40, filler });
+      } finally {
+        await s.close();
+      }
+    });
+  });
+}
+
+describe("store parity: pruning plans identically in both stores", () => {
+  it("same script -> same counts, same bytes, same deterministic oplog fields", async () => {
+    const mem = new StoreMemory();
+    const sql = new StoreLibsql({ url: ":memory:" });
+    try {
+      for (const s of [mem, sql] as StateStore[]) {
+        for (let i = 1; i <= 3; i++) await s.set(PRUNE_SCOPE, "a", { gen: i });
+        for (let i = 1; i <= 2; i++) await s.set(PRUNE_SCOPE, "dead", { gen: i });
+        await s.delete(PRUNE_SCOPE, "dead");
+        await s.set("mem:sessions", "sessP", { observationCount: 3 });
+      }
+      const rMem = await mem.compactOplog({ pruneSuperseded: true });
+      const rSql = await sql.compactOplog({ pruneSuperseded: true });
+      expect(rSql.prunedCount).toBe(rMem.prunedCount);
+      expect(rSql.erasedCount).toBe(rMem.erasedCount);
+      expect(rSql.entriesRewritten).toBe(rMem.entriesRewritten);
+      expect(rSql.payloadBytesBefore).toBe(rMem.payloadBytesBefore);
+      expect(rSql.payloadBytesAfter).toBe(rMem.payloadBytesAfter);
+      expect(rMem.prunedCount).toBe(2);
+      expect(rMem.erasedCount).toBe(2);
+
+      // Deterministic projection (hashes embed ts, so mask the anchor record).
+      const project = (e: OplogEntry) => ({
+        id: e.id,
+        op: e.op,
+        scope: e.scope,
+        key: e.key,
+        payload: e.op === "compact" ? "(ts-dependent)" : (e.payload ?? null),
+        v: e.v,
+        payload_hash: e.op === "compact" ? "(ts-dependent)" : e.payload_hash,
+      });
+      expect(canonicalize((await sql.readOplog()).map(project))).toBe(
+        canonicalize((await mem.readOplog()).map(project)),
+      );
+      expect(await mem.verifyOplog()).toEqual({ ok: true });
+      expect(await sql.verifyOplog()).toEqual({ ok: true });
+    } finally {
+      await mem.close();
+      await sql.close();
+    }
+  });
+});
+
+describe("StoreLibsql file db: pruned versions leave the file", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "memwarden-prune-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("superseded bytes are provably gone from the db file; the newest value stays", async () => {
+    const path = join(dir, "prune.db");
+    const s = new StoreLibsql({ url: `file:${path}` });
+    try {
+      for (let i = 1; i <= 6; i++) {
+        await s.set(PRUNE_SCOPE, "k", { gen: i, note: `prune-needle-${i}` });
+      }
+      const raw = (): string => {
+        let all = "";
+        for (const p of [path, `${path}-wal`, `${path}-shm`]) {
+          if (existsSync(p)) all += readFileSync(p).toString("latin1");
+        }
+        return all;
+      };
+      expect(raw()).toContain("prune-needle-1");
+
+      const r = await s.compactOplog({ pruneSuperseded: true });
+      expect(r.prunedCount).toBe(5);
+      expect(r.vacuum.ok).toBe(true);
+      expect(await s.verifyOplog()).toEqual({ ok: true });
+
+      const bytes = raw();
+      for (let i = 1; i <= 5; i++) expect(bytes).not.toContain(`prune-needle-${i}`);
+      expect(bytes).toContain("prune-needle-6");
+      expect(await s.get(PRUNE_SCOPE, "k")).toEqual({ gen: 6, note: "prune-needle-6" });
+    } finally {
+      await s.close();
+    }
+  });
+
+  it("survives close/reopen with an intact chain", async () => {
+    const path = join(dir, "reopen-prune.db");
+    const s1 = new StoreLibsql({ url: `file:${path}` });
+    for (let i = 1; i <= 4; i++) await s1.set(PRUNE_SCOPE, "k", { gen: i });
+    await s1.compactOplog({ pruneSuperseded: true });
+    await s1.close();
+
+    const s2 = new StoreLibsql({ url: `file:${path}` });
+    try {
+      expect(await s2.verifyOplog()).toEqual({ ok: true });
+      expect(await s2.get(PRUNE_SCOPE, "k")).toEqual({ gen: 4 });
+      await s2.set(PRUNE_SCOPE, "k", { gen: 5 });
+      expect(await s2.verifyOplog()).toEqual({ ok: true });
+    } finally {
+      await s2.close();
+    }
+  });
+});
+
+describe("POST /memwarden/compact: prune_history + keep_days", () => {
+  let sdk: Kernel;
+  let kv: StateKV;
+  let store: StoreMemory;
+
+  beforeEach(async () => {
+    __resetKernelSingleton();
+    getSearchIndex().clear();
+    store = new StoreMemory();
+    sdk = registerWorker("in-process", { workerName: "memwarden-prune" }, { store });
+    kv = new StateKV(sdk);
+    registerCoreFunctions(sdk, kv);
+    const { registerApiTriggers } = await import("../src/triggers/api.js");
+    registerApiTriggers(sdk, kv);
+  });
+  afterEach(() => {
+    __resetKernelSingleton();
+  });
+
+  const post = (body: unknown) =>
+    sdk.invokeHttp("api::compact", { headers: {}, query_params: {}, body });
+  // The window boundary is inclusive (ts >= cutoff is kept), and a test writes
+  // its whole fixture inside one millisecond — so step off the boundary before
+  // asking for keep_days: 0.
+  const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 5));
+
+  it("prune_history prunes superseded versions; the default 7d window spares fresh ones", async () => {
+    for (let i = 1; i <= 3; i++) await store.set(PRUNE_SCOPE, "a", { gen: i });
+
+    // Everything was just written, so the default 7-day window covers it all.
+    const fresh = await post({ prune_history: true });
+    expect(fresh.status_code).toBe(200);
+    expect((fresh.body as { prunedCount: number }).prunedCount).toBe(0);
+
+    // keep_days: 0 means "keep no window" -> superseded versions go.
+    await tick();
+    const r = await post({ prune_history: true, keep_days: 0 });
+    expect(r.status_code).toBe(200);
+    const b = r.body as { prunedCount: number; payloadBytesBefore: number; payloadBytesAfter: number };
+    expect(b.prunedCount).toBe(2);
+    const log = JSON.stringify(await store.readOplog());
+    expect(log).not.toContain('"gen":1');
+    expect(log).toContain('"gen":3');
+    expect(await store.verifyOplog()).toEqual({ ok: true });
+    // Honest accounting, even when it is unflattering: on a toy log the two
+    // pruned payloads are smaller than the anchor record compaction appends,
+    // so "after" can legitimately exceed "before".
+    expect(b.payloadBytesBefore).toBeGreaterThan(0);
+    expect(b.payloadBytesAfter).toBeGreaterThan(0);
+  });
+
+  it("without prune_history nothing is pruned (and dry_run still writes nothing)", async () => {
+    for (let i = 1; i <= 3; i++) await store.set(PRUNE_SCOPE, "a", { gen: i });
+    const before = await store.readOplog();
+    await tick();
+    const dry = await post({ dry_run: true, prune_history: true, keep_days: 0 });
+    expect((dry.body as { dryRun: boolean; prunedCount: number }).prunedCount).toBe(2);
+    expect(canonicalize(await store.readOplog())).toBe(canonicalize(before));
+
+    const plain = await post({});
+    expect((plain.body as { prunedCount: number }).prunedCount).toBe(0);
+    expect(JSON.stringify(await store.readOplog())).toContain('"gen":1');
+  });
+
+  it("a bad keep_days is REFUSED, not silently defaulted", async () => {
+    for (const bad of [-1, "7", Number.NaN, null]) {
+      const r = await post({ prune_history: true, keep_days: bad });
+      expect(r.status_code).toBe(400);
+      expect((r.body as { error: string }).error).toMatch(/keep_days/);
+    }
+    // nothing was written by any of the refusals
+    expect((await store.readOplog()).length).toBe(0);
   });
 });

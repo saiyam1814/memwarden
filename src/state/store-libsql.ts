@@ -28,6 +28,7 @@ import { dirname } from "node:path";
 import {
   applyUpdateOps,
   type MutationListener,
+  type OplogCompactOptions,
   type OplogCompactResult,
   type OplogEntry,
   type OplogEraseResult,
@@ -337,7 +338,7 @@ export class StoreLibsql implements StateStore {
     });
   }
 
-  async compactOplog(opts?: { dryRun?: boolean }): Promise<OplogCompactResult> {
+  async compactOplog(opts?: OplogCompactOptions): Promise<OplogCompactResult> {
     return this.serializeWrite(async () => {
       await this.init();
       const entries = await this.readOplog();
@@ -348,12 +349,16 @@ export class StoreLibsql implements StateStore {
         liveRows.rows.map((r) => pairKey(String(r.scope), String(r.key))),
       );
       const compactedAt = new Date().toISOString();
-      const plan = planCompaction(entries, livePairs, compactedAt);
+      // Same planner, same options as StoreMemory (parity by construction).
+      const plan = planCompaction(entries, livePairs, compactedAt, opts);
 
       if (opts?.dryRun) {
         return {
           entriesRewritten: plan.entriesRewritten,
           erasedCount: plan.erasedCount,
+          prunedCount: plan.prunedCount,
+          payloadBytesBefore: plan.payloadBytesBefore,
+          payloadBytesAfter: plan.payloadBytesAfter,
           previousHeadHash: plan.previousHeadHash,
           compactedAt,
           dryRun: true,
@@ -367,6 +372,12 @@ export class StoreLibsql implements StateStore {
       // untouched. No temp-file swap is needed because SQLite's journal
       // already gives us the atomic all-or-nothing.
       const stmts: InStatement[] = [];
+      // Rows where the ONLY change is the payload going away (already v2, so
+      // every hash column stays byte-identical) are nulled in id batches
+      // instead of one statement each: a pruning compaction touches most of a
+      // mature oplog, and 100k+ single-row statements in one batch is not a
+      // shape worth handing the driver.
+      const nullOnly: number[] = [];
       for (let i = 0; i < entries.length; i++) {
         const before = entries[i]!;
         const after = plan.entries[i]!;
@@ -378,6 +389,16 @@ export class StoreLibsql implements StateStore {
           (before.payload ?? null) === (after.payload ?? null)
         ) {
           continue; // byte-identical row — skip the write
+        }
+        if (
+          before.v === 2 &&
+          before.payload_hash === after.payload_hash &&
+          before.prev_hash === after.prev_hash &&
+          before.hash === after.hash &&
+          (after.payload === null || after.payload === undefined)
+        ) {
+          nullOnly.push(after.id);
+          continue;
         }
         stmts.push({
           sql: `UPDATE oplog SET payload = ?, v = 2, payload_hash = ?, prev_hash = ?, hash = ?
@@ -391,6 +412,16 @@ export class StoreLibsql implements StateStore {
             after.hash,
             after.id,
           ],
+        });
+      }
+      // Order is irrelevant (every statement touches a distinct id), and all
+      // of them still ride in the one batch = one transaction below.
+      const NULL_CHUNK = 400;
+      for (let i = 0; i < nullOnly.length; i += NULL_CHUNK) {
+        const ids = nullOnly.slice(i, i + NULL_CHUNK);
+        stmts.push({
+          sql: `UPDATE oplog SET payload = NULL WHERE id IN (${ids.map(() => "?").join(",")})`,
+          args: ids,
         });
       }
       const rec = plan.compactRecord;
@@ -440,6 +471,9 @@ export class StoreLibsql implements StateStore {
       return {
         entriesRewritten: plan.entriesRewritten,
         erasedCount: plan.erasedCount,
+        prunedCount: plan.prunedCount,
+        payloadBytesBefore: plan.payloadBytesBefore,
+        payloadBytesAfter: plan.payloadBytesAfter,
         previousHeadHash: plan.previousHeadHash,
         compactedAt,
         dryRun: false,

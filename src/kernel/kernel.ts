@@ -235,8 +235,20 @@ export class Kernel implements ISdk {
         return (await this.store.eraseOplogPayloads(p.scope, p.key)) as R;
       }
       case "state::compact": {
-        const p = (payload ?? {}) as { dryRun?: boolean };
-        return (await this.store.compactOplog({ dryRun: p.dryRun === true })) as R;
+        // pruneSuperseded/keepPayloadsSince are only forwarded when actually
+        // asked for: the default compaction must stay exactly what it was.
+        const p = (payload ?? {}) as {
+          dryRun?: boolean;
+          pruneSuperseded?: boolean;
+          keepPayloadsSince?: string;
+        };
+        return (await this.store.compactOplog({
+          dryRun: p.dryRun === true,
+          ...(p.pruneSuperseded === true ? { pruneSuperseded: true } : {}),
+          ...(typeof p.keepPayloadsSince === "string" && p.keepPayloadsSince !== ""
+            ? { keepPayloadsSince: p.keepPayloadsSince }
+            : {}),
+        })) as R;
       }
       case "state::oplog-find": {
         // Chain evidence for one key (delete receipts). Payloads are

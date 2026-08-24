@@ -26,6 +26,8 @@ import {
   parseCanon,
   readCanon,
   recordFromMemory,
+  reanchorRecord,
+  scanForSecrets,
   serializeCanon,
   toRepoRelative,
   verifyCanon,
@@ -243,5 +245,150 @@ describe("canon: portable verified memory", () => {
     const back = readCanon(repo);
     expect(back.exists).toBe(false);
     expect(back.records).toEqual([]);
+  });
+
+  it("writes a README for the human who meets this file in review", () => {
+    writeRepoFile("a.ts", "1\n");
+    const rec = recordFromMemory(memoryFor("a.ts", "first", "mem_a"), repo, new Date().toISOString())!;
+    writeCanon(repo, [rec]);
+    const readme = readFileSync(join(repo, ".memwarden/README.md"), "utf8");
+    expect(readme).toContain("CODEOWNERS");
+    // The honesty boundary must survive into the artifact itself, not just docs.
+    expect(readme).toContain("unchanged since capture");
+  });
+});
+
+// The canon is COMMITTED, and git history is a one-way door. A credential that
+// reaches it is an incident and a history rewrite, not a delete — so this gate
+// has no override, and `--all` (staleness) must never be mistaken for one.
+describe("canon secret gate", () => {
+  const cases: Array<[string, string]> = [
+    ["AWS access key id", "creds are AKIAIOSFODNN7EXAMPLE for the bucket"],
+    ["GitHub token", "use ghp_" + "a".repeat(36) + " to push"],
+    ["private key block", "-----BEGIN RSA PRIVATE KEY-----\nMIIEow==\n"],
+    ["Anthropic API key", "key is sk-ant-" + "b".repeat(24)],
+    ["OpenRouter key", "key is sk-or-v1-" + "c".repeat(32)],
+    ["JWT", "token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghijk"],
+    [
+      "credentialed connection string",
+      "DB is postgres://admin:hunter2@db.internal:5432/app",
+    ],
+    ["assigned credential", 'config has api_key = "swordfish-abcdef123456"'],
+  ];
+
+  for (const [label, text] of cases) {
+    it(`detects ${label}`, () => {
+      const hits = scanForSecrets({ title: "config note", content: text, concepts: [] });
+      expect(hits.map((h) => h.label)).toContain(label);
+    });
+  }
+
+  it("does not fire on ordinary engineering prose", () => {
+    const benign = [
+      "refresh tokens rotate every 15 minutes, enforced in src/auth.ts",
+      "the password reset flow sends an email; see resetPassword()",
+      "we store the API key in the secret manager, never in the repo",
+      "commit 9f2c1ab4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0 broke the build",
+    ];
+    for (const content of benign) {
+      expect(scanForSecrets({ title: "note", content, concepts: [] })).toEqual([]);
+    }
+  });
+
+  it("reports the field but NEVER the matched secret text", () => {
+    const secret = "ghp_" + "z".repeat(36);
+    const hits = scanForSecrets({ title: "t", content: `token ${secret}`, concepts: [] });
+    expect(hits.length).toBeGreaterThan(0);
+    expect(JSON.stringify(hits)).not.toContain(secret);
+    expect(hits[0]!.field).toBe("content");
+  });
+
+  it("scans title and concepts, not just content", () => {
+    expect(
+      scanForSecrets({ title: "AKIAIOSFODNN7EXAMPLE", content: "", concepts: [] }).length,
+    ).toBeGreaterThan(0);
+    expect(
+      scanForSecrets({ title: "t", content: "", concepts: ["AKIAIOSFODNN7EXAMPLE"] }).length,
+    ).toBeGreaterThan(0);
+  });
+});
+
+// Raw hashes make every reformat look like a lie. A canon that screams on
+// Prettier gets its CI gate deleted, so formatting-only change is its own state.
+describe("canon drift severity", () => {
+  it("calls a formatting-only change COSMETIC, not stale", () => {
+    writeRepoFile("src/auth.ts", "export const A = 1;\nexport const B = 2;\n");
+    const rec = recordFromMemory(
+      memoryFor("src/auth.ts", "A and B are constants"),
+      repo,
+      new Date().toISOString(),
+    )!;
+    expect(rec.fileHashesNormalized?.["src/auth.ts"]).toBeTruthy();
+
+    // CRLF + trailing whitespace: bytes moved, code did not.
+    writeRepoFile("src/auth.ts", "export const A = 1;   \r\nexport const B = 2;\t\r\n");
+    const [check] = verifyCanon([rec], repo);
+    expect(check!.verdict).toBe("cosmetic");
+    expect(check!.drifted).toEqual(["src/auth.ts"]);
+  });
+
+  it("still calls a real code change STALE", () => {
+    writeRepoFile("src/auth.ts", "export const ROTATE = 900_000;\n");
+    const rec = recordFromMemory(
+      memoryFor("src/auth.ts", "rotation is 15m"),
+      repo,
+      new Date().toISOString(),
+    )!;
+    writeRepoFile("src/auth.ts", "export const ROTATE = 3_600_000;\n");
+    expect(verifyCanon([rec], repo)[0]!.verdict).toBe("stale");
+  });
+
+  it("treats a record with no normalized hash as drifted, never cosmetic", () => {
+    // Unprovable must not round down to harmless: an older record without a
+    // normalized commitment cannot claim "only formatting changed".
+    writeRepoFile("a.ts", "x\n");
+    const rec = recordFromMemory(memoryFor("a.ts", "note"), repo, new Date().toISOString())!;
+    delete rec.fileHashesNormalized;
+    writeRepoFile("a.ts", "x   \r\n");
+    expect(verifyCanon([rec], repo)[0]!.verdict).toBe("stale");
+  });
+});
+
+// Without re-anchoring, canon has no maintenance path: push promotes from the
+// LOCAL brain, brains are per-machine, so after a refactor nobody but the
+// original captor could refresh the hashes — and they may have left the team.
+describe("canon reanchor", () => {
+  it("recomputes hashes against this checkout and records WHO asserted it", () => {
+    writeRepoFile("src/auth.ts", "export const ROTATE = 900_000;\n");
+    const rec = recordFromMemory(
+      memoryFor("src/auth.ts", "rotation policy lives here"),
+      repo,
+      new Date().toISOString(),
+    )!;
+    writeRepoFile("src/auth.ts", "export const ROTATE = 3_600_000;\n");
+    expect(verifyCanon([rec], repo)[0]!.verdict).toBe("stale");
+
+    const next = reanchorRecord(rec, repo, "alice", new Date().toISOString())!;
+    expect(next.reanchoredBy).toBe("alice");
+    expect(next.reanchoredAt).toBeTruthy();
+    // Now it verifies — but the attestation is on the record, so verify can
+    // report it as asserted rather than proven from capture.
+    expect(verifyCanon([next], repo)[0]!.verdict).toBe("verified");
+  });
+
+  it("refuses to re-anchor a record whose files are gone", () => {
+    writeRepoFile("src/gone.ts", "x\n");
+    const rec = recordFromMemory(memoryFor("src/gone.ts", "note"), repo, new Date().toISOString())!;
+    rmSync(join(repo, "src/gone.ts"));
+    // A memory whose source no longer exists is dead, not re-anchorable.
+    expect(reanchorRecord(rec, repo, "alice", new Date().toISOString())).toBeNull();
+  });
+
+  it("keeps attestation through serialization", () => {
+    writeRepoFile("a.ts", "1\n");
+    const rec = recordFromMemory(memoryFor("a.ts", "note"), repo, new Date().toISOString())!;
+    const anchored = reanchorRecord(rec, repo, "bob", new Date().toISOString())!;
+    const { records } = parseCanon(serializeCanon([anchored]));
+    expect(records[0]!.reanchoredBy).toBe("bob");
   });
 });

@@ -1,0 +1,124 @@
+#
+# memwarden canon verify — a memory-trust gate for pull requests.
+#
+# Every orchestrator, agent team, and parallel-agent workflow eventually
+# converges on a pull request, which makes CI the one place that can check
+# memory trust regardless of which tools produced it. This action re-hashes the
+# committed .memwarden/canon.jsonl against the PR's checkout and reports which
+# memories no longer hold.
+#
+# It needs no daemon, no account, and no secrets: verification is a local
+# re-hash of files that are already in the checkout.
+#
+#   - uses: saiyam1814/memwarden@main
+#     with:
+#       strict: 'true'   # fail the job when a memory references changed code
+#
+name: memwarden canon verify
+description: Verify committed agent memory still holds against this checkout (re-hashes source files; no daemon, no secrets).
+author: memwarden
+branding:
+  icon: shield
+  color: red
+
+inputs:
+  root:
+    description: Repository root to verify (defaults to the workspace).
+    required: false
+    default: .
+  strict:
+    description: Fail the job when any memory is stale. Set 'false' to report without failing.
+    required: false
+    default: "true"
+  version:
+    description: memwarden version to run (npm dist-tag or exact version).
+    required: false
+    default: latest
+  summary:
+    description: Write the verdict to the GitHub step summary.
+    required: false
+    default: "true"
+
+outputs:
+  verified:
+    description: Number of memories that still hold against this checkout.
+    value: ${{ steps.verify.outputs.verified }}
+  stale:
+    description: Number of memories referencing code that changed or vanished.
+    value: ${{ steps.verify.outputs.stale }}
+  total:
+    description: Total records in the canon.
+    value: ${{ steps.verify.outputs.total }}
+
+runs:
+  using: composite
+  steps:
+    - name: verify canon
+      id: verify
+      shell: bash
+      env:
+        MW_ROOT: ${{ inputs.root }}
+        MW_STRICT: ${{ inputs.strict }}
+        MW_VERSION: ${{ inputs.version }}
+        MW_SUMMARY: ${{ inputs.summary }}
+      run: |
+        set -uo pipefail
+
+        # No canon committed is not a failure: most repos adopting this action
+        # add the workflow before they add the file.
+        if [ ! -f "$MW_ROOT/.memwarden/canon.jsonl" ]; then
+          echo "no .memwarden/canon.jsonl in $MW_ROOT — nothing to verify."
+          echo "create one on a machine with memory: memwarden canon push"
+          {
+            echo "verified=0"; echo "stale=0"; echo "total=0"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # --json so the verdict is parsed, never scraped from prose.
+        npx --yes "memwarden@$MW_VERSION" canon verify --root "$MW_ROOT" --json > mw-canon.json
+        cat mw-canon.json
+
+        read -r TOTAL VERIFIED STALE UNVER < <(node -e '
+          const r = require("./mw-canon.json");
+          process.stdout.write([r.total ?? 0, r.verified ?? 0, r.stale ?? 0, r.unverifiable ?? 0].join(" "));
+        ')
+        {
+          echo "verified=$VERIFIED"; echo "stale=$STALE"; echo "total=$TOTAL"
+        } >> "$GITHUB_OUTPUT"
+
+        if [ "$MW_SUMMARY" = "true" ]; then
+          {
+            echo "## memwarden canon verify"
+            echo
+            echo "| verdict | count |"
+            echo "| --- | --- |"
+            echo "| verified | $VERIFIED |"
+            echo "| stale | $STALE |"
+            echo "| unverifiable | $UNVER |"
+            echo
+            if [ "$STALE" != "0" ]; then
+              echo "### Stale memories"
+              echo
+              node -e '
+                const r = require("./mw-canon.json");
+                for (const s of (r.staleDetail ?? []).slice(0, 20)) {
+                  console.log("- **" + s.title + "** — drifted: `" + (s.drifted ?? []).join("`, `") + "`");
+                }
+              '
+              echo
+              echo "These memories reference code this branch changed. They are refused at"
+              echo "recall rather than injected, so nothing is silently wrong — but the canon"
+              echo "should be refreshed (\`memwarden canon push\`) or the dead records dropped."
+            else
+              echo "Every committed memory still hash-matches this checkout."
+              echo
+              echo "_A matching hash proves the source is unchanged, not that the claim is correct._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        if [ "$MW_STRICT" = "true" ] && [ "$STALE" != "0" ]; then
+          echo "::error::$STALE committed memories reference code this branch changed."
+          exit 1
+        fi

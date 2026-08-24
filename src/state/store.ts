@@ -110,12 +110,45 @@ export interface OplogEraseResult {
   v1Count?: number;
 }
 
+/**
+ * Storage-reclaim levers shared by planCompaction and compactOplog. Off by
+ * default: a plain compaction stays byte-for-byte what it always was.
+ */
+export interface OplogPruneOptions {
+  /**
+   * Also null SUPERSEDED payloads: every set/update entry that is not the
+   * newest payload-bearing entry for its (scope, key). The chain still
+   * verifies (payload_hash is kept) and the value a caller can still read is
+   * always retained, so this is pure storage reclaim — in a mature oplog the
+   * same key has been rewritten dozens of times and every old version is
+   * still on disk.
+   */
+  pruneSuperseded?: boolean;
+  /**
+   * ISO timestamp: entries at or after it are never PRUNED, so recent history
+   * stays inspectable in full. Deliberately does not gate erasure — a
+   * deletion request must never be deferred by a retention window.
+   */
+  keepPayloadsSince?: string;
+}
+
+/** Options accepted by compactOplog. */
+export interface OplogCompactOptions extends OplogPruneOptions {
+  dryRun?: boolean;
+}
+
 /** Result of compactOplog. */
 export interface OplogCompactResult {
-  /** Rows whose stored bytes changed (re-versioned, re-chained, or erased). */
+  /** Rows whose stored bytes changed (re-versioned, re-chained, erased, or pruned). */
   entriesRewritten: number;
-  /** Payloads nulled by this compaction (forget-deleted records only). */
+  /** Payloads nulled because their record was forget-deleted (erasure). */
   erasedCount: number;
+  /** Payloads nulled because a newer version of the same key exists (pruning). */
+  prunedCount: number;
+  /** Total payload bytes (canonical JSON) across the chain before compaction. */
+  payloadBytesBefore: number;
+  /** Same measure after, including the new compact record's own payload. */
+  payloadBytesAfter: number;
   /** Head hash of the pre-compaction chain ("" for an empty log) — anchored in the compact record. */
   previousHeadHash: string;
   compactedAt: string;
@@ -169,8 +202,10 @@ export interface StateStore {
    * kv row (never a live record's), and append a `compact` record anchoring
    * the pre-compaction head hash. Afterwards every entry is v2 and future
    * erasures are in-place and chain-safe. dryRun computes counts only.
+   * `pruneSuperseded` additionally nulls outdated versions (see
+   * OplogPruneOptions) — the storage lever, orthogonal to erasure.
    */
-  compactOplog(opts?: { dryRun?: boolean }): Promise<OplogCompactResult>;
+  compactOplog(opts?: OplogCompactOptions): Promise<OplogCompactResult>;
 
   /** Flush and release any resources (closes the libSQL client). Idempotent. */
   close(): Promise<void>;
