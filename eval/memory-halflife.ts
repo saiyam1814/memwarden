@@ -73,6 +73,28 @@ const ACTIVITY_WINDOW_DAYS = 14;
 /** Cap per capture point so one enormous repo cannot dominate runtime. */
 const MAX_FILES_PER_POINT = 400;
 
+/**
+ * Arms smaller than this are reported but EXCLUDED from medians and spreads.
+ * Real data forced this: fastapi's 365-day touched arm had n=4 and reported
+ * 100%, which then set the upper bound of the pooled IQR. A rate from four
+ * files is not a measurement.
+ */
+const MIN_SAMPLE = 30;
+
+/**
+ * Localized documentation. Translation-sync commits rewrite hundreds of these
+ * files at once, and no agent holds a code fact about `docs/ko/...` that a
+ * Korean translation pass invalidates. Measured on fastapi: ALL 100 "changed"
+ * files in one random arm were translated docs from a single sync PR.
+ *
+ * NOTE ON DIRECTION: excluding these LOWERS the repo-wide arm and therefore
+ * WIDENS the gap, i.e. it flatters the thesis. So it is off-by-default-visible:
+ * the count is always reported, and `--include-i18n` reruns without it so the
+ * sensitivity is checkable by anyone. Never publish one number without the other.
+ */
+const I18N_DOCS =
+  /(^|\/)docs?\/(?:[a-z]{2}|[a-z]{2}[-_][a-zA-Z]{2,4})\//;
+
 // Paths an agent has no business storing facts about. Including them would
 // inflate every number: lockfiles and generated code change constantly and
 // carry no decisions.
@@ -87,7 +109,10 @@ const EXCLUDE_PATTERNS: RegExp[] = [
   /(^|\/)\.git/,
 ];
 
+let includeI18n = false;
+
 function excluded(path: string): boolean {
+  if (!includeI18n && I18N_DOCS.test(path)) return true;
   return EXCLUDE_PATTERNS.some((re) => re.test(path));
 }
 
@@ -495,12 +520,13 @@ function render(results: RepoResult[]): void {
             `${String(f.modified).padStart(8)}  ` +
             `${String(f.renamed).padStart(7)}  ` +
             `${String(f.deleted).padStart(7)}   ` +
-            `${pct(arm.substantiveRate).padStart(7)}`,
+            `${pct(arm.substantiveRate).padStart(7)}` +
+            (arm.sampled < MIN_SAMPLE ? "  (underpowered, excluded)" : ""),
         );
       }
       // The gap IS the finding: how much of the rate is attention bias rather
       // than repo-wide turnover.
-      if (p.touched.sampled > 0 && p.random.sampled > 0) {
+      if (p.touched.sampled >= MIN_SAMPLE && p.random.sampled >= MIN_SAMPLE) {
         const gap = p.touched.substantiveRate - p.random.substantiveRate;
         console.log(
           `          gap ${gap >= 0 ? "+" : ""}${pct(gap)} (recently-touched vs repo-wide)` +
@@ -519,7 +545,7 @@ function render(results: RepoResult[]): void {
     for (const days of WINDOWS) {
       const vals = withPoints
         .map((r) => r.points.find((p) => p.days === days))
-        .filter((p): p is PointResult => !!p && p.touched.sampled > 0)
+        .filter((p): p is PointResult => !!p && p.touched.sampled >= MIN_SAMPLE)
         .map((p) => p.touched.substantiveRate)
         .sort((a, b) => a - b);
       if (vals.length === 0) continue;
@@ -553,6 +579,15 @@ function render(results: RepoResult[]): void {
       `  re-examine. Tools that never check carry that exposure without knowing.\n`,
   );
   console.log(
+    `  Sample policy: lockfiles, generated, vendored, binaries and ` +
+      `formatter/license\n  sweeps excluded; ` +
+      (includeI18n
+        ? `localized docs INCLUDED (--include-i18n).`
+        : `localized docs excluded (rerun with --include-i18n\n  to see the` +
+          ` sensitivity — that exclusion widens the gap, so check it).`) +
+      `\n  Arms below n=${MIN_SAMPLE} are shown but excluded from medians.\n`,
+  );
+  console.log(
     `  Measure your OWN store against your own repo:\n` +
       `    npx memwarden audit <store> --root <repo>\n`,
   );
@@ -561,6 +596,7 @@ function render(results: RepoResult[]): void {
 function main(): void {
   const args = process.argv.slice(2);
   const asJson = args.includes("--json");
+  includeI18n = args.includes("--include-i18n");
   const csvIdx = args.indexOf("--csv");
   const csvPath = csvIdx !== -1 ? args[csvIdx + 1] : undefined;
   // Guard the -1 case: without --csv, `csvIdx + 1` is 0 and would swallow the
