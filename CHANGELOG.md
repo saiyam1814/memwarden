@@ -3,7 +3,7 @@
 All notable changes to memwarden. Dates are release dates; the format loosely follows
 [Keep a Changelog](https://keepachangelog.com/).
 
-## 0.0.7 - unreleased
+## 0.0.7 - 2026-08-24
 
 Follow-ups to the 0.0.6 beta, all found by running the tool against a real
 install rather than a fixture.
