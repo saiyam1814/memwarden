@@ -73,6 +73,10 @@ jobs:
             echo "note: a present-but-stale token PREVENTS the OIDC fallback. If this"
             echo "      step 404s, either refresh the token or delete the secret and"
             echo "      configure npm Trusted Publishing for this repo + workflow."
+            echo "note: if the account requires 2FA for writes, NO token can work here"
+            echo "      (npm demands an OTP, which CI cannot supply). Trusted Publishing"
+            echo "      is the only CI-compatible path in that case — and it requires"
+            echo "      this secret to be ABSENT."
           else
             echo "auth: no NPM_TOKEN secret — publishing via OIDC trusted publishing."
             echo "note: this requires a trusted publisher configured on npmjs.com for"
@@ -92,7 +96,17 @@ jobs:
             export NODE_AUTH_TOKEN="$NPM_TOKEN"
           fi
           if ! npm publish --provenance --access public 2>&1 | tee publish.log; then
-            if grep -q "E404\|404 Not Found - PUT" publish.log; then
+            if grep -q "EOTP\|one-time password" publish.log; then
+              echo "::error::npm accepted the token but demands a one-time password (EOTP)."
+              echo "::error::The account has 2FA required for writes, and CI can NEVER supply an OTP."
+              echo "::error::A token cannot fix this. Use Trusted Publishing instead:"
+              echo "::error::  1. npmjs.com -> package 'memwarden' -> Settings -> Trusted Publisher"
+              echo "::error::     GitHub Actions | org saiyam1814 | repo memwarden | release.yml"
+              echo "::error::  2. gh secret delete NPM_TOKEN   (its presence blocks the OIDC path)"
+              echo "::error::  3. re-run this workflow"
+              echo "::error::OIDC is exempt from OTP because the workflow identity is attested,"
+              echo "::error::so this is the only CI-compatible option short of weakening 2FA."
+            elif grep -q "E404\|404 Not Found - PUT" publish.log; then
               echo "::error::npm rejected the credentials for this package (E404 on PUT)."
               echo "::error::The package exists, so this is an AUTH failure, not a missing name."
               if [ -n "$NPM_TOKEN" ]; then
