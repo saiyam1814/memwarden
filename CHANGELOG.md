@@ -3,6 +3,47 @@
 All notable changes to memwarden. Dates are release dates; the format loosely follows
 [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.0.8 - 2026-08-24
+
+One fix, and it is the one that decides whether any of the rest matters.
+
+### Fixed
+- **Memories describe the change, not the tool** ([#3](https://github.com/saiyam1814/memwarden/issues/3)).
+  Inspecting a real six-week install found 379 stored memories shaped like
+  `title: "Write"` with the raw tool-input JSON as the body and `facts`/`concepts`
+  always empty. Every title was one of six tool names, so nothing was rankable;
+  every body was a JSON blob, so nothing was readable; and hybrid search had
+  almost no real terms to match on. Provenance and hashing worked perfectly and
+  were verifying junk.
+
+  Extraction is now rule-based (still zero-LLM, still no token spend): titles
+  describe the change (`auth.ts: ROTATE_MS = 900_000 → ROTATE_MS = 3_600_000`,
+  `npm test -- --coverage`, `Searched "authentication"`), bodies are prose with
+  raw tool input never stored as content, `facts` carry the actual change, the
+  command run and error lines, and `concepts` are mined from path segments and
+  code-shaped symbols. A bare read with nothing extractable now sinks below the
+  retention floor so the sweep ages it out instead of distilling it into a
+  permanent row.
+
+  Five further defects were found by inspecting live captures rather than
+  fixtures, each now pinned by a test: loose error matching that fired on any
+  file merely mentioning an error and on `{"success":true}` envelopes (marking
+  *every* capture importance 6 and destroying ranking); raw JSON leaking back
+  into facts; the OS username leaking into concepts from `/Users/<name>/…` on
+  every memory; escape sequences fusing into identifiers (`\tisPremium` →
+  `tisPremium`); and shouty English (`THE`, `GATE`, `PASS`) matching
+  CONSTANT_CASE and burying real identifiers.
+
+  A regression gate now fails the suite if any title is a bare tool name or any
+  body parses as JSON carrying a `file_path`. Three pre-existing tests had been
+  asserting the old broken behavior (`expect(title).toBe("Grep")`) — the suite
+  was green because it was protecting the defect.
+
+### Note for existing installs
+Memories captured before this release keep their old shape. They age out through
+normal retention, or `memwarden doctor . --fix-stale` clears the stale ones now.
+New captures are correct immediately after upgrading.
+
 ## 0.0.7 - 2026-08-24
 
 Follow-ups to the 0.0.6 beta, all found by running the tool against a real
