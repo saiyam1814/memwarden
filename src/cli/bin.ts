@@ -1329,6 +1329,93 @@ function purgeBrain(dataDir: string): void {
   );
 }
 
+// --- `memwarden fleet` ---------------------------------------------
+//
+// Fleet mode: the coordination surface for many agents sharing one brain.
+// `fleet status` is the live swarm view — which agents are active in this
+// project right now, what each is touching, and when they were last seen
+// (#26). Registry rows come from mem::observe (src/functions/fleet.ts);
+// orchestrators consume the same REST route via `--json`.
+
+async function fleet(rest: string[]): Promise<void> {
+  const [sub, ...args] = rest;
+  if (sub !== "status") {
+    console.log(
+      "usage: memwarden fleet status [--cwd dir] [--json]   # agents active in this project right now",
+    );
+    process.exit(sub ? 1 : 0);
+  }
+  return fleetStatus(args);
+}
+
+/** "2m ago" for the last-seen column; falls back to the raw stamp. */
+function agoLabel(iso: string): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return iso;
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  return `${Math.round(s / 3600)}h ago`;
+}
+
+async function fleetStatus(rest: string[]): Promise<void> {
+  const cwdIdx = rest.indexOf("--cwd");
+  const project =
+    cwdIdx !== -1 && rest[cwdIdx + 1]
+      ? resolve(rest[cwdIdx + 1]!)
+      : process.cwd();
+  const asJson = rest.includes("--json");
+
+  const res = await fetch(`${DAEMON_URL}/memwarden/fleet/status`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ project }),
+  });
+  if (!res.ok) throw new Error(`fleet status failed: HTTP ${res.status}`);
+  const r = (await res.json()) as {
+    project: string;
+    agents: Array<{
+      sessionId: string;
+      agentId?: string;
+      host?: string;
+      branch?: string;
+      files: string[];
+      captureCount: number;
+      lastSeen: string;
+    }>;
+  };
+
+  if (asJson) {
+    console.log(JSON.stringify(r, null, 2));
+    return;
+  }
+
+  console.log(`\nmemwarden fleet — ${project}\n`);
+  if (r.agents.length === 0) {
+    console.log(
+      `  no agents active in this project in the last 15m.\n` +
+        `  (agents appear here as their captures reach the daemon)\n`,
+    );
+    return;
+  }
+  for (const a of r.agents) {
+    const who = (a.host ?? "unknown").padEnd(13);
+    const id = a.agentId ?? a.sessionId.slice(0, 16);
+    const branch = a.branch ? `  on ${a.branch}` : "";
+    console.log(
+      `  ● ${who} ${id}${branch}  — ${a.captureCount} captures, last seen ${agoLabel(a.lastSeen)}`,
+    );
+    if (a.files.length > 0) {
+      const recent = a.files.slice(-3).reverse();
+      const more = a.files.length - recent.length;
+      console.log(
+        `      touching: ${recent.join(", ")}${more > 0 ? ` (+${more} more)` : ""}`,
+      );
+    }
+  }
+  console.log("");
+}
+
 // --- `memwarden status` --------------------------------------------
 //
 // One honest snapshot: daemon + live stats, semantic recall, the vector
@@ -1548,6 +1635,7 @@ function printUsage(): void {
       "  memwarden exclude [path] | include [path] | exclude --list   # per-project: no capture, no injection\n" +
       "  memwarden forget <observationId> [--erase] [--json]  # delete one memory, get a tamper-evident receipt; --erase nulls its oplog content too\n" +
       "  memwarden compact [--dry-run] [--json]          # erase all forgotten memories from the oplog, migrate the chain, VACUUM\n" +
+      "  memwarden fleet status [--cwd dir] [--json]     # live swarm view: agents active in this project\n" +
       "  memwarden dejafix lookup [--cwd dir] < err.txt  # find a verified prior fix for an error\n" +
       '  memwarden dejafix record --fix "…" [--file f] [--root-cause s] < err.txt\n' +
       "  memwarden export <file>\n" +
@@ -1595,6 +1683,8 @@ async function main(): Promise<void> {
       return forget(rest);
     case "compact":
       return compact(rest);
+    case "fleet":
+      return fleet(rest);
     case "dejafix":
       return dejafix(rest);
     case "export":
