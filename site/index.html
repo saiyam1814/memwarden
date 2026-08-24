@@ -4,9 +4,9 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>memwarden - the memory firewall for AI coding agents</title>
-<meta name="description" content="Your agent's memory is lying to you. Prove yours isn't. Self-custodied memory for AI coding agents: memory whose provenance no longer checks out is blocked before injection. Local-first, cross-tool, no API key." />
+<meta name="description" content="Code changes. Stored memory can outlive its source. memwarden exposes that drift and blocks memory whose provenance no longer checks out before injection. Local-first, cross-tool, no API key." />
 <meta property="og:title" content="memwarden - the memory firewall for AI coding agents" />
-<meta property="og:description" content="Your agent's memory is lying to you. Prove yours isn't. Known-stale memory is blocked before injection; what passes is trust-labeled." />
+<meta property="og:description" content="Expose source-drift before recall. Known-stale memory is blocked before injection; what passes is trust-labeled." />
 <meta property="og:type" content="website" />
 <meta property="og:url" content="https://github.com/saiyam1814/memwarden" />
 <meta property="og:site_name" content="memwarden" />
@@ -219,7 +219,7 @@
 
   <header>
     <span class="pill"><span class="dot"></span> the memory firewall for AI coding agents</span>
-    <h1>Your agent's memory<br/>is lying to you.<br/><span class="grad">Prove yours isn't.</span></h1>
+    <h1>Stored memory can<br/>outlive its source.<br/><span class="grad">Expose the drift.</span></h1>
     <p class="sub">Self-custodied, cross-tool memory that ties every fact to your repo. Memory whose
       source no longer checks out is <b>blocked before it reaches the model</b> - and what passes is
       labeled for exactly what it is. One command wires every agent you use.</p>
@@ -244,12 +244,12 @@
   </header>
 
   <section id="why">
-    <h2>The problem isn't forgetting. It's confidently wrong recall.</h2>
-    <p class="lead">A stored fact silently goes stale - it points at code you've since changed or
-      deleted - and the agent injects it with full confidence anyway. OWASP added Memory Poisoning
-      (ASI06) to its 2026 Agentic Top 10. Most memory still stores everything and trusts everything.
-      A memory that points at code you deleted is worse than none. memwarden flips the default:
-      memory is untrusted until its source still checks out.</p>
+    <h2>The problem isn't forgetting. It's unexamined source drift.</h2>
+    <p class="lead">A stored fact can outlive the code it points at, leaving evidence that needs
+      revalidation. That drift exposure is not proof the memory is wrong; it is the risk unchecked
+      layers carry when they inject without looking. OWASP added Memory Poisoning (ASI06) to its 2026
+      Agentic Top 10. memwarden flips the default: memory is untrusted until its source still checks
+      out.</p>
     <div class="grid">
       <div class="feat"><div class="ic">🩺</div><h3>Verified Recall - the anti-feature</h3><p>Memory is firewalled before it reaches a model. Stale memory is never injected. <code>memwarden doctor</code> runs the same check as a red/yellow/green audit against any existing store. Point it at your own memory and watch it light up yellow.</p></div>
       <div class="feat"><div class="ic">🪂</div><h3>Self-custodied &amp; portable</h3><p>Your second brain shouldn't depend on a vendor's roadmap. memwarden is local-first, tamper-evident, and portable: one <code>export</code> produces a Brain Bundle you can move between machines or agents. Zero cloud - the data lives at <code>~/.memwarden</code> and nowhere else.</p></div>

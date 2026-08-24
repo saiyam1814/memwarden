@@ -4,7 +4,7 @@
 
 ### The memory firewall for AI coding agents
 
-**Your agent's memory is lying to you. Prove yours isn't.**
+**Code changes. Stored memory can outlive its source. Expose the drift.**
 
 Memory whose source no longer checks out is **blocked before it reaches the model** - and everything that passes is labeled for exactly what it is.
 
@@ -27,9 +27,10 @@ npm install -g memwarden && memwarden up    # persistent: wire every agent, one 
 
 memwarden is **self-custodied, verified memory** shared across every coding agent you use - Claude
 Code, Codex, Cursor, Gemini CLI, Kiro, OpenCode, and more. The point isn't to remember *more*. It's
-that a coding agent can settle a question general-purpose memory can't: **is this memory still true?**
-Every code-backed memory is tied to a SHA-256 hash of the files it references; on recall the live repo
-is re-hashed, and anything that no longer checks out is refused before the model ever sees it.
+that a coding agent can settle a question general-purpose memory can't: **does this memory's recorded
+source still match?** Every code-backed memory is tied to a SHA-256 hash of the files it references;
+on recall the live repo is re-hashed, and anything that no longer checks out is refused before the
+model ever sees it.
 
 ## 🚀 Quick start
 
@@ -51,19 +52,20 @@ memwarden up
 
 ## 🤔 Why memwarden
 
-The failure mode that hurts isn't forgetting - it's **confidently wrong recall**. A stored fact goes
-stale, points at code you've since changed or deleted, and the agent injects it with full confidence
-anyway. OWASP added Memory Poisoning (ASI06) to its 2026 Agentic Top 10, yet memory layers still tend
-to store everything and trust everything.
+The failure mode that hurts isn't forgetting - it's **unexamined source drift**. A stored fact can
+outlive the code it points at, leaving evidence that needs revalidation. That drift exposure is not
+proof the memory is wrong; it is the risk unchecked layers carry when they inject without looking.
+OWASP added Memory Poisoning (ASI06) to its 2026 Agentic Top 10, yet memory layers still tend to store
+everything and trust everything.
 
 memwarden flips the default: **memory is untrusted until its source still checks out.**
 
 | | Typical memory layer | memwarden |
 | --- | --- | --- |
-| Goal | remember *more* | remember what's *still true* |
-| Stale memory | injected, confidently | **blocked before the model sees it** |
+| Goal | remember *more* | revalidate source before recall |
+| Source drift | not checked | **blocked before the model sees it** |
 | What reaches the model | one undifferentiated pile | labeled `verified` / `sourced` / `unsourced` |
-| Ground truth | none | **source-file content hashes** |
+| Revalidation evidence | none | **source-file content hashes** |
 | Hosting | usually a vendor cloud | **local-first, self-custodied, portable** |
 
 ## ✨ What you get
