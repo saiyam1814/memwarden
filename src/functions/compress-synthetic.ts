@@ -302,11 +302,47 @@ function narrativeFor(args: {
 }): string {
   const parts: string[] = [args.title];
   if (args.facts.length > 0) parts.push(args.facts.join("; "));
-  // Tool output is evidence, but only its first meaningful stretch — the rest
-  // is scrollback, and scrollback was the bulk of what used to get stored.
-  const out = oneLine(args.outputText);
-  if (out) parts.push(clip(out, 220));
+  const out = summarizeOutput(args.outputText);
+  if (out) parts.push(out);
   return clip(parts.join(". "), 600);
+}
+
+/**
+ * Tool output is evidence, but most of it is a JSON envelope, and appending it
+ * verbatim put payloads straight back into the body — the exact defect this
+ * module exists to remove. Observed after the first pass:
+ *
+ *   "Wrote inspect-store.ts. {"type":"create","filePath":"…","content":"//\n…"
+ *
+ * i.e. an entire written file stored inside its own memory. So an envelope is
+ * mined for the one or two fields a human would actually read, and everything
+ * else is dropped. `content`/`file` fields are deliberately NOT harvested: they
+ * are the whole payload, which is what we are trying not to keep.
+ */
+function summarizeOutput(text: string): string {
+  const t = text.trim();
+  if (!t) return "";
+  if (!isJsonish(t)) return clip(oneLine(t), 220);
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(t);
+  } catch {
+    // Malformed or truncated JSON is still a payload, not prose.
+    return "";
+  }
+  if (!parsed || typeof parsed !== "object") return "";
+  const o = parsed as Record<string, unknown>;
+  for (const key of ["stdout", "output", "stderr", "message", "error", "result"]) {
+    const v = o[key];
+    if (typeof v === "string" && v.trim()) {
+      const line = oneLine(v);
+      // A nested payload is no better than the outer one.
+      if (isJsonish(line)) return "";
+      return clip(line, 220);
+    }
+  }
+  return "";
 }
 
 export function buildSyntheticCompression(raw: RawObservation): CompressedObservation {
