@@ -220,7 +220,8 @@ describe("mem::search (BM25)", () => {
       payload: { query: "authentication" },
     });
     expect(res.results.length).toBeGreaterThan(0);
-    expect(res.results[0]?.observation.title).toBe("Grep");
+    // Titles describe the action, not the tool: "Grep" told the reader nothing.
+    expect(res.results[0]?.observation.title).toBe('Searched "authentication"');
   });
 
   it("lazily rebuilds the BM25 index from KV when empty", async () => {
