@@ -130,9 +130,10 @@ dishonest in practice, and they are listed first on purpose.
   the layer was a sieve. At the TTL an observation carrying file provenance is now promoted
   into a Memory (via `distillMembers`, the same primitive the consolidate pipeline uses),
   carrying its content and capture-time hashes verbatim so Verified Recall still re-checks
-  it against the live file. Repeat touches of a file converge on one memory id, so storage
-  still shrinks. Observations with no provenance have nothing durable to promote and are
-  deleted as before. This also makes sweep-vs-consolidate ordering irrelevant.
+  it against the live file. Repeat support for the same claim and evidence converges on one
+  memory id; distinct same-file claims, snapshots, and trust boundaries remain separate.
+  Observations with no provenance have nothing durable to promote and are deleted as before.
+  This also makes sweep-vs-consolidate ordering irrelevant.
   `MEMWARDEN_FORGET_PROMOTE=off` restores the old behavior.
 - **Consolidation reaches published builds.** The distillation pipeline (0.0.5 development)
   was absent from the published 0.0.5 tarball, which is why installs reported 0 memories.

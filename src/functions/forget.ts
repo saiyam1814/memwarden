@@ -15,10 +15,11 @@
 // Now, at the TTL:
 //   - an observation carrying FILE PROVENANCE is promoted into a Memory
 //     (distillMembers, the same primitive mem::consolidate-pipeline uses), so
-//     its knowledge and its capture-time file hashes survive as one compact,
-//     verifiable row. Storage still shrinks — the raw row is pruned and repeat
-//     touches of a file converge on a single memory id — but nothing
-//     code-backed is lost.
+//     its complete claim and capture-time file hashes survive as one compact,
+//     verifiable row. Storage still shrinks: repeat support for the SAME claim
+//     and evidence converges on one memory id. Distinct claims, file snapshots,
+//     or trust boundaries get separate ids, so nothing code-backed is folded
+//     merely because it mentions the same file.
 //   - an observation with NO provenance at all (no files to verify against) is
 //     deleted as before. There is nothing durable to promote, and keeping
 //     unsourced text forever is how a memory layer rots.
