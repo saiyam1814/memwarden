@@ -31,6 +31,7 @@ import { isAutoCompressEnabled, getAgentId } from "./config.js";
 import { buildSyntheticCompression } from "./compress-synthetic.js";
 import { buildSessionHandoff, MAX_STORED_PROMPT_CHARS } from "./handoff.js";
 import { extractProvenance } from "./provenance.js";
+import { recordFleetActivity } from "./fleet.js";
 import { hashFiles } from "./verify.js";
 import { recordFix, looksLikeResolvedFix } from "./dejafix.js";
 import { getSearchIndex, vectorIndexAddGuarded, vectorIndexRemove } from "./search.js";
@@ -306,6 +307,31 @@ export function registerObserveFunction(
       }
 
       await kv.set(KV.observations(payload.sessionId), obsId, raw);
+
+      // Fleet registry (#25): record this agent as active in the project.
+      // Mirrors the observation write above — every hookType that reaches
+      // this point bumps captureCount/lastSeen, not just tool captures.
+      // session_end instead REMOVES the row: the agent is no longer active
+      // ("stop" doesn't count — per-turn Stop hosts fire it every turn).
+      // Best-effort: the registry must never break a capture.
+      try {
+        await recordFleetActivity(kv, {
+          sessionId: payload.sessionId,
+          ...(inheritedAgentId ? { agentId: inheritedAgentId } : {}),
+          ...(payload.agent ? { host: payload.agent } : {}),
+          ...(typeof payload.project === "string" ? { project: payload.project } : {}),
+          ...(typeof payload.cwd === "string" ? { cwd: payload.cwd } : {}),
+          ...(stableProjectKey ? { projectKey: stableProjectKey } : {}),
+          files: extractProvenance(payload).files ?? [],
+          timestamp: payload.timestamp,
+          ...(payload.hookType === "session_end" ? { ended: true } : {}),
+        });
+      } catch (err) {
+        logger.warn("fleet registry update failed", {
+          sessionId: payload.sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
 
       if (dedupMap && dedupHash) {
         dedupMap.record(dedupHash);

@@ -60,6 +60,12 @@ export const KV = {
   // Liveness: last-seen timestamp per agent host, updated by every hook
   // invocation that reaches the daemon (`memwarden status` reads it back).
   hostHeartbeats: "mem:hosts",
+  // Fleet mode: one row per active agent instance (keyed by sessionId),
+  // upserted on every capture (see fleet.ts / mem::observe). Unlike
+  // hostHeartbeats (per-host, e.g. "claude-code"), this is per-project-agent
+  // — it's what "which agents are working in this project right now, and on
+  // what" reads from.
+  fleetAgents: "mem:fleet:agents",
 } as const;
 
 export const STREAM = {
