@@ -13,6 +13,9 @@ these at boot and the CLI bakes `MEMWARDEN_*` tuning into the service unit).
 | `MEMWARDEN_QUANT_BITS` | `4` | `2` or `4` bits per dimension |
 | `MEMWARDEN_FORGET_TTL_DAYS` | `30` | retention window for the forget sweep: ordinary observations older than this that were never accessed are swept |
 | `MEMWARDEN_FORGET_IMPORTANCE_FLOOR` | `5` | observations at or below this importance are sweepable once past the TTL; explicitly-important records (>5, e.g. user prompts) and anything ever accessed are always kept |
+| `MEMWARDEN_FORGET_PROMOTE` | on | promote expiring code-backed observations into durable claim memories; `off` restores delete-only behavior |
+| `MEMWARDEN_CONSOLIDATE_MIN_GROUP` | `3` | minimum number of evidence-equivalent copies required before proactive consolidation folds them |
+| `MEMWARDEN_CONSOLIDATE_IMPORTANCE_FLOOR` | `5` | observations above this importance are protected from proactive consolidation |
 | `MEMWARDEN_SECRET` | unset | bearer token for the REST API and the proxy (clients send it as their API key) |
 | `MEMWARDEN_INJECT` | on | `off` disables ALL auto-injection (SessionStart, Déjà Fix, proxy); the recall prompt and MCP tools still work |
 | `MEMWARDEN_RECALL_POLICY` | `balanced` | `verified-only` auto-injects ONLY hash-verified-current memory (strict ASI06 stance); `balanced` blocks detected-stale memory and keeps the rest (sourced and unsourced), each labeled |
@@ -20,6 +23,28 @@ these at boot and the CLI bakes `MEMWARDEN_*` tuning into the service unit).
 | `MEMWARDEN_UPSTREAM_URL` | unset | upstream OpenAI-compatible base URL; enables the proxy |
 | `MEMWARDEN_UPSTREAM_KEY` | unset | API key forwarded to the upstream (omit for local models) |
 | `MEMWARDEN_PROXY_PORT` | `3141` | port the memory proxy listens on |
+
+## Durability, consolidation, and retention
+
+Code-backed knowledge is distilled, never dropped. Consolidation uses the primary file only as a
+candidate bucket; it folds observations only when a deterministic identity establishes that their
+claim payload and trust-relevant evidence are equivalent. Claim comparison normalizes Unicode,
+whitespace, and fact/concept ordering, but does not ignore case, punctuation, code symbols, or
+numbers. Evidence comparison includes the file set and hashes, cwd, command, agent, and
+`mixedTrust`/confirmation state. Capture time may differ when all of that evidence is otherwise the
+same. Each resulting Memory keeps the structured facts, concepts, source-observation ids, and one
+verbatim provenance record for that evidence-equivalent claim.
+
+Consequently, repeated copies of the same claim against the same file snapshot collapse to one
+active Memory row and bound duplicate-row growth. Distinct claims about one file, changed file
+hashes, and mixed-trust or hashless evidence remain separate and independently searchable. At the
+TTL, each remaining code-backed observation is promoted under the same claim/evidence identity
+before its raw row is removed; an installation or indexing failure leaves the source row for retry.
+Oplog compaction may prune superseded payloads for repeated writes to one claim key because the
+latest payload still contains that claim and its accumulated lineage. Separate claim keys remain
+live and are not superseded by activity elsewhere in the file. Expiring observations with no file
+provenance may still be removed, as may exact evidence-equivalent duplicates after their successor
+is durable.
 
 ## Per-project and per-session switches
 

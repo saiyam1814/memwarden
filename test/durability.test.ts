@@ -11,8 +11,8 @@
 //      (knowledge + capture-time hashes survive; the raw row is pruned)
 //   2. an expiring observation WITHOUT provenance is still deleted (nothing
 //      durable to promote, and unsourced text kept forever is how a store rots)
-// plus the properties that make it safe: order-independence vs consolidation,
-// hash fidelity (no invented provenance), and protection of important rows.
+// plus the properties that make it safe: claim isolation across repeated TTL
+// promotion, order-independence, hash fidelity, and protection of important rows.
 
 import { beforeEach, afterEach, describe, expect, it } from "vitest";
 import {
@@ -68,16 +68,18 @@ async function seedObservation(opts: {
   codeBacked: boolean;
   importance?: number;
   file?: string;
+  claim?: string;
 }): Promise<CompressedObservation> {
   const file = opts.file ?? "src/auth.ts";
+  const claim = opts.claim ?? "refresh tokens rotate every 15 minutes";
   const obs = {
     id: opts.id,
     sessionId: opts.sessionId,
     timestamp: new Date(Date.now() - opts.ageDays * DAY).toISOString(),
     type: "file_edit",
     title: `Edited ${file}`,
-    narrative: "refresh tokens rotate every 15 minutes",
-    facts: ["rotation is 15m"],
+    narrative: claim,
+    facts: [claim],
     concepts: ["auth", "tokens"],
     importance: opts.importance ?? 5,
     ...(opts.codeBacked
@@ -165,7 +167,7 @@ describe("durability contract: code-backed knowledge is distilled, never dropped
     expect(await kv.get(KV.observations("s1"), "important")).toBeTruthy();
   });
 
-  it("repeated touches of one file converge on a SINGLE memory (storage stays bounded)", async () => {
+  it("repeated support for one claim/evidence identity converges on a SINGLE memory", async () => {
     await seedSession("s1", "/repo");
     for (let i = 0; i < 5; i++) {
       await seedObservation({
@@ -178,12 +180,64 @@ describe("durability contract: code-backed knowledge is distilled, never dropped
 
     const r = await sweep();
     expect(r.promoted).toBe(5);
-    // Same (project, file) key as consolidation uses -> one memory, not five.
+    // Same claim + evidence key as consolidation uses -> one memory, not five.
     const memories = await kv.list<Memory>(KV.memories);
     expect(memories).toHaveLength(1);
     // Every source is recorded, and reinforcement raises standing.
     expect(memories[0]!.sourceObservationIds).toHaveLength(5);
     expect(memories[0]!.strength).toBeGreaterThan(5);
+  });
+
+  it("repeated TTL promotion cannot erase three distinct same-file claims", async () => {
+    await seedSession("s1", "/repo");
+    const claims = [
+      ["rotation", "refresh tokens rotate every 15 minutes"],
+      ["revocation", "password changes revoke all refresh tokens"],
+      ["rate-limit", "failed refreshes are rate-limited by account"],
+    ] as const;
+    for (const [id, claim] of claims) {
+      await seedObservation({
+        sessionId: "s1",
+        id,
+        ageDays: 60,
+        codeBacked: true,
+        claim,
+      });
+    }
+
+    expect((await sweep()).promoted).toBe(3);
+    let memories = await kv.list<Memory>(KV.memories);
+    expect(memories).toHaveLength(3);
+    for (const [id, claim] of claims) {
+      const memory = memories.find((candidate) => candidate.content.includes(claim));
+      expect(memory).toBeDefined();
+      expect(memory!.sourceObservationIds).toContain(id);
+      expect(getSearchIndex().search(claim, 5).map((hit) => hit.obsId)).toContain(
+        memory!.id,
+      );
+    }
+
+    // A later duplicate reinforces only its own claim. The two other memory
+    // keys and their searchable content survive the rewrite.
+    await seedObservation({
+      sessionId: "s1",
+      id: "rotation-again",
+      ageDays: 60,
+      codeBacked: true,
+      claim: claims[0][1],
+    });
+    expect((await sweep()).promoted).toBe(1);
+
+    memories = await kv.list<Memory>(KV.memories);
+    expect(memories).toHaveLength(3);
+    const rotation = memories.find((memory) => memory.content.includes(claims[0][1]));
+    expect(rotation?.version).toBe(2);
+    expect(rotation?.sourceObservationIds).toEqual(
+      expect.arrayContaining(["rotation", "rotation-again"]),
+    );
+    for (const [, claim] of claims.slice(1)) {
+      expect(memories.some((memory) => memory.content.includes(claim))).toBe(true);
+    }
   });
 
   it("is order-independent: sweeping BEFORE consolidation loses nothing", async () => {

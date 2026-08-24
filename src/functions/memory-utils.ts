@@ -13,11 +13,20 @@ export function memoryToObservation(memory: Memory): CompressedObservation {
     timestamp: memory.createdAt,
     type: "decision",
     title: memory.title,
-    facts: [memory.content],
+    facts: memory.facts ?? [memory.content],
     narrative: memory.content,
     concepts: memory.concepts,
     files: memory.files,
     importance: memory.strength,
+    ...(memory.subtitle !== undefined ? { subtitle: memory.subtitle } : {}),
+    ...(memory.confidence !== undefined ? { confidence: memory.confidence } : {}),
+    ...(memory.imageRef !== undefined ? { imageRef: memory.imageRef } : {}),
+    ...(memory.imageData !== undefined ? { imageData: memory.imageData } : {}),
+    ...(memory.imageDescription !== undefined
+      ? { imageDescription: memory.imageDescription }
+      : {}),
+    ...(memory.modality !== undefined ? { modality: memory.modality } : {}),
+    ...(memory.agentId !== undefined ? { agentId: memory.agentId } : {}),
   };
   // Carry provenance so Memory records go through Verified Recall too. If a
   // record has no provenance but does reference files, synthesize a minimal
