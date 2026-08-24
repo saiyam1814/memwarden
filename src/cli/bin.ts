@@ -1956,6 +1956,14 @@ interface StatsBody {
   embedding?: { provider: string; dimensions: number } | null;
   compression?: { algorithm: string; bits: number; ratio: number } | null;
   hosts?: Array<{ host?: string; lastSeen?: string }>;
+  firewall?: {
+    days: number;
+    recalls: number;
+    refused: number;
+    injected: number;
+    dejafix: number;
+    hasData: boolean;
+  } | null;
 }
 
 function ownVersion(): string {
@@ -2083,6 +2091,21 @@ async function status(rest: string[]): Promise<void> {
       console.log(
         `            ⚠ ${obs} captures but 0 distilled memories — distillation is not running.\n` +
           `              Upgrade (npm i -g memwarden@latest) and restart: 'memwarden down && memwarden up'.`,
+      );
+    }
+    // What the firewall DID. Without this line memwarden's core value is
+    // invisible: it blocked stale memory for six weeks on the maintainer's own
+    // machine and never once said so. Silent protection reads as no protection.
+    const fw = stats.firewall;
+    if (fw && fw.hasData) {
+      const parts = [
+        `${fw.refused} stale refused`,
+        `${fw.injected} verified served`,
+      ];
+      if (fw.dejafix > 0) parts.push(`${fw.dejafix} déjà-fix hits`);
+      console.log(
+        `  firewall  ${fw.refused > 0 ? "🛡" : "✓"} ${parts.join(" · ")}` +
+          `  (last ${fw.days}d, ${fw.recalls} recalls)`,
       );
     }
     // Storage honesty: a resident daemon that quietly grows to hundreds of MB

@@ -33,6 +33,7 @@ import { memoryToObservation } from "./memory-utils.js";
 import { canonicalizePath } from "./paths.js";
 import { gitProjectKey } from "./git-identity.js";
 import { classifyProvenance, type Verdict } from "./verify.js";
+import { recordFirewallActivity } from "./firewall-stats.js";
 import { recordAccessBatch } from "./access-tracker.js";
 import { loadVectorIndex, persistVectorIndex } from "./vector-persistence.js";
 import { logger } from "./logger.js";
@@ -850,6 +851,18 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       }
       if (safeOnly && staleDropped > 0) {
         logger.info("Verified Recall dropped stale results", { dropped: staleDropped });
+      }
+      // Record what the firewall decided, so `status` can show it later. One
+      // recall event, the memories actually withheld, and the ones served —
+      // never per-candidate or per-scan-pass, which would inflate the numbers.
+      // Best-effort and deliberately not awaited into the critical path's
+      // failure modes: a stats write must never fail a recall.
+      if (safeOnly) {
+        void recordFirewallActivity(kv, {
+          recall: true,
+          refused: staleDropped,
+          injected: candidates.length,
+        });
       }
       const firewallMeta = safeOnly
         ? { refused: staleDropped, samples: refusalSamples }

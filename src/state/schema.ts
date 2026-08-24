@@ -66,6 +66,11 @@ export const KV = {
   // — it's what "which agents are working in this project right now, and on
   // what" reads from.
   fleetAgents: "mem:fleet:agents",
+  // What the firewall actually DID, in daily buckets (one row per UTC date).
+  // A firewall that works silently is indistinguishable from one that does
+  // nothing, and invisible value churns — this is the evidence surface behind
+  // `memwarden status`. Bounded by a retention window, not unbounded history.
+  firewallStats: "mem:firewall:daily",
 } as const;
 
 export const STREAM = {

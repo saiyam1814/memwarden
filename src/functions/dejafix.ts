@@ -25,6 +25,7 @@ import { canonicalizePath } from "./paths.js";
 import { withKeyedLock } from "./keyed-mutex.js";
 import { generateId } from "../state/schema.js";
 import { logger } from "./logger.js";
+import { recordFirewallActivity } from "./firewall-stats.js";
 
 // Dedicated KV scope, in the `mem:` namespace like every other scope in
 // schema.ts. Kept local to this module so the feature is self-contained; the
@@ -450,6 +451,13 @@ export function registerDejaFixFunctions(sdk: ISdk, kv: StateKV): void {
       if (!signature || !cwd) return { signature, fixes: [] };
       try {
         const fixes = await lookupFix(kv, errorText, cwd);
+        // A hit here is the moment cross-agent memory visibly beats per-tool
+        // memory (one agent's fix surfacing in another), so it earns its own
+        // counter in `status`. Only actual hits count; an empty lookup is not
+        // a win. Best-effort, never in the way of returning the fix.
+        if (fixes.length > 0) {
+          void recordFirewallActivity(kv, { dejafix: fixes.length });
+        }
         return { signature, fixes };
       } catch (err) {
         logger.warn("mem::dejafix_lookup failed", {
