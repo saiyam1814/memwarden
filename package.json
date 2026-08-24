@@ -44,7 +44,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "demo:firewall": "tsx demo/firewall.ts",
-    "eval": "tsx eval/firewall-eval.ts"
+    "eval": "tsx eval/firewall-eval.ts",
+    "eval:halflife": "tsx eval/memory-halflife.ts"
   },
   "license": "Apache-2.0",
   "dependencies": {
