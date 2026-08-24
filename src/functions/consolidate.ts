@@ -101,6 +101,149 @@ interface Grouped {
   members: Array<{ sessionId: string; obs: CompressedObservation }>;
 }
 
+export interface DistillMember {
+  sessionId: string;
+  obs: CompressedObservation;
+}
+
+/**
+ * Distill one (project, file) group into a single canonical Memory, then prune
+ * the source observations in lockstep with every index.
+ *
+ * Extracted so the retention sweep can reuse it. That matters more than code
+ * tidiness: `mem::auto-forget` used to DELETE expiring observations outright,
+ * with no check that anything durable had been distilled from them first. On a
+ * real install that made the whole layer a sieve — 15,771 observations captured,
+ * 0 memories, everything code-backed silently swept at the TTL. The durability
+ * contract is now "code-backed knowledge is distilled, never dropped", and this
+ * is the one implementation both paths go through.
+ *
+ * Returns null when the memory could not be written (nothing is pruned in that
+ * case — losing the raw rows without a memory to show for it is the exact
+ * failure this exists to prevent).
+ */
+export async function distillMembers(
+  kv: StateKV,
+  args: {
+    project: string;
+    primaryFile: string;
+    members: DistillMember[];
+    now: number;
+  },
+): Promise<{ memId: string; folded: number } | null> {
+  const { project, primaryFile, members, now } = args;
+  if (members.length === 0) return null;
+  const nowIso = new Date(now).toISOString();
+  const idx = getSearchIndex();
+
+  const groupObs = members.map((m) => m.obs);
+  const newest = newestOf(groupObs);
+  // Same (project, file) key the group map uses, so a promotion and a later
+  // consolidation of the same file converge on ONE memory id rather than
+  // creating a second copy.
+  const memId = fingerprintId("mem", `${project}\n${primaryFile}`);
+  const existing = await kv.get<Memory>(KV.memories, memId).catch(() => null);
+
+  const concepts = unique(groupObs.flatMap((o) => o.concepts ?? [])).slice(0, 24);
+  const files = unique([
+    primaryFile,
+    ...(newest.provenance?.files ?? newest.files ?? []),
+  ]);
+  const priorSources = existing?.sourceObservationIds ?? [];
+  const sourceObservationIds = unique([
+    ...priorSources,
+    ...groupObs.map((o) => o.id),
+  ]);
+  const sessionIds = unique([
+    ...(existing?.sessionIds ?? []),
+    ...members.map((m) => m.sessionId),
+  ]);
+  // Strength climbs with reinforcement (how many times the file was touched),
+  // capped at the 1-10 scale. Counted over ALL sources ever folded in, so a
+  // memory reinforced one promotion at a time still earns standing.
+  const strength = Math.min(
+    10,
+    5 + Math.floor(Math.log2(Math.max(2, sourceObservationIds.length))),
+  );
+
+  const memory: Memory = {
+    id: memId,
+    createdAt: existing?.createdAt ?? nowIso,
+    updatedAt: nowIso,
+    type: memoryTypeFor(newest),
+    title: newest.title || `Knowledge about ${primaryFile}`,
+    content: newest.narrative || (newest.facts ?? []).join(" "),
+    concepts,
+    files,
+    sessionIds,
+    strength,
+    version: (existing?.version ?? 0) + 1,
+    supersedes: sourceObservationIds,
+    sourceObservationIds,
+    isLatest: true,
+    ...(project !== "_" ? { project } : {}),
+    // Carry the newest observation's provenance forward VERBATIM so the memory
+    // verifies against the live file exactly as that observation would. No
+    // synthetic hashes are ever invented.
+    ...(newest.provenance ? { provenance: newest.provenance } : {}),
+  };
+
+  try {
+    await kv.set(KV.memories, memId, memory);
+  } catch (err) {
+    logger.warn("distill: failed to write memory", {
+      memId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+
+  // Refresh the live indexes for the memory (remove-then-add so a re-run
+  // replaces the prior version rather than duplicating it).
+  idx.remove(memId);
+  idx.add(memoryToObservation(memory));
+  vectorIndexRemove(memId);
+  await vectorIndexAddGuarded(
+    memId,
+    memory.sessionIds[0] ?? "memory",
+    memory.title + " " + memory.content,
+    { kind: "memory", logId: memId },
+  );
+
+  // Prune the source observations in lockstep with every index.
+  let folded = 0;
+  for (const m of members) {
+    try {
+      await kv.delete(KV.observations(m.sessionId), m.obs.id);
+      idx.remove(m.obs.id);
+      vectorIndexRemove(m.obs.id);
+      await deleteAccessLog(kv, m.obs.id);
+      folded++;
+    } catch (err) {
+      logger.warn("distill: failed to prune observation", {
+        obsId: m.obs.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // Retention bookkeeping: records how reinforced this memory is and when it
+  // last consolidated, so a retention policy has a real score to act on.
+  try {
+    await kv.set(KV.retentionScores, memId, {
+      memoryId: memId,
+      strength,
+      folded: sourceObservationIds.length,
+      version: memory.version,
+      lastConsolidated: nowIso,
+    });
+  } catch {
+    // best-effort: retention scoring must never fail the sweep
+  }
+
+  return { memId, folded };
+}
+
 export function registerConsolidateFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction(
     "mem::consolidate-pipeline",
@@ -183,107 +326,14 @@ export function registerConsolidateFunction(sdk: ISdk, kv: StateKV): void {
 
         if (foldable.length < threshold) continue; // not worth collapsing
 
-        const groupObs = foldable.map((m) => m.obs);
-        const newest = newestOf(groupObs);
-
-        const memId = fingerprintId("mem", g.key);
-        const existing = await kv
-          .get<Memory>(KV.memories, memId)
-          .catch(() => null);
-
-        const concepts = unique(groupObs.flatMap((o) => o.concepts ?? [])).slice(
-          0,
-          24,
-        );
-        const files = unique([
-          g.primaryFile,
-          ...(newest.provenance?.files ?? newest.files ?? []),
-        ]);
-        const sessionIds = unique(foldable.map((m) => m.sessionId));
-        const sourceObservationIds = groupObs.map((o) => o.id);
-        // Strength climbs with reinforcement (how many times the file was
-        // touched), capped at the 1-10 scale.
-        const strength = Math.min(
-          10,
-          5 + Math.floor(Math.log2(Math.max(2, foldable.length))),
-        );
-
-        const memory: Memory = {
-          id: memId,
-          createdAt: existing?.createdAt ?? nowIso,
-          updatedAt: nowIso,
-          type: memoryTypeFor(newest),
-          title: newest.title || `Knowledge about ${g.primaryFile}`,
-          content: newest.narrative || (newest.facts ?? []).join(" "),
-          concepts,
-          files,
-          sessionIds,
-          strength,
-          version: (existing?.version ?? 0) + 1,
-          supersedes: sourceObservationIds,
-          sourceObservationIds,
-          isLatest: true,
-          ...(g.project !== "_" ? { project: g.project } : {}),
-          // Carry the newest observation's provenance forward VERBATIM so the
-          // memory verifies against the live file exactly as that observation
-          // would. No synthetic hashes are ever invented.
-          ...(newest.provenance ? { provenance: newest.provenance } : {}),
-        };
-
-        try {
-          await kv.set(KV.memories, memId, memory);
-        } catch (err) {
-          logger.warn("consolidate: failed to write memory", {
-            memId,
-            error: err instanceof Error ? err.message : String(err),
-          });
-          continue;
-        }
-
-        // Refresh the live indexes for the memory (remove-then-add so a
-        // re-run replaces the prior version rather than duplicating it).
-        idx.remove(memId);
-        idx.add(memoryToObservation(memory));
-        vectorIndexRemove(memId);
-        await vectorIndexAddGuarded(
-          memId,
-          memory.sessionIds[0] ?? "memory",
-          memory.title + " " + memory.content,
-          { kind: "memory", logId: memId },
-        );
-
-        // Prune the folded source observations in lockstep with every index,
-        // same discipline as mem::auto-forget.
-        for (const m of foldable) {
-          try {
-            await kv.delete(KV.observations(m.sessionId), m.obs.id);
-            idx.remove(m.obs.id);
-            vectorIndexRemove(m.obs.id);
-            await deleteAccessLog(kv, m.obs.id);
-            folded++;
-          } catch (err) {
-            logger.warn("consolidate: failed to prune observation", {
-              obsId: m.obs.id,
-              error: err instanceof Error ? err.message : String(err),
-            });
-          }
-        }
-
-        // Retention bookkeeping (the previously-dead KV.retentionScores):
-        // records how reinforced this memory is and when it last consolidated,
-        // so a later retention policy has a real score to act on.
-        try {
-          await kv.set(KV.retentionScores, memId, {
-            memoryId: memId,
-            strength,
-            folded: foldable.length,
-            version: memory.version,
-            lastConsolidated: nowIso,
-          });
-        } catch {
-          // best-effort: retention scoring must never fail the sweep
-        }
-
+        const r = await distillMembers(kv, {
+          project: g.project,
+          primaryFile: g.primaryFile,
+          members: foldable,
+          now,
+        });
+        if (!r) continue;
+        folded += r.folded;
         consolidated++;
       }
 

@@ -1,7 +1,7 @@
 {
   "name": "memwarden",
-  "version": "0.0.5",
-  "description": "The memory firewall for AI coding agents. Verified, self-custodied, tamper-evident \u2014 one brain across every tool.",
+  "version": "0.0.6",
+  "description": "The memory firewall for AI coding agents. Verified, self-custodied, tamper-evident — one brain across every tool.",
   "type": "module",
   "engines": {
     "node": ">=20.0.0"

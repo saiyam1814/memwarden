@@ -84,6 +84,16 @@ independent observations* that quote the same text (forget them by id).
 pre-v2 history to the new chain, anchors the old chain's head hash in a final `compact` record, and
 VACUUMs the file. Live memories are never touched.
 
+`memwarden compact --prune-history [--keep-days N]` (default 7 days) adds the storage lever:
+*superseded* payloads - older versions of keys that have since been rewritten - lose their payload
+too. A mature store is mostly outdated versions of live records, which is where the bytes are.
+Tamper-evidence is unaffected because it lives in the hash *chain*: each pruned entry keeps its
+`payload_hash`, so the chain still verifies end to end and still commits to what that version held.
+Never pruned: the newest version of any key, anything inside the `--keep-days` window, and the
+`compact`/`erase` anchor records. Pruning is idempotent, counted separately from erasure
+(`prunedCount` vs `erasedCount`, in the result and in the compact record), and orthogonal to it -
+the retention window never defers an erasure.
+
 The remaining honest limits: erasure cannot reach copies *outside* the store - filesystem
 snapshots, backups, `memwarden export` files you made earlier, or bytes an SSD's wear-leveling
 retired. Receipts issued before a compaction cite pre-compaction entry hashes; the compact record's
