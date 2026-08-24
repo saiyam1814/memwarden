@@ -2088,16 +2088,34 @@ async function status(rest: string[]): Promise<void> {
     // is a bad neighbor, and the footprint is invisible unless we print it.
     const bytes = dirSizeBytes(dataDir);
     if (bytes > 0) {
-      const mb = bytes / (1024 * 1024);
-      const human = mb >= 1024 ? `${(mb / 1024).toFixed(1)}GB` : `${Math.round(mb)}MB`;
-      const heavy = mb >= 300;
-      console.log(
-        `  storage   ${heavy ? "⚠" : "✓"} ${human} at ${dataDir}` +
-          (heavy
-            ? `\n              reclaim it: 'memwarden compact --prune-history' (keeps the` +
-              ` verifiable chain, drops superseded payload copies)`
-            : ""),
-      );
+      const MB = 1024 * 1024;
+      const human = (n: number): string =>
+        n >= 1024 * MB ? `${(n / (1024 * MB)).toFixed(1)}GB` : `${Math.round(n / MB)}MB`;
+      // Itemized, because a single total tells you nothing about what to DO.
+      // The two costs have different fixes and suggesting the wrong one is
+      // worse than saying nothing: compact cannot shrink the model runtime.
+      const dbBytes = dirSizeBytes(join(dataDir, "memwarden.db"));
+      const runtimeBytes = dirSizeBytes(join(dataDir, "runtime"));
+      const heavy = bytes >= 300 * MB;
+      console.log(`  storage   ${heavy ? "⚠" : "✓"} ${human(bytes)} at ${dataDir}`);
+      if (dbBytes > 0 || runtimeBytes > 0) {
+        console.log(
+          `              ${human(dbBytes)} memory + oplog · ${human(runtimeBytes)} embedding runtime`,
+        );
+      }
+      // Only advise the lever that would actually help the dominant cost.
+      if (dbBytes >= 150 * MB) {
+        console.log(
+          `              shrink the oplog: 'memwarden compact --prune-history'` +
+            ` (drops superseded payload copies; the chain still verifies)`,
+        );
+      }
+      if (runtimeBytes >= 250 * MB) {
+        console.log(
+          `              the runtime is carrying binaries for other platforms:` +
+            ` rerun 'memwarden up' to prune them`,
+        );
+      }
     }
     console.log(
       stats.embedding
