@@ -61,6 +61,48 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: npm install -g npm@latest
       - run: npm ci
-      - run: npm publish --provenance --access public
+
+      # Which auth path will be used, stated before we try it. A silent choice
+      # here is why 0.0.6 failed confusingly.
+      - name: report auth path
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "$NPM_TOKEN" ]; then
+            echo "auth: NPM_TOKEN secret is present — publishing with the token."
+            echo "note: a present-but-stale token PREVENTS the OIDC fallback. If this"
+            echo "      step 404s, either refresh the token or delete the secret and"
+            echo "      configure npm Trusted Publishing for this repo + workflow."
+          else
+            echo "auth: no NPM_TOKEN secret — publishing via OIDC trusted publishing."
+            echo "note: this requires a trusted publisher configured on npmjs.com for"
+            echo "      saiyam1814/memwarden and .github/workflows/release.yml."
+          fi
+
+      # NODE_AUTH_TOKEN is set ONLY when the secret is non-empty. Exporting an
+      # empty value still makes npm attempt token auth, which shadows OIDC and
+      # turns "trusted publishing is configured" into a 404. Keeping the two
+      # paths mutually exclusive is what makes either of them work.
+      - name: publish
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -o pipefail
+          if [ -n "$NPM_TOKEN" ]; then
+            export NODE_AUTH_TOKEN="$NPM_TOKEN"
+          fi
+          if ! npm publish --provenance --access public 2>&1 | tee publish.log; then
+            if grep -q "E404\|404 Not Found - PUT" publish.log; then
+              echo "::error::npm rejected the credentials for this package (E404 on PUT)."
+              echo "::error::The package exists, so this is an AUTH failure, not a missing name."
+              if [ -n "$NPM_TOKEN" ]; then
+                echo "::error::Fix: refresh NPM_TOKEN with a granular token that has publish"
+                echo "::error::rights on 'memwarden', OR delete the NPM_TOKEN secret and"
+                echo "::error::configure Trusted Publishing so this workflow authenticates by OIDC."
+              else
+                echo "::error::Fix: configure a trusted publisher on npmjs.com for"
+                echo "::error::saiyam1814/memwarden with workflow .github/workflows/release.yml."
+              fi
+            fi
+            exit 1
+          fi

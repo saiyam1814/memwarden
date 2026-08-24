@@ -11,6 +11,7 @@ import type { HookPayload } from "../functions/types.js";
 import { getSecret, getQuantBits } from "../functions/config.js";
 import { getVectorIndex, getEmbeddingProvider } from "../functions/index.js";
 import { listActiveAgents } from "../functions/fleet.js";
+import { summarizeFirewall } from "../functions/firewall-stats.js";
 import { QuantizedVectorIndex } from "../functions/quantized-vector-index.js";
 import { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
@@ -413,6 +414,9 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
         embedding: provider
           ? { provider: provider.name, dimensions: provider.dimensions }
           : null,
+        // What the firewall actually did — the difference between claiming
+        // protection and showing it.
+        firewall: await summarizeFirewall(kv, 30).catch(() => null),
       };
       if (vec instanceof QuantizedVectorIndex) {
         const { dims, paddedDims, bits, rescoreDepth } = vec.params;
