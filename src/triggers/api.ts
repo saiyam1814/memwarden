@@ -10,6 +10,7 @@ import type { ApiRequest, ISdk } from "../kernel/index.js";
 import type { HookPayload } from "../functions/types.js";
 import { getSecret, getQuantBits } from "../functions/config.js";
 import { getVectorIndex, getEmbeddingProvider } from "../functions/index.js";
+import { listActiveAgents } from "../functions/fleet.js";
 import { QuantizedVectorIndex } from "../functions/quantized-vector-index.js";
 import { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
@@ -464,6 +465,41 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
     function_id: "api::doctor",
     config: {
       api_path: "/memwarden/doctor",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  // --- POST /memwarden/fleet/status ---------------------------------
+  // Fleet mode (#26): the live swarm view — which agents are active in a
+  // project right now, what each is touching, capture counts, last-seen.
+  // Registry rows are upserted by mem::observe (see functions/fleet.ts);
+  // orchestrators consume this same route via `fleet status --json`.
+  sdk.registerFunction(
+    "api::fleet-status",
+    async (
+      req: ApiRequest<{ project?: string; within_ms?: number }>,
+    ): Promise<Response> => {
+      const body = (req.body ?? {}) as { project?: string; within_ms?: number };
+      if (typeof body.project !== "string" || !body.project.trim()) {
+        return {
+          status_code: 400,
+          body: { error: "project (a path) is required" },
+        };
+      }
+      const kv = new StateKV(sdk);
+      const agents =
+        typeof body.within_ms === "number" && body.within_ms > 0
+          ? await listActiveAgents(kv, body.project, body.within_ms)
+          : await listActiveAgents(kv, body.project);
+      return { status_code: 200, body: { project: body.project, agents } };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::fleet-status",
+    config: {
+      api_path: "/memwarden/fleet/status",
       http_method: "POST",
       middleware_function_ids: ["middleware::api-auth"],
     },
