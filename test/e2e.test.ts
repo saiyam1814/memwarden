@@ -153,7 +153,8 @@ describe("E2E: boot -> observe -> search (BM25) -> context over the REST wire", 
     // BM25 found it.
     expect(body.results.length).toBeGreaterThan(0);
     const top = body.results[0]!;
-    expect(top.observation.title).toBe("Grep");
+    // Titles describe the action, not the tool.
+    expect(top.observation.title).toBe('Searched "authentication"');
     expect(top.sessionId).toBe("sess-e2e");
     expect(typeof top.score).toBe("number");
     expect(top.observation.id).toMatch(/^obs_/);

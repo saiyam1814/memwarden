@@ -64,7 +64,7 @@ describe("buildSyntheticCompression — prompts are first-class", () => {
     expect(c.narrative.startsWith("refactor everything")).toBe(true);
   });
 
-  it("tool traces still compress exactly as before (no prompt involved)", () => {
+  it("tool traces compress into a described change, not a tool name", () => {
     const c = buildSyntheticCompression({
       id: "obs_t1",
       sessionId: "s1",
@@ -76,8 +76,13 @@ describe("buildSyntheticCompression — prompts are first-class", () => {
       raw: {},
     });
     expect(c.type).toBe("command_run");
-    expect(c.title).toBe("Bash");
+    // The title describes the COMMAND, not the tool that ran it. A store whose
+    // every title is "Bash" is unrankable and unreadable.
+    expect(c.title).toBe("npm test");
     expect(c.narrative).toContain("npm test");
+    // The narrative is prose, never the raw tool-input JSON.
+    expect(c.narrative).not.toContain('{"command"');
+    expect(c.facts.some((f) => f.startsWith("ran: "))).toBe(true);
   });
 });
 
