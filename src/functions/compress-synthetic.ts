@@ -78,6 +78,237 @@ function clip(s: string, max: number): string {
   return s.length > max ? s.slice(0, max - 1) + "…" : s;
 }
 
+// --- extraction ------------------------------------------------------
+//
+// The old version titled every memory with the TOOL NAME and stored the raw
+// tool-input JSON as the narrative, with `facts` and `concepts` always empty.
+// Measured on a real six-week install, that produced memories like:
+//
+//   title: "Write"
+//   body : {"file_path":"/Users/…/email-to-preet.txt","content":"Subject: Re: …
+//
+// which is a log line wearing a memory's clothes: unrankable (every title is
+// one of six words), unreadable, and invisible to lexical search because the
+// only searchable terms were JSON keys. Provenance and hashing worked
+// perfectly and were verifying junk.
+//
+// Everything below exists to answer "what happened?" instead of "what ran?",
+// with no model call — the zero-LLM promise is kept.
+
+function str(o: Record<string, unknown>, key: string): string {
+  const v = o[key];
+  return typeof v === "string" ? v : "";
+}
+
+/** Last path segment, so titles read "auth.ts" rather than a 90-char path. */
+function baseName(p: string): string {
+  const parts = p.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? p;
+}
+
+/** One line, no runaway whitespace — titles and narratives must stay scannable. */
+function oneLine(s: string): string {
+  return s.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * The first line of a shell command, minus noise, so a title reads
+ * "npm test" rather than a 200-char pipeline.
+ */
+function commandSummary(cmd: string): string {
+  const first = oneLine(cmd.split("\n").find((l) => l.trim())?.trim() ?? cmd);
+  // Heredocs and long pipelines carry no title value past the first clause.
+  const clause = first.split(/\s*(?:\|\||&&|\||;|<<)\s*/)[0] ?? first;
+  return clip(oneLine(clause), 70);
+}
+
+/**
+ * Identifiers worth searching for: path segments, file stems, and code-shaped
+ * symbols. These populate `concepts`, which is what hybrid search actually
+ * matches on — leaving it empty made lexical recall a coin flip.
+ */
+// Structural directory names carry no topical signal. Without this, every
+// record picks up "src"/"repo"/"users" and looks like it has real concepts —
+// which also defeats the barren check below, so a contentless read gets treated
+// as knowledge worth keeping forever.
+const PATH_STOPWORDS = new Set([
+  "src", "lib", "test", "tests", "spec", "dist", "build", "out", "bin", "app",
+  "apps", "pkg", "pkgs", "packages", "repo", "repos", "home", "users", "user",
+  "tmp", "temp", "var", "opt", "etc", "private", "documents", "downloads",
+  "desktop", "node_modules", "vendor", "target", "index", "main", "internal",
+  "common", "shared", "utils", "util", "helpers", "core", "git", "github",
+]);
+
+function conceptsFrom(paths: string[], text: string): string[] {
+  const out = new Set<string>();
+  for (const p of paths) {
+    // A search pattern arrives via the same key set as file paths, so a regex
+    // or glob would otherwise be mined as if it were a directory name.
+    if (/[*?|{}()\[\]]/.test(p)) continue;
+    // The segment right after a home-directory root is the OS username. It is
+    // personal data, it is identical across every memory on the machine, and it
+    // has zero retrieval value — observed polluting every concept list with the
+    // owner's name.
+    const homeUser = /(?:^|\/)(?:Users|home)\/([^/\\]+)/.exec(p)?.[1];
+    const base = baseName(p);
+    const stem = base.replace(/\.[a-z0-9]+$/i, "");
+    if (stem.length > 2 && !PATH_STOPWORDS.has(stem.toLowerCase())) out.add(stem);
+    for (const seg of p.split(/[\\/]/)) {
+      // Directory names are strong topical signals ("auth", "triggers") —
+      // but only the ones that name a domain, not a layout convention.
+      if (
+        /^[a-z][a-z0-9_-]{2,20}$/i.test(seg) &&
+        seg !== base &&
+        seg !== homeUser &&
+        !PATH_STOPWORDS.has(seg.toLowerCase())
+      ) {
+        out.add(seg);
+      }
+    }
+  }
+  // Escape sequences in JSON-encoded tool output fuse into the identifier that
+  // follows them: "\tisPremium" was being mined as the symbol "tisPremium", and
+  // "\nTHE" as "nTHE". Neutralize them before matching.
+  const scrubbed = oneLine(text).replace(/\\[tnrfv0]/g, " ");
+
+  // Code-shaped symbols. CONSTANT_CASE deliberately requires an underscore or a
+  // digit: without that, ordinary shouty English ("THE", "PASS", "GATE") from
+  // logs and comments floods the concept list and buries the real identifiers.
+  const symbols =
+    scrubbed.match(
+      /\b(?:[A-Z][A-Z0-9]*_[A-Z0-9_]{2,}|[A-Z]+\d[A-Z0-9_]*|[a-z]+[A-Z][A-Za-z0-9]{2,}|[A-Z][a-z]+[A-Z][A-Za-z0-9]+)\b/g,
+    ) ?? [];
+  for (const s of symbols.slice(0, 24)) out.add(s);
+  return [...out].slice(0, 16);
+}
+
+/** Concrete, quotable assertions — the difference between a record and a fact. */
+function factsFrom(args: {
+  toolName: string;
+  input: Record<string, unknown>;
+  outputText: string;
+  isFailure: boolean;
+}): string[] {
+  const facts: string[] = [];
+  const oldS = str(args.input, "old_string");
+  const newS = str(args.input, "new_string");
+  if (oldS && newS) {
+    // The actual change, which is the whole point of remembering an edit.
+    facts.push(`changed: ${clip(oneLine(oldS), 90)} → ${clip(oneLine(newS), 90)}`);
+  }
+  const cmd = str(args.input, "command");
+  if (cmd) facts.push(`ran: ${commandSummary(cmd)}`);
+
+  // Error detection has to be narrow. A loose "contains the word error" match
+  // fires on any file whose CONTENT mentions an error, and on success envelopes
+  // like {"success":true,...} — observed marking every capture on a real
+  // install as importance 6, which destroys ranking by making everything
+  // top-priority. Trust the hook's own failure signal first; only fall back to
+  // shape-based detection, and never on a declared success.
+  const declaredSuccess = /"success"\s*:\s*true/.test(args.outputText);
+  if (args.isFailure || (!declaredSuccess && looksLikeError(args.outputText))) {
+    const line = errorLine(args.outputText);
+    // A JSON blob is not a fact. Raw payloads leaking in here is the exact
+    // defect this rewrite exists to remove.
+    if (line && !isJsonish(line)) facts.push(`error: ${clip(line, 140)}`);
+  }
+  return facts.slice(0, 4);
+}
+
+/** JSON-shaped text must never become a title, fact, or narrative. */
+function isJsonish(s: string): boolean {
+  const t = s.trim();
+  return (
+    (t.startsWith("{") && t.includes('":')) ||
+    (t.startsWith("[") && t.includes("{")) ||
+    /^"?\w+"?\s*:\s*[{["]/.test(t)
+  );
+}
+
+/** Error SHAPES, not the mere presence of the word. */
+function looksLikeError(text: string): boolean {
+  return (
+    /^\s*(?:error|fatal|exception|traceback|panic)\b/im.test(text) ||
+    /\b(?:[A-Z]\w*Error|error\s+TS\d+|TS\d{4}|SyntaxError|command not found)\b/.test(text) ||
+    /\bexit(?:ed with)? (?:code|status) [1-9]/i.test(text) ||
+    /\b(?:npm|yarn|pnpm) ERR!/.test(text)
+  );
+}
+
+function errorLine(text: string): string | null {
+  for (const line of text.split("\n")) {
+    const t = oneLine(line);
+    if (!t || isJsonish(t)) continue;
+    if (looksLikeError(t) || /\b(cannot|refused|denied|failed)\b/i.test(t)) return t;
+  }
+  return null;
+}
+
+/**
+ * A human title describing the change. Falls back to the tool name only when
+ * there is genuinely nothing else — and in that case the record is also marked
+ * low-importance below, so retention can age it out.
+ */
+function titleFor(args: {
+  toolName: string;
+  type: ObservationType;
+  input: Record<string, unknown>;
+  paths: string[];
+}): string {
+  const { toolName, type, input, paths } = args;
+  const cmd = str(input, "command");
+  if (cmd) return clip(commandSummary(cmd), 80);
+
+  const file = paths[0] ? baseName(paths[0]) : "";
+  const oldS = oneLine(str(input, "old_string"));
+  const newS = oneLine(str(input, "new_string"));
+  if (file && oldS && newS) {
+    // Short replacements are the most useful titles in the whole store.
+    if (oldS.length <= 40 && newS.length <= 40) {
+      return clip(`${file}: ${oldS} → ${newS}`, 80);
+    }
+    return clip(`Edited ${file}`, 80);
+  }
+  const pattern = str(input, "pattern");
+  if (pattern) return clip(`Searched "${oneLine(pattern)}"`, 80);
+  if (file) {
+    const verb =
+      type === "file_write"
+        ? "Wrote"
+        : type === "file_edit"
+          ? "Edited"
+          : type === "file_read"
+            ? "Read"
+            : "Touched";
+    return clip(`${verb} ${file}`, 80);
+  }
+  return clip(toolName || "observation", 80);
+}
+
+/**
+ * A sentence, never a JSON dump.
+ *
+ * Deliberately free of scaffolding labels and repeated paths. Downstream
+ * consumers derive a conflict SUBJECT from the most frequent narrative terms,
+ * so any boilerplate word we add ("output", "in <path>") competes with the real
+ * subject: an early version of this produced the subject "ts output auth"
+ * instead of "auth" purely from its own decoration. Paths already live in
+ * `files`; facts already carry their own verbs.
+ */
+function narrativeFor(args: {
+  title: string;
+  facts: string[];
+  outputText: string;
+}): string {
+  const parts: string[] = [args.title];
+  if (args.facts.length > 0) parts.push(args.facts.join("; "));
+  // Tool output is evidence, but only its first meaningful stretch — the rest
+  // is scrollback, and scrollback was the bulk of what used to get stored.
+  const out = oneLine(args.outputText);
+  if (out) parts.push(clip(out, 220));
+  return clip(parts.join(". "), 600);
+}
+
 export function buildSyntheticCompression(raw: RawObservation): CompressedObservation {
   const toolName = raw.toolName ?? raw.hookType;
   const inputText = asText(raw.toolInput);
@@ -111,24 +342,51 @@ export function buildSyntheticCompression(raw: RawObservation): CompressedObserv
     return result;
   }
 
-  const narrative = [inputText, outputText]
-    .filter((s) => s.length > 0)
-    .join(" | ");
+  const type = classify(toolName, raw.hookType);
+  const input =
+    raw.toolInput && typeof raw.toolInput === "object"
+      ? (raw.toolInput as Record<string, unknown>)
+      : {};
+  const paths = filePaths(raw.toolInput);
+  const isFailure = raw.hookType === "post_tool_failure";
+
+  const title = titleFor({ toolName: toolName ?? "", type, input, paths });
+  const facts = factsFrom({ toolName: toolName ?? "", input, outputText, isFailure });
+  const narrative = narrativeFor({ title, facts, outputText });
+  const concepts = conceptsFrom(
+    paths,
+    `${str(input, "old_string")} ${str(input, "new_string")} ${str(input, "command")} ${outputText}`,
+  );
+
+  // A bare read with no extractable signal is a log line, not knowledge.
+  // Below the retention floor (5) it ages out instead of being promoted into a
+  // permanent memory, which is how the store filled with `title: "Read"` rows.
+  const barren = facts.length === 0 && concepts.length === 0;
+  const importance =
+    isFailure || facts.some((f) => f.startsWith("error:"))
+      ? 6 // failures are the highest-value thing Déjà Fix has to work with
+      : type === "file_read" && barren
+        ? 3
+        : barren
+          ? 4
+          : 5;
 
   const result: CompressedObservation = {
     id: raw.id,
     sessionId: raw.sessionId,
     timestamp: raw.timestamp,
-    type: classify(toolName, raw.hookType),
-    title: clip(toolName || "observation", 80),
-    facts: [],
-    narrative: clip(narrative, 400),
-    concepts: [],
-    files: filePaths(raw.toolInput),
-    importance: 5,
-    confidence: 0.3,
+    type,
+    title,
+    facts,
+    narrative,
+    concepts,
+    files: paths,
+    importance,
+    confidence: facts.length > 0 ? 0.5 : 0.3,
   };
-  if (inputText) result.subtitle = clip(inputText, 120);
+  // Raw tool input is NEVER stored as content: it is what turned memories into
+  // JSON blobs. Keep only a clipped, single-line trace for debugging context.
+  if (inputText) result.subtitle = clip(oneLine(inputText), 120);
   if (raw.modality) result.modality = raw.modality;
   if (raw.imageData) result.imageData = raw.imageData;
   if (raw.agentId) result.agentId = raw.agentId;
