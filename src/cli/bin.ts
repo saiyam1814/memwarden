@@ -16,6 +16,7 @@ import {
   mkdirSync,
   chmodSync,
   rmSync,
+  statSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -2094,7 +2095,19 @@ async function status(rest: string[]): Promise<void> {
       // Itemized, because a single total tells you nothing about what to DO.
       // The two costs have different fixes and suggesting the wrong one is
       // worse than saying nothing: compact cannot shrink the model runtime.
-      const dbBytes = dirSizeBytes(join(dataDir, "memwarden.db"));
+      // The db is a FILE (plus its -wal/-shm siblings); dirSizeBytes only
+      // walks directories and would report 0 for it.
+      const fileBytes = (p: string): number => {
+        try {
+          return statSync(p).size;
+        } catch {
+          return 0;
+        }
+      };
+      const dbBytes =
+        fileBytes(join(dataDir, "memwarden.db")) +
+        fileBytes(join(dataDir, "memwarden.db-wal")) +
+        fileBytes(join(dataDir, "memwarden.db-shm"));
       const runtimeBytes = dirSizeBytes(join(dataDir, "runtime"));
       const heavy = bytes >= 300 * MB;
       console.log(`  storage   ${heavy ? "⚠" : "✓"} ${human(bytes)} at ${dataDir}`);
