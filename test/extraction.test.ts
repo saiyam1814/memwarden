@@ -249,6 +249,36 @@ describe("extraction: bugs found on a live install", () => {
     expect(c.concepts).toContain("billing");
   });
 
+  it("never embeds a JSON output envelope in the body", () => {
+    // Observed after the first pass: "Wrote inspect-store.ts. {"type":"create",
+    // "filePath":"…","content":"//\\n…"" — an entire written file stored inside
+    // its own memory. The JSON guard covered facts but not the output append.
+    const c = buildSyntheticCompression(
+      raw({
+        toolName: "Write",
+        toolInput: { file_path: "/repo/eval/inspect.ts", content: "x" },
+        toolOutput:
+          '{"type":"create","filePath":"/repo/eval/inspect.ts","content":"// a very long file body that must not be stored"}',
+      }),
+    );
+    expect(c.narrative).not.toContain('"content"');
+    expect(c.narrative).not.toContain("must not be stored");
+    expect(c.narrative).not.toMatch(/\{\s*"/);
+  });
+
+  it("mines a readable line out of a stdout envelope instead of the envelope", () => {
+    const c = buildSyntheticCompression(
+      raw({
+        toolName: "Bash",
+        toolInput: { command: "npm test" },
+        toolOutput: '{"stdout":"Tests 761 passed (761)","exitCode":0}',
+      }),
+    );
+    expect(c.narrative).toContain("761 passed");
+    expect(c.narrative).not.toContain('"exitCode"');
+    expect(c.narrative).not.toMatch(/\{\s*"/);
+  });
+
   it("does not fuse escape sequences into identifiers", () => {
     // Observed: JSON-encoded output containing "\\tisPremium" was mined as the
     // symbol "tisPremium", and "\\nTHE" as "nTHE".

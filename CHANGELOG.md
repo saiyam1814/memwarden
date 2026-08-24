@@ -3,6 +3,35 @@
 All notable changes to memwarden. Dates are release dates; the format loosely follows
 [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.0.9 - 2026-08-24
+
+Caught by inspecting the store the day 0.0.8 shipped, which is the point.
+
+### Added
+- **`npm run inspect`** (`eval/inspect-store.ts`): grades the live brain against
+  the same quality rules the capture path enforces — titles that are bare tool
+  names, bodies that carry JSON, records with no facts and no concepts, and
+  whether importance has any spread at all — then prints the most recent captures
+  to *read*, because no aggregate can tell you whether the knowledge is worth
+  having. Reads a snapshot, never the live file, and mutates nothing.
+
+  It exists because 761 passing tests and a 100% firewall eval both reported
+  "healthy" while the store was full of tool logs. Reading the rows is the only
+  check that caught it, so it is now one command.
+
+### Fixed
+- **JSON output envelopes no longer end up in memory bodies.** 0.0.8 fixed titles
+  and facts but still appended raw tool *output* verbatim, which produced bodies
+  like `Wrote inspect-store.ts. {"type":"create","filePath":"…","content":"//…"` —
+  an entire written file stored inside its own memory. Output is now mined for the
+  one field a human would read (`stdout`, `output`, `stderr`, `message`, …) and
+  everything else is dropped. `content`/file-body fields are deliberately never
+  harvested: they are the payload we are trying not to keep.
+- **The inspector's own JSON check** looked only at the start of a body, so
+  `Wrote foo.ts. {"content":…}` passed as clean. It now matches JSON anywhere.
+- **Bare-tool-name detection is case-insensitive.** Hosts differ on casing
+  (`Read` vs `read`), and the case-sensitive check silently under-counted.
+
 ## 0.0.8 - 2026-08-24
 
 One fix, and it is the one that decides whether any of the rest matters.
