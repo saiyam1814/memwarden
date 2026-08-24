@@ -3,7 +3,61 @@
 All notable changes to memwarden. Dates are release dates; the format loosely follows
 [Keep a Changelog](https://keepachangelog.com/).
 
-## 0.0.5 - unreleased
+## 0.0.6 - 2026-08-24
+
+The first public beta. Two of these are corrections to bugs that made the layer
+dishonest in practice, and they are listed first on purpose.
+
+### Fixed
+- **The durability contract: code-backed knowledge is distilled, never dropped.** The
+  retention sweep deleted expiring observations without checking whether anything durable
+  had been distilled from them first. Measured on a real 0.0.5 install: 15,771 observations
+  captured, **0 memories**, and hundreds of code-backed rows removed per hour at the TTL —
+  the layer was a sieve. At the TTL an observation carrying file provenance is now promoted
+  into a Memory (via `distillMembers`, the same primitive the consolidate pipeline uses),
+  carrying its content and capture-time hashes verbatim so Verified Recall still re-checks
+  it against the live file. Repeat touches of a file converge on one memory id, so storage
+  still shrinks. Observations with no provenance have nothing durable to promote and are
+  deleted as before. This also makes sweep-vs-consolidate ordering irrelevant.
+  `MEMWARDEN_FORGET_PROMOTE=off` restores the old behavior.
+- **Consolidation reaches published builds.** The distillation pipeline (0.0.5 development)
+  was absent from the published 0.0.5 tarball, which is why installs reported 0 memories.
+- **`status` diagnoses itself.** It printed `0 memories` beside `15771 observations` for
+  weeks without flagging it. It now names the condition ("distillation is not running") and
+  what to run, and prints the on-disk footprint with a reclaim hint when the brain is large.
+
+### Added
+- **Verified Memory Canon — git-native portable verified memory.** `memwarden canon push`
+  promotes distilled memories into `.memwarden/canon.jsonl` in your repo (one JSON record
+  per line, repo-relative paths, capture-time SHA-256 per file). `canon verify` re-hashes
+  the canon against *any* checkout and reports verified/stale/unverifiable with the files
+  that drifted; `--strict` exits 1 as a CI gate. `canon pull` loads what still holds into
+  the local brain through the normal capture path, so the firewall still governs it.
+  Trust becomes portable with no server, no account, and no vendor. `push` refuses to
+  promote memory that is already stale locally, and memory with no capture-time hashes;
+  serialization is byte-stable so an unchanged brain re-pushes identically; paths outside
+  the repo are refused rather than leaked; malformed lines (merge conflicts) are skipped,
+  not fatal. Stated in the output: a matching hash proves the source is unchanged, not that
+  the claim is correct.
+- **Fleet mode, phase 2**: an agent registry (one row per active agent, keyed by session,
+  evicted on session end plus a 24h lazy prune and a clock clamp) and
+  `memwarden fleet status [--cwd dir] [--json]` with `POST /memwarden/fleet/status` — which
+  agents are working in this project right now, what each is touching, capture counts and
+  last-seen. Thanks @sivasubramanian95 (#34, #25) and #35 (#26).
+- **`memwarden compact --prune-history [--keep-days N]`**: reclaims the dominant share of
+  on-disk size by dropping *superseded* oplog payload copies while keeping every entry's
+  `payload_hash`, so the chain still verifies end to end. Measured on a real install the
+  oplog held 319MB of payloads against 16.6MB of live state — 95% of the database was
+  historical copies nobody could read.
+
+### Changed
+- `up`/`down` are scoped to the daemon they target: pointing `MEMWARDEN_URL` /
+  `MEMWARDEN_REST_PORT` at a throwaway daemon no longer rewrites every real tool's config
+  or unloads the user-global service, and `--wire` is the explicit opt-in. URL comparison is
+  normalized (case, trailing slash, `127.0.0.1`/`[::1]` folded into `localhost`), and
+  non-default `down --data` refuses to delete the default brain. Thanks @d-cryptic (#21, #17).
+
+## 0.0.5 - 2026-07-13
 
 The launch release: session journals, verifiable erasure, the native engine, and the
 firewall made measurable.

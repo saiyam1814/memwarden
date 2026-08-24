@@ -20,7 +20,12 @@
 // (old v1 history + new v2 tail) verify end to end.
 
 import { createHash } from "node:crypto";
-import { canonicalize, type OplogEntry, type OplogOp } from "./store.js";
+import {
+  canonicalize,
+  type OplogEntry,
+  type OplogOp,
+  type OplogPruneOptions,
+} from "./store.js";
 
 /** The empty-string sentinel used as `prev_hash` for the genesis entry. */
 export const GENESIS_PREV_HASH = "";
@@ -108,12 +113,20 @@ export interface CompactRecordPayload {
   entriesRewritten: number;
   erasedCount: number;
   /**
-   * EVERY content-committed null payload in the post-compaction chain (both
-   * the payloads this pass erased and any erased earlier) — the compact
-   * record is the universal erasure authorization, so verifyChain accepts
-   * exactly these nulls and rejects any other. This is also the one-time
-   * migration for chains erased before erase records existed: their nulls
-   * fail verification until a compact re-anchors them.
+   * Payloads nulled because a NEWER version of the same key exists, not
+   * because anyone asked for deletion. Recorded separately from erasedCount
+   * so the chain itself distinguishes storage reclaim from erasure — both
+   * appear in erasedIds (verifyChain needs one authorization list), but a
+   * reader can tell how many nulls were which.
+   */
+  prunedCount: number;
+  /**
+   * EVERY content-committed null payload in the post-compaction chain (the
+   * payloads this pass erased or pruned, plus any nulled earlier) — the
+   * compact record is the universal erasure authorization, so verifyChain
+   * accepts exactly these nulls and rejects any other. This is also the
+   * one-time migration for chains erased before erase records existed: their
+   * nulls fail verification until a compact re-anchors them.
    */
   erasedIds: number[];
   compactedAt: string;
@@ -177,10 +190,22 @@ export interface CompactPlan {
   compactRecord: OplogEntry;
   /** Count of pre-existing entries whose stored fields changed. */
   entriesRewritten: number;
-  /** Count of payloads nulled by this plan. */
+  /** Count of payloads nulled because their record was deleted (erasure). */
   erasedCount: number;
+  /** Count of payloads nulled because a newer version exists (pruning). */
+  prunedCount: number;
+  /** Canonical payload bytes across the input chain. */
+  payloadBytesBefore: number;
+  /** Canonical payload bytes after, including the new compact record's own. */
+  payloadBytesAfter: number;
   /** Head hash of the input chain ("" for an empty log). */
   previousHeadHash: string;
+}
+
+/** Canonical-JSON byte size of one payload; 0 for an absent/null payload. */
+function payloadBytes(payload: unknown): number {
+  if (payload === null || payload === undefined) return 0;
+  return Buffer.byteLength(canonicalize(payload), "utf8");
 }
 
 /**
@@ -193,6 +218,11 @@ export interface CompactPlan {
  * - a (scope, key) pair is DEAD when its last mutation entry is a delete
  *   AND the caller confirms no live kv row exists (`livePairs`); only dead
  *   pairs' set/update payloads are nulled — live records are never touched;
+ * - with `pruneSuperseded`, SUPERSEDED set/update payloads are nulled too:
+ *   every version except the newest one for its (scope, key). Tamper-evidence
+ *   lives in the chain, not in the payload column — payload_hash is kept, so
+ *   each pruned version keeps its content commitment and the chain still
+ *   verifies end to end. `keepPayloadsSince` holds a recency window back;
  * - a final `compact` record anchors the pre-compaction head hash, so old
  *   receipts/exports citing pre-compaction hashes have an honest anchor.
  */
@@ -200,35 +230,62 @@ export function planCompaction(
   entries: readonly OplogEntry[],
   livePairs: ReadonlySet<string>,
   compactedAt: string,
+  opts?: OplogPruneOptions,
 ): CompactPlan {
   // A pair is delete-tailed when its LAST mutation entry is a delete.
   const lastMutationOp = new Map<string, OplogOp>();
+  // The NEWEST payload-bearing entry per pair: the version behind the value a
+  // caller can still read. Keyed off the entry id rather than "has a payload
+  // right now" so the decision is independent of earlier prunes — pruning the
+  // same log twice must plan the same thing. Nothing replays older versions
+  // (state::oplog-find strips payloads; no consumer reads oplog history), so
+  // everything before this id is dead weight once the user asks for it to be.
+  const newestVersionId = new Map<string, number>();
   for (const e of entries) {
     if (e.op === "set" || e.op === "update" || e.op === "delete") {
       lastMutationOp.set(pairKey(e.scope, e.key), e.op);
+    }
+    if (e.op === "set" || e.op === "update") {
+      newestVersionId.set(pairKey(e.scope, e.key), e.id);
     }
   }
   const isDead = (scope: string, key: string): boolean =>
     lastMutationOp.get(pairKey(scope, key)) === "delete" &&
     !livePairs.has(pairKey(scope, key));
+  const prune = opts?.pruneSuperseded === true;
+  const keepSince = opts?.keepPayloadsSince;
 
   const rewritten: OplogEntry[] = [];
   let prev = GENESIS_PREV_HASH;
   let entriesRewritten = 0;
   let erasedCount = 0;
+  let prunedCount = 0;
+  let payloadBytesBefore = 0;
+  let payloadBytesAfter = 0;
   for (const e of entries) {
-    const erase =
-      (e.op === "set" || e.op === "update") &&
-      e.payload !== null &&
-      e.payload !== undefined &&
-      isDead(e.scope, e.key);
+    const hasPayload = e.payload !== null && e.payload !== undefined;
+    const mutation = e.op === "set" || e.op === "update";
+    const erase = mutation && hasPayload && isDead(e.scope, e.key);
+    // Superseded: a newer version of this key exists. Checked only when the
+    // entry is not already being erased, so erasedCount keeps its exact
+    // meaning (a deleted record's history) and no entry is counted twice.
+    const superseded =
+      prune &&
+      !erase &&
+      mutation &&
+      hasPayload &&
+      newestVersionId.get(pairKey(e.scope, e.key)) !== e.id &&
+      !(keepSince !== undefined && e.ts >= keepSince);
     // Keep an existing v2 commitment verbatim (its payload may already be
     // erased); otherwise commit to the payload we still hold.
     const payload_hash =
       e.v === 2 && typeof e.payload_hash === "string"
         ? e.payload_hash
         : hashPayload(e.payload);
-    const payload = erase ? null : (e.payload ?? null);
+    const payload = erase || superseded ? null : (e.payload ?? null);
+    const bytes = payloadBytes(e.payload);
+    payloadBytesBefore += bytes;
+    if (payload !== null) payloadBytesAfter += bytes;
     const hash = hashOplogEntryV2({
       id: e.id,
       ts: e.ts,
@@ -255,11 +312,13 @@ export function planCompaction(
       e.payload_hash !== payload_hash ||
       e.prev_hash !== prev ||
       e.hash !== hash ||
-      erase
+      erase ||
+      superseded
     ) {
       entriesRewritten++;
     }
     if (erase) erasedCount++;
+    else if (superseded) prunedCount++;
     rewritten.push(next);
     prev = hash;
   }
@@ -280,6 +339,7 @@ export function planCompaction(
     previousHeadHash,
     entriesRewritten,
     erasedCount,
+    prunedCount,
     erasedIds,
     compactedAt,
   };
@@ -312,6 +372,12 @@ export function planCompaction(
     compactRecord,
     entriesRewritten,
     erasedCount,
+    prunedCount,
+    payloadBytesBefore,
+    // The anchor record is part of what the chain now costs — with pruning its
+    // erasedIds list is the one thing compaction ADDS, so it belongs in the
+    // "after" number rather than being quietly excluded from it.
+    payloadBytesAfter: payloadBytesAfter + payloadBytes(compactPayload),
     previousHeadHash,
   };
 }

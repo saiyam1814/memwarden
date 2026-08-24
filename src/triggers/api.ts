@@ -592,13 +592,51 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
   // erase the payloads of forget-deleted records, anchor the old head hash
   // in a compact record, VACUUM. Auth'd: it rewrites the brain's history
   // file. dry_run reports what would happen without writing.
+  //
+  // prune_history additionally nulls SUPERSEDED payloads (older versions of
+  // keys that were rewritten) — the storage lever, since a mature oplog is
+  // mostly outdated versions. keep_days holds a recency window back in full;
+  // the cutoff is resolved HERE, against the daemon clock that stamped every
+  // oplog ts, rather than trusting a caller-supplied timestamp.
+  interface CompactBody {
+    dry_run?: boolean;
+    dryRun?: boolean;
+    prune_history?: boolean;
+    keep_days?: number;
+  }
+  const DEFAULT_KEEP_DAYS = 7;
   sdk.registerFunction(
     "api::compact",
-    async (req: ApiRequest<{ dry_run?: boolean; dryRun?: boolean }>): Promise<Response> => {
-      const body = (req.body ?? {}) as { dry_run?: boolean; dryRun?: boolean };
+    async (req: ApiRequest<CompactBody>): Promise<Response> => {
+      const body = (req.body ?? {}) as CompactBody;
+      const prune = body.prune_history === true;
+      // A bad keep_days must NOT silently fall back to the default: the caller
+      // would believe it pruned with a window it never got.
+      if (
+        body.keep_days !== undefined &&
+        (typeof body.keep_days !== "number" ||
+          !Number.isFinite(body.keep_days) ||
+          body.keep_days < 0)
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "keep_days must be a number >= 0" },
+        };
+      }
+      const keepDays = body.keep_days ?? DEFAULT_KEEP_DAYS;
       const result = await sdk.trigger({
         function_id: "state::compact",
-        payload: { dryRun: body.dry_run === true || body.dryRun === true },
+        payload: {
+          dryRun: body.dry_run === true || body.dryRun === true,
+          ...(prune
+            ? {
+                pruneSuperseded: true,
+                keepPayloadsSince: new Date(
+                  Date.now() - keepDays * 86_400_000,
+                ).toISOString(),
+              }
+            : {}),
+        },
       });
       return { status_code: 200, body: result };
     },

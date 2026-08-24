@@ -58,6 +58,17 @@ import { ensureDaemon, daemonAlive, DAEMON_ENTRY } from "../daemon/ensure.js";
 import { adopt } from "./adopt.js";
 import { installService, uninstallService } from "../daemon/service.js";
 import { getSecret } from "../functions/config.js";
+import { dirSizeBytes } from "../functions/doctor.js";
+import {
+  canonPath,
+  readCanon,
+  reanchorRecord,
+  recordFromMemory,
+  scanForSecrets,
+  verifyCanon,
+  writeCanon,
+  type CanonRecord,
+} from "./canon.js";
 
 import {
   DEFAULT_URL,
@@ -573,29 +584,84 @@ async function forget(rest: string[]): Promise<void> {
 // entry as chain v2 (hashes cover the content's hash, not the content),
 // erases the payloads of already-forgotten memories, anchors the old head
 // hash in a compact record, and VACUUMs the database file.
+//
+// --prune-history adds the storage lever: superseded versions (an older
+// payload for a key that has since been rewritten) lose their payload while
+// keeping their content hash, so the chain still verifies. That is where the
+// bytes are — the same keys get rewritten dozens of times and every old
+// version sits on disk forever.
 async function compact(rest: string[]): Promise<void> {
   const dryRun = rest.includes("--dry-run");
+  const prune = rest.includes("--prune-history");
+  const keepIdx = rest.indexOf("--keep-days");
+  const keepArg = keepIdx !== -1 ? rest[keepIdx + 1] : undefined;
+  if (keepIdx !== -1 && (keepArg === undefined || keepArg.startsWith("--"))) {
+    throw new Error("--keep-days needs a number of days, e.g. --keep-days 7");
+  }
+  const keepDays = keepArg === undefined ? 7 : Number(keepArg);
+  if (!Number.isFinite(keepDays) || keepDays < 0) {
+    throw new Error(`--keep-days must be a number >= 0 (got "${keepArg}")`);
+  }
+  // A window without the flag would silently do nothing — say so instead.
+  if (keepIdx !== -1 && !prune) {
+    throw new Error("--keep-days only applies with --prune-history");
+  }
   const res = await fetch(`${DAEMON_URL}/memwarden/compact`, {
     method: "POST",
     headers: authHeaders(),
-    body: JSON.stringify({ dry_run: dryRun }),
+    body: JSON.stringify({
+      dry_run: dryRun,
+      ...(prune ? { prune_history: true, keep_days: keepDays } : {}),
+    }),
   });
   if (!res.ok) throw new Error(`compact failed: HTTP ${res.status}`);
   const r = (await res.json()) as {
     entriesRewritten: number;
     erasedCount: number;
+    prunedCount: number;
+    payloadBytesBefore: number;
+    payloadBytesAfter: number;
     previousHeadHash: string;
     compactedAt: string;
     dryRun: boolean;
     vacuum: { ok: boolean; bytesReclaimed: number | null; detail?: string };
   };
+  // The claim that matters after rewriting history: does the chain still
+  // verify? Asked of the daemon AFTER the write, so it checks what landed on
+  // disk rather than what the planner intended.
+  let chain: { verified: boolean; oplogEntries?: number; brokenAt?: number } | null = null;
+  if (!r.dryRun) {
+    try {
+      const vres = await fetch(`${DAEMON_URL}/memwarden/verify`, { headers: authHeaders() });
+      chain = (await vres.json()) as { verified: boolean; oplogEntries?: number; brokenAt?: number };
+    } catch {
+      chain = null; // reported as "not checked" below, never as "ok"
+    }
+  }
   if (rest.includes("--json")) {
-    console.log(JSON.stringify(r, null, 2));
+    console.log(JSON.stringify({ ...r, chain }, null, 2));
     return;
   }
   console.log(`\n  memwarden compact${r.dryRun ? " (dry run — nothing was written)" : ""}\n`);
   console.log(`    entries rewritten   ${r.entriesRewritten}`);
   console.log(`    payloads erased     ${r.erasedCount} (forgotten memories only — live data untouched)`);
+  console.log(
+    `    payloads pruned     ${r.prunedCount}${
+      prune
+        ? ` (superseded versions older than ${keepDays}d — the newest value of every memory is kept)`
+        : " (superseded-history pruning off — add --prune-history)"
+    }`,
+  );
+  // Percentage rather than a third byte figure: the three numbers are rounded
+  // for reading and would not visibly add up.
+  const dropped = r.payloadBytesBefore - r.payloadBytesAfter;
+  const pct =
+    r.payloadBytesBefore > 0 ? Math.round((dropped / r.payloadBytesBefore) * 100) : 0;
+  console.log(
+    `    payload bytes       ${formatBytes(r.payloadBytesBefore)} -> ${formatBytes(
+      r.payloadBytesAfter,
+    )} (${pct >= 0 ? `${pct}% of history dropped` : `${-pct}% larger — the anchor record costs more than was dropped`})`,
+  );
   console.log(
     `    previous head hash  ${r.previousHeadHash ? r.previousHeadHash : "(empty chain)"}${
       r.dryRun ? "" : "\n                        anchored in the new chain's compact record"
@@ -608,17 +674,35 @@ async function compact(rest: string[]): Promise<void> {
       `    vacuum              ok${
         r.vacuum.bytesReclaimed === null
           ? ""
-          : ` — ${formatBytes(r.vacuum.bytesReclaimed)} reclaimed`
+          : ` — ${formatBytes(r.vacuum.bytesReclaimed)} reclaimed on disk`
       }`,
     );
   } else {
     console.log(`    vacuum              FAILED — ${r.vacuum.detail ?? "unknown"} (erasure still applied)`);
   }
+  if (r.dryRun) {
+    console.log(`    chain               unchanged (nothing was written)`);
+  } else if (chain === null) {
+    console.log(`    chain               NOT CHECKED — run \`memwarden verify\``);
+  } else if (chain.verified) {
+    console.log(
+      `    chain               verified end to end${
+        chain.oplogEntries === undefined ? "" : ` (${chain.oplogEntries} entries)`
+      }`,
+    );
+  } else {
+    console.log(`    chain               BROKEN at entry ${chain.brokenAt ?? "?"}`);
+    process.exitCode = 1;
+  }
   console.log(
     `\n  After compact every entry is chain v2: future \`memwarden forget --erase\`\n` +
       `  erases in place without breaking the chain. Receipts issued before this\n` +
       `  compaction cite pre-compaction hashes; their chain's head hash is the\n` +
-      `  previousHeadHash anchored above.\n`,
+      `  previousHeadHash anchored above.\n` +
+      (r.prunedCount > 0
+        ? `  Pruned versions keep their content hash: the chain still proves what\n` +
+          `  each one held, but the old text itself is gone.\n`
+        : ""),
   );
 }
 
@@ -1329,6 +1413,442 @@ function purgeBrain(dataDir: string): void {
   );
 }
 
+// --- `memwarden canon` ---------------------------------------------
+//
+// The portable half of Verified Recall: promote distilled memories into the
+// repo as a committed, reviewable artifact that ANY checkout can re-verify.
+// See src/cli/canon.ts for the format and the honesty boundary.
+
+async function canon(rest: string[]): Promise<void> {
+  const [sub, ...args] = rest;
+  switch (sub) {
+    case "push":
+      return canonPush(args);
+    case "verify":
+      return canonVerify(args);
+    case "pull":
+      return canonPull(args);
+    case "reanchor":
+      return canonReanchor(args);
+    default:
+      console.log(
+        "usage:\n" +
+          "  memwarden canon push [--root dir] [--all] [--dry-run] [--json]\n" +
+          "        promote this project's verified memories into .memwarden/canon.jsonl\n" +
+          "        (credential-looking memories are always blocked; --all relaxes staleness only)\n" +
+          "  memwarden canon verify [--root dir] [--json] [--strict]\n" +
+          "        re-hash the committed canon against THIS checkout (CI gate; --strict exits 1\n" +
+          "        on real drift or unverifiable records, never on formatting-only changes)\n" +
+          "  memwarden canon pull [--root dir] [--yes] [--json]\n" +
+          "        load records that hold here into this machine's brain (shows them first)\n" +
+          "  memwarden canon reanchor [--root dir] [--yes] [--json]\n" +
+          "        assert drifted records still hold and re-hash them against this checkout\n" +
+          "        (recorded as human attestation, not capture-time proof)",
+      );
+      process.exit(sub ? 1 : 0);
+  }
+}
+
+function canonRoot(rest: string[]): string {
+  const i = rest.indexOf("--root");
+  return i !== -1 && rest[i + 1] ? resolve(rest[i + 1]!) : process.cwd();
+}
+
+async function canonPush(rest: string[]): Promise<void> {
+  const root = canonRoot(rest);
+  const asJson = rest.includes("--json");
+  const dryRun = rest.includes("--dry-run");
+  // Default refuses to promote memory that is ALREADY stale here — committing a
+  // known-broken memory would poison every clone that trusts the artifact.
+  // --all promotes regardless, for deliberate archaeology.
+  const onlyGreen = !rest.includes("--all");
+
+  const res = await fetch(`${DAEMON_URL}/memwarden/search`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({
+      query: "",
+      project: root,
+      limit: 1000,
+      include_memories: true,
+      all_projects: false,
+    }),
+  });
+  if (!res.ok) throw new Error(`canon push failed: HTTP ${res.status}`);
+  const body = (await res.json()) as {
+    results?: Array<Record<string, unknown>>;
+    memories?: Array<Record<string, unknown>>;
+  };
+  const candidates = [...(body.memories ?? []), ...(body.results ?? [])];
+
+  const nowIso = new Date().toISOString();
+  const seen = new Set<string>();
+  const records: CanonRecord[] = [];
+  const secretBlocked: Array<{ id: string; title: string; hits: string[] }> = [];
+  let skippedNoEvidence = 0;
+  for (const c of candidates) {
+    const mem = c as Parameters<typeof recordFromMemory>[0];
+    if (!mem?.id || seen.has(mem.id)) continue;
+    seen.add(mem.id);
+    const rec = recordFromMemory(mem, root, nowIso);
+    if (!rec) {
+      skippedNoEvidence++;
+      continue;
+    }
+    // THE SECRET GATE. This file gets committed, and git history is a one-way
+    // door — a leaked credential is an incident, not a delete. There is no
+    // override: `--all` relaxes staleness only. A memory carrying a credential
+    // is a memory to forget.
+    const hits = scanForSecrets(rec);
+    if (hits.length > 0) {
+      secretBlocked.push({
+        id: rec.id,
+        title: rec.title,
+        hits: Array.from(new Set(hits.map((h) => `${h.label} in ${h.field}`))),
+      });
+      continue;
+    }
+    records.push(rec);
+  }
+
+  // Promote only what holds right now. Cosmetic drift counts as holding: the
+  // code is unchanged, only its formatting moved.
+  let refusedStale = 0;
+  let promoted = records;
+  if (onlyGreen) {
+    const checked = verifyCanon(records, root);
+    promoted = checked
+      .filter((c) => c.verdict === "verified" || c.verdict === "cosmetic")
+      .map((c) => c.record);
+    refusedStale = checked.length - promoted.length;
+  }
+
+  // Preserve promotedAt for records already in the canon so an unchanged brain
+  // re-pushes byte-identically (a churning artifact trains reviewers to ignore it).
+  const existing = readCanon(root);
+  const priorById = new Map(existing.records.map((r) => [r.id, r]));
+  const merged = promoted.map((r) => {
+    const prior = priorById.get(r.id);
+    return prior &&
+      prior.content === r.content &&
+      JSON.stringify(prior.fileHashes) === JSON.stringify(r.fileHashes)
+      ? prior
+      : r;
+  });
+
+  if (asJson) {
+    console.log(
+      JSON.stringify(
+        {
+          root,
+          path: canonPath(root),
+          promoted: merged.length,
+          refusedStale,
+          skippedNoEvidence,
+          secretBlocked,
+          dryRun,
+        },
+        null,
+        2,
+      ),
+    );
+    if (!dryRun) writeCanon(root, merged);
+    return;
+  }
+
+  console.log(`\nmemwarden canon push — ${root}\n`);
+  console.log(`  promoted   ${merged.length} memories that hold against this checkout`);
+  if (refusedStale > 0) {
+    console.log(
+      `  refused    ${refusedStale} already stale against this checkout (use --all to promote anyway)`,
+    );
+  }
+  if (skippedNoEvidence > 0) {
+    console.log(
+      `  skipped    ${skippedNoEvidence} without capture-time file hashes (nothing portable to prove)`,
+    );
+  }
+  if (secretBlocked.length > 0) {
+    console.log(
+      `\n  ⛔ BLOCKED ${secretBlocked.length} memories that look like they contain credentials.\n` +
+        `     This file gets committed, and git history is a one-way door — so there is\n` +
+        `     no override for this gate (--all relaxes staleness only).\n`,
+    );
+    for (const b of secretBlocked.slice(0, 10)) {
+      console.log(`     ${b.id}  ${b.title}\n       ${b.hits.join("; ")}`);
+    }
+    console.log(
+      `\n     Inspect one with 'memwarden why <id>', then 'memwarden forget <id>' if it\n` +
+        `     really holds a secret. A false positive means the memory quotes something\n` +
+        `     that looks like a credential; it still should not enter the repo.\n`,
+    );
+  }
+  if (dryRun) {
+    console.log(`  --dry-run: nothing written.\n`);
+    return;
+  }
+  const path = writeCanon(root, merged);
+  console.log(
+    `\n  wrote ${path}\n\n` +
+      `  Commit it. Every clone can now re-verify this memory against its own\n` +
+      `  checkout with 'memwarden canon verify' — no daemon, no account, no vendor.\n`,
+  );
+}
+
+async function canonVerify(rest: string[]): Promise<void> {
+  const root = canonRoot(rest);
+  const asJson = rest.includes("--json");
+  const strict = rest.includes("--strict");
+  const { records, skipped, path, exists } = readCanon(root);
+
+  if (!exists) {
+    if (asJson) {
+      console.log(JSON.stringify({ root, path, exists: false }, null, 2));
+      return;
+    }
+    console.log(
+      `\nno canon at ${path}\n\n` +
+        `  Create one from this machine's verified memories:\n` +
+        `    memwarden canon push\n`,
+    );
+    return;
+  }
+
+  const checked = verifyCanon(records, root);
+  const verified = checked.filter((c) => c.verdict === "verified");
+  const cosmetic = checked.filter((c) => c.verdict === "cosmetic");
+  const stale = checked.filter((c) => c.verdict === "stale");
+  const missing = checked.filter((c) => c.verdict === "missing");
+  const attested = checked.filter((c) => c.record.reanchoredBy);
+
+  if (asJson) {
+    console.log(
+      JSON.stringify(
+        {
+          root,
+          path,
+          total: checked.length,
+          verified: verified.length,
+          cosmeticDrift: cosmetic.length,
+          stale: stale.length,
+          unverifiable: missing.length,
+          attested: attested.length,
+          malformedLines: skipped,
+          staleDetail: stale.map((c) => ({
+            id: c.record.id,
+            title: c.record.title,
+            drifted: c.drifted,
+          })),
+        },
+        null,
+        2,
+      ),
+    );
+    // Cosmetic drift must not fail CI: the code did not change, only its
+    // formatting. Failing on it is how a memory gate gets deleted in week two.
+    if (strict && (stale.length > 0 || missing.length > 0)) process.exit(1);
+    return;
+  }
+
+  console.log(`\nmemwarden canon verify — ${root}\n`);
+  console.log(`  UNCHANGED     ${verified.length} memories: every listed file is byte-identical to capture`);
+  if (cosmetic.length > 0) {
+    console.log(`  REFORMATTED   ${cosmetic.length} whose files only changed formatting (code unchanged)`);
+  }
+  console.log(`  DRIFTED       ${stale.length} reference code that genuinely changed or vanished`);
+  if (missing.length > 0) {
+    console.log(`  UNVERIFIABLE  ${missing.length} carry no hashes (cannot be checked — never treated as good)`);
+  }
+  if (attested.length > 0) {
+    console.log(`  (of these, ${attested.length} were re-anchored by a human, not proven from capture)`);
+  }
+  if (skipped > 0) {
+    console.log(
+      `\n  ⚠ MALFORMED ${skipped} unreadable line(s) — likely an unresolved merge conflict in\n` +
+        `    ${path}. Those records are NOT being checked. Resolve them.`,
+    );
+  }
+  console.log("");
+  for (const c of stale.slice(0, 10)) {
+    console.log(`  [drifted]  ${c.record.title}\n             files: ${c.drifted.join(", ")}`);
+  }
+  if (stale.length > 10) console.log(`  ... and ${stale.length - 10} more`);
+  console.log(
+    stale.length > 0
+      ? `\n  Drifted memory is refused at recall, not silently injected — nothing is\n` +
+          `  quietly wrong. To fix the canon: re-capture on a current checkout and\n` +
+          `  'canon push', or 'canon reanchor' to assert it still holds, or drop the\n` +
+          `  dead records in review.\n`
+      : `\n  Scope of this claim: a matching hash proves each listed file is unchanged\n` +
+          `  since capture. It does not prove the memory is correct, and it only covers\n` +
+          `  files recorded at capture time — a memory about how two modules interact\n` +
+          `  can read green when only one was listed.\n`,
+  );
+  if (strict && (stale.length > 0 || missing.length > 0)) process.exit(1);
+}
+
+async function canonReanchor(rest: string[]): Promise<void> {
+  const root = canonRoot(rest);
+  const asJson = rest.includes("--json");
+  const yes = rest.includes("--yes");
+  const { records, path, exists } = readCanon(root);
+  if (!exists) {
+    console.log(`no canon at ${path} — nothing to re-anchor.`);
+    return;
+  }
+
+  const checked = verifyCanon(records, root);
+  const needy = checked.filter((c) => c.verdict === "stale" || c.verdict === "cosmetic");
+  if (needy.length === 0) {
+    console.log(`\nnothing to re-anchor — every record already matches this checkout.\n`);
+    return;
+  }
+
+  // Re-anchoring asserts "I checked, this memory still holds". That is a human
+  // claim, so it must be a deliberate act, and it is recorded as attestation
+  // rather than proof.
+  if (!yes && !asJson) {
+    console.log(
+      `\nmemwarden canon reanchor — ${root}\n\n` +
+        `  ${needy.length} record(s) no longer match this checkout:\n`,
+    );
+    for (const c of needy.slice(0, 15)) {
+      console.log(`    [${c.verdict}]  ${c.record.title}\n              ${c.drifted.join(", ")}`);
+    }
+    console.log(
+      `\n  Re-anchoring recomputes their hashes against YOUR checkout and stamps you\n` +
+        `  as the person asserting each memory is still true. That is an attestation,\n` +
+        `  not capture-time proof, and 'canon verify' reports it that way.\n\n` +
+        `  Read them first. Re-run with --yes to proceed.\n`,
+    );
+    return;
+  }
+
+  const by =
+    process.env["MEMWARDEN_ATTEST_AS"] ??
+    process.env["GIT_AUTHOR_NAME"] ??
+    process.env["USER"] ??
+    "unknown";
+  const nowIso = new Date().toISOString();
+  const byId = new Map(records.map((r) => [r.id, r]));
+  let reanchored = 0;
+  let undeadDropped = 0;
+  for (const c of needy) {
+    const next = reanchorRecord(c.record, root, by, nowIso);
+    if (!next) {
+      // A record whose files are gone cannot be re-anchored; leave it in place
+      // and let review drop it rather than silently deleting a team's memory.
+      undeadDropped++;
+      continue;
+    }
+    byId.set(next.id, next);
+    reanchored++;
+  }
+  const out = [...byId.values()];
+
+  if (asJson) {
+    console.log(JSON.stringify({ root, path, reanchored, unresolvable: undeadDropped, by }, null, 2));
+    writeCanon(root, out);
+    return;
+  }
+  writeCanon(root, out);
+  console.log(
+    `\n  re-anchored  ${reanchored} record(s) as "${by}"\n` +
+      (undeadDropped > 0
+        ? `  unresolvable ${undeadDropped} reference files that no longer exist — drop them in review\n`
+        : "") +
+      `\n  Commit it. 'canon verify' will show these as attested rather than proven.\n`,
+  );
+}
+
+async function canonPull(rest: string[]): Promise<void> {
+  const root = canonRoot(rest);
+  const asJson = rest.includes("--json");
+  const { records, path, exists } = readCanon(root);
+  if (!exists) {
+    console.log(`no canon at ${path} — nothing to pull.`);
+    return;
+  }
+
+  // A canon is attacker-reachable: anyone who can land a commit can add records
+  // that agents will read. Two defenses here, because "we frame recall as
+  // untrusted data" is not enough when the label next to it says verified.
+  //
+  //   1. Only records that actually hold against THIS checkout are loaded.
+  //      Unverifiable records (no hashes) are pure payload with zero
+  //      evidentiary value — loading one is indistinguishable from injection.
+  //   2. It is not silent. The records are shown and confirmation is required,
+  //      so ingesting someone else's prose into your agents is a deliberate act.
+  //
+  // The durable answer is CODEOWNERS on .memwarden/ plus review (documented in
+  // the generated .memwarden/README.md); signing is the eventual fix.
+  const checked = verifyCanon(records, root);
+  const loadable = checked.filter(
+    (c) => c.verdict === "verified" || c.verdict === "cosmetic",
+  );
+  const yes = rest.includes("--yes");
+  if (!yes && !asJson) {
+    console.log(
+      `\nmemwarden canon pull — ${root}\n\n` +
+        `  ${loadable.length} of ${checked.length} record(s) hold against this checkout and would\n` +
+        `  be loaded into this machine's memory:\n`,
+    );
+    for (const c of loadable.slice(0, 15)) {
+      console.log(`    ${c.record.title}`);
+    }
+    if (loadable.length > 15) console.log(`    ... and ${loadable.length - 15} more`);
+    const rejected = checked.length - loadable.length;
+    if (rejected > 0) {
+      console.log(
+        `\n  ${rejected} refused (drifted or unverifiable) — they will not be loaded.`,
+      );
+    }
+    console.log(
+      `\n  These are claims written by whoever committed them, and your agents will\n` +
+        `  read them. Review them, then re-run with --yes.\n`,
+    );
+    return;
+  }
+
+  let loaded = 0;
+  let refused = checked.length - loadable.length;
+  for (const c of loadable) {
+    const r = c.record;
+    const res = await fetch(`${DAEMON_URL}/memwarden/observe`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({
+        hookType: "post_tool_use",
+        sessionId: `canon-${root.replace(/[^a-zA-Z0-9]/g, "").slice(-24)}`,
+        project: root,
+        cwd: root,
+        timestamp: new Date().toISOString(),
+        agent: "canon",
+        data: {
+          tool_name: "CanonPull",
+          tool_input: { files: r.files },
+          tool_output: `${r.title}\n${r.content}`,
+        },
+        provenance: { files: r.files, fileHashes: r.fileHashes, cwd: root },
+      }),
+    });
+    if (res.ok) loaded++;
+  }
+
+  if (asJson) {
+    console.log(JSON.stringify({ root, path, loaded, refused }, null, 2));
+    return;
+  }
+  console.log(
+    `\nmemwarden canon pull — ${root}\n\n` +
+      `  loaded    ${loaded} verified memories into this machine's brain\n` +
+      (refused > 0
+        ? `  refused   ${refused} that do not hold against this checkout (stale or unverifiable)\n`
+        : "") +
+      `\n  Your agents now start with the team's verified canon instead of nothing.\n`,
+  );
+}
+
 // --- `memwarden fleet` ---------------------------------------------
 //
 // Fleet mode: the coordination surface for many agents sharing one brain.
@@ -1551,6 +2071,34 @@ async function status(rest: string[]): Promise<void> {
     console.log(
       `  memory    ${stats.observations ?? 0} observations, ${stats.memories ?? 0} memories, ${stats.sessions ?? 0} sessions, ${stats.vectors ?? 0} vectors`,
     );
+    // Self-diagnosis. A store with thousands of raw captures and zero distilled
+    // memories is BROKEN, not idle — that exact state (15,771 observations, 0
+    // memories) shipped in 0.0.5 and went unnoticed for weeks because status
+    // reported it as though it were normal. A number a user cannot interpret is
+    // not honesty. Say what is wrong and what to run.
+    const obs = stats.observations ?? 0;
+    const mems = stats.memories ?? 0;
+    if (obs >= 200 && mems === 0) {
+      console.log(
+        `            ⚠ ${obs} captures but 0 distilled memories — distillation is not running.\n` +
+          `              Upgrade (npm i -g memwarden@latest) and restart: 'memwarden down && memwarden up'.`,
+      );
+    }
+    // Storage honesty: a resident daemon that quietly grows to hundreds of MB
+    // is a bad neighbor, and the footprint is invisible unless we print it.
+    const bytes = dirSizeBytes(dataDir);
+    if (bytes > 0) {
+      const mb = bytes / (1024 * 1024);
+      const human = mb >= 1024 ? `${(mb / 1024).toFixed(1)}GB` : `${Math.round(mb)}MB`;
+      const heavy = mb >= 300;
+      console.log(
+        `  storage   ${heavy ? "⚠" : "✓"} ${human} at ${dataDir}` +
+          (heavy
+            ? `\n              reclaim it: 'memwarden compact --prune-history' (keeps the` +
+              ` verifiable chain, drops superseded payload copies)`
+            : ""),
+      );
+    }
     console.log(
       stats.embedding
         ? `  semantic  ✓ ${stats.embedding.provider} (${stats.embedding.dimensions}d)`
@@ -1634,7 +2182,11 @@ function printUsage(): void {
       "  memwarden adopt <store> [--root repo] [--project path] [--agent name] [--dry-run] [--json]  # seed a foreign store into the brain (labeled sourced_unverified)\n" +
       "  memwarden exclude [path] | include [path] | exclude --list   # per-project: no capture, no injection\n" +
       "  memwarden forget <observationId> [--erase] [--json]  # delete one memory, get a tamper-evident receipt; --erase nulls its oplog content too\n" +
-      "  memwarden compact [--dry-run] [--json]          # erase all forgotten memories from the oplog, migrate the chain, VACUUM\n" +
+      "  memwarden compact [--dry-run] [--prune-history [--keep-days N]] [--json]\n" +
+      "                                                    # erase forgotten memories from the oplog, migrate the chain, VACUUM;\n" +
+      "                                                    # --prune-history also drops superseded versions (keeps the last N days, default 7)\n" +
+      "  memwarden canon push | verify | pull            # git-native verified memory: promote to .memwarden/canon.jsonl,\n" +
+      "                                                    re-verify it against any checkout, load it into this brain\n" +
       "  memwarden fleet status [--cwd dir] [--json]     # live swarm view: agents active in this project\n" +
       "  memwarden dejafix lookup [--cwd dir] < err.txt  # find a verified prior fix for an error\n" +
       '  memwarden dejafix record --fix "…" [--file f] [--root-cause s] < err.txt\n' +
@@ -1685,6 +2237,8 @@ async function main(): Promise<void> {
       return compact(rest);
     case "fleet":
       return fleet(rest);
+    case "canon":
+      return canon(rest);
     case "dejafix":
       return dejafix(rest);
     case "export":

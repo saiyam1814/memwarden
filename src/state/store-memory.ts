@@ -6,6 +6,7 @@
 import {
   applyUpdateOps,
   type MutationListener,
+  type OplogCompactOptions,
   type OplogCompactResult,
   type OplogEntry,
   type OplogEraseResult,
@@ -161,16 +162,21 @@ export class StoreMemory implements StateStore {
     return { erased: erased.length };
   }
 
-  async compactOplog(opts?: { dryRun?: boolean }): Promise<OplogCompactResult> {
+  async compactOplog(opts?: OplogCompactOptions): Promise<OplogCompactResult> {
     const livePairs = new Set<string>();
     for (const [scope, keys] of this.store) {
       for (const key of keys.keys()) livePairs.add(pairKey(scope, key));
     }
     const compactedAt = new Date().toISOString();
-    const plan = planCompaction(this.oplog, livePairs, compactedAt);
+    // Same planner, same options as StoreLibsql: the two stores must plan
+    // identically or parity is a lie.
+    const plan = planCompaction(this.oplog, livePairs, compactedAt, opts);
     const base = {
       entriesRewritten: plan.entriesRewritten,
       erasedCount: plan.erasedCount,
+      prunedCount: plan.prunedCount,
+      payloadBytesBefore: plan.payloadBytesBefore,
+      payloadBytesAfter: plan.payloadBytesAfter,
       previousHeadHash: plan.previousHeadHash,
       compactedAt,
     };

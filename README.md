@@ -76,6 +76,7 @@ memwarden flips the default: **memory is untrusted until its source still checks
 | 🔗 **Tamper-evident** | Append-only SHA-256 hash-chained oplog; `memory_verify` recomputes it. Erasure with offline-checkable receipts. |
 | 🧩 **Cross-tool** | Native hooks, MCP, and a proxy wire 8+ agents to one brain - mechanically, no instruction files. |
 | ⚡ **Fast** | Optional native turbovec backend: ~125× faster search at 10K vectors, zero recall drop. |
+| 📌 **Portable proof** | `canon push` commits verified memory to your repo; **any clone re-verifies it locally** - no server, no account. A CI gate fails the PR when a memory references code the PR changed. |
 | 🔒 **Self-custodied** | Lives at `~/.memwarden`, on-device, two runtime deps, no cloud, no API key. `export`/`import` to move it. |
 
 ## 🚦 The four trust states
@@ -159,7 +160,11 @@ verifiable-erasure model - is in **[docs/architecture.md](docs/architecture.md)*
 | `memwarden audit <store>` | audit a foreign store (claude-mem, CLAUDE.md, Mem0) - no daemon |
 | `memwarden adopt <store>` | seed a foreign store into the brain (labeled `sourced`, never `verified`) |
 | `memwarden why <id>` | explain one memory's trust verdict |
+| `memwarden canon push / verify / pull` | **git-native verified memory**: promote to `.memwarden/canon.jsonl`, re-verify it in any checkout, load it here |
+| `memwarden canon reanchor` | assert drifted records still hold, re-hashed against this checkout (recorded as human attestation) |
+| `memwarden fleet status` | which agents are active in this project right now, and what each is touching |
 | `memwarden forget <id>` | delete with a tamper-evident receipt (`--erase` scrubs the oplog) |
+| `memwarden compact --prune-history` | reclaim disk by dropping superseded payload copies; the hash chain still verifies |
 | `memwarden export / import` | move your brain between machines |
 | `npm run demo:firewall` | the full firewall arc against a real daemon, byte-scan-proven erasure |
 
