@@ -31,7 +31,7 @@ import {
 } from "./config.js";
 import { memoryToObservation } from "./memory-utils.js";
 import { canonicalizePath } from "./paths.js";
-import { gitProjectKey } from "./git-identity.js";
+import { projectKey } from "./git-identity.js";
 import { classifyProvenance, type Verdict } from "./verify.js";
 import { recordFirewallActivity } from "./firewall-stats.js";
 import { recordAccessBatch } from "./access-tracker.js";
@@ -564,11 +564,11 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           ? canonicalizePath(data.cwd)
           : undefined;
       // Stable project identity for each filter directory (git remote / main
-      // repo root). Used below to WIDEN the path filters — same key at a
-      // different path (another worktree, a moved checkout) still matches.
+      // repo root, canonical path fallback). Used below to WIDEN the path
+      // filters — same key at a different path (worktree/moved checkout) matches.
       const projectFilterKey =
-        projectFilter !== undefined ? gitProjectKey(projectFilter) : null;
-      const cwdFilterKey = cwdFilter !== undefined ? gitProjectKey(cwdFilter) : null;
+        projectFilter !== undefined ? projectKey(projectFilter) : null;
+      const cwdFilterKey = cwdFilter !== undefined ? projectKey(cwdFilter) : null;
       // Verified Recall firewall: when on (recall surfaces default it on),
       // drop results that reference files now deleted or content-changed, so
       // stale memory is never injected. It needs a cwd to check against — and
@@ -720,18 +720,22 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       // belongs to a different project. When loadSession returns null we
       // fall through to a KV.memories probe so project-filtered search can
       // include or exclude them correctly.
-      const memoryProjectCache = new Map<string, string | null>();
+      type MemoryProject = { project: string | null; projectKey: string | null };
+      const memoryProjectCache = new Map<string, MemoryProject>();
       const loadMemoryProject = async (
         obsId: string,
-      ): Promise<string | null> => {
-        if (memoryProjectCache.has(obsId))
-          return memoryProjectCache.get(obsId)!;
+      ): Promise<MemoryProject> => {
+        const cached = memoryProjectCache.get(obsId);
+        if (cached) return cached;
         const mem = await kv
           .get<Memory>(KV.memories, obsId)
           .catch(() => null);
-        const proj = mem?.project ?? null;
-        memoryProjectCache.set(obsId, proj);
-        return proj;
+        const identity = {
+          project: mem?.project ?? null,
+          projectKey: mem?.projectKey ?? null,
+        };
+        memoryProjectCache.set(obsId, identity);
+        return identity;
       };
 
       // A candidate's observation (or a memory rendered as one). Cached so the
@@ -803,8 +807,12 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
             // let through for backward-compatibility; cwd filter doesn't apply.
             const memProject = await loadMemoryProject(r.obsId);
             if (
-              memProject !== null &&
-              canonicalizePath(memProject) !== projectFilter
+              (memProject.projectKey !== null &&
+                memProject.projectKey !== projectFilterKey) ||
+              (memProject.projectKey === null &&
+                memProject.project !== null &&
+                memProject.project !== projectFilterKey &&
+                canonicalizePath(memProject.project) !== projectFilter)
             )
               continue;
           }
@@ -818,12 +826,20 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           // worktree must be checked against the files the agent is actually
           // looking at, not the (possibly diverged or deleted) capture dir.
           const obsSession = await loadSession(r.sessionId);
+          const memoryIdentity = obsSession
+            ? null
+            : await loadMemoryProject(r.obsId);
           const verdict = !obs
             ? null
             : classifyProvenance(obs.provenance, cwdFilter, {
                 verifyAgainstRoot:
-                  obsSession?.projectKey !== undefined &&
-                  obsSession.projectKey === cwdFilterKey,
+                  (obsSession?.projectKey !== undefined &&
+                    obsSession.projectKey === cwdFilterKey) ||
+                  (memoryIdentity !== null &&
+                    ((memoryIdentity.projectKey !== null &&
+                      memoryIdentity.projectKey === cwdFilterKey) ||
+                      (memoryIdentity.projectKey === null &&
+                        memoryIdentity.project === cwdFilterKey))),
               });
           // Policy floor: `balanced` (default) drops only detected-stale;
           // `verified-only` additionally refuses everything that is not

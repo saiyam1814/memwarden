@@ -9,7 +9,7 @@ import type { StateKV } from "../state/kv.js";
 import type { CompressedObservation, Memory, Session } from "./types.js";
 import { KV } from "../state/schema.js";
 import { classifyProvenance, type Verdict } from "./verify.js";
-import { gitProjectKey } from "./git-identity.js";
+import { projectKey } from "./git-identity.js";
 import { memoryToObservation } from "./memory-utils.js";
 import { getRecallPolicy } from "./config.js";
 import { trustLabelOf, type TrustLabel } from "./search.js";
@@ -88,7 +88,7 @@ export function registerWhyFunction(sdk: ISdk, kv: StateKV): void {
         typeof data?.root === "string" && data.root.trim()
           ? data.root.trim()
           : process.cwd();
-      const rootKey = gitProjectKey(root);
+      const rootKey = projectKey(root);
 
       const sessions = await kv.list<Session>(KV.sessions);
       for (const s of sessions) {
@@ -136,7 +136,11 @@ export function registerWhyFunction(sdk: ISdk, kv: StateKV): void {
       const mem = await kv.get<Memory>(KV.memories, observationId).catch(() => null);
       if (mem) {
         const obs = memoryToObservation(mem);
-        const verdict = classifyProvenance(obs.provenance, root);
+        const verdict = classifyProvenance(obs.provenance, root, {
+          verifyAgainstRoot:
+            (mem.projectKey !== undefined && mem.projectKey === rootKey) ||
+            (mem.projectKey === undefined && mem.project === rootKey),
+        });
         const trust = trustLabelOf(verdict);
         const policy = getRecallPolicy();
         const injectable =

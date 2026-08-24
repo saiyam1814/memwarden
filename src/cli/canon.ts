@@ -38,6 +38,16 @@ import {
 import { createHash } from "node:crypto";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { hashFiles } from "../functions/verify.js";
+import {
+  CANON_FORMAT,
+  isCanonRecord,
+  isPortableCanonPath,
+} from "../functions/canon.js";
+import { projectKey } from "../functions/git-identity.js";
+import type { CanonRecord } from "../functions/types.js";
+
+export { CANON_FORMAT };
+export type { CanonRecord };
 
 // --- secret gate ----------------------------------------------------
 //
@@ -126,40 +136,11 @@ export function normalizedFileHash(absPath: string): string | null {
   }
 }
 
-/** Bumped only for breaking record-shape changes; readers must tolerate
- *  unknown extra fields so a newer writer never breaks an older reader. */
-export const CANON_FORMAT = 1;
+/** Bumped only for breaking record-shape changes; readers tolerate unknown
+ *  extra fields so a format-compatible newer writer never breaks an older one.
+ *  The constant and shared record type live at the core/API boundary. */
 export const CANON_DIR = ".memwarden";
 export const CANON_FILE = "canon.jsonl";
-
-export interface CanonRecord {
-  format: number;
-  id: string;
-  title: string;
-  content: string;
-  concepts: string[];
-  /** Repo-relative, forward-slashed, so a canon written on Windows verifies on
-   *  Linux and vice versa. */
-  files: string[];
-  /** file -> capture-time SHA-256. The portable evidence. */
-  fileHashes: Record<string, string>;
-  /** file -> SHA-256 of the LF-normalized, trailing-whitespace-stripped
-   *  content. Lets verify tell "the code changed" from "the bytes moved". */
-  fileHashesNormalized?: Record<string, string>;
-  type: string;
-  /** Which tool/agent produced the underlying memory, when known. Attestation
-   *  matters for policy ("trust memories from agents that passed eval X") and
-   *  for review ("who taught the repo this?"). */
-  capturedBy?: { host?: string; agentId?: string };
-  promotedAt: string;
-  /** Set by `canon reanchor`: a HUMAN asserted this memory still holds and the
-   *  hashes were recomputed against their checkout. Attestation is weaker than
-   *  capture-time proof and is reported separately so the two are never
-   *  conflated — without it, canon rots permanently after the first refactor
-   *  (the original captor's brain is the only thing that could refresh it). */
-  reanchoredBy?: string;
-  reanchoredAt?: string;
-}
 
 export type CanonVerdict =
   /** every listed file is byte-identical to capture time */
@@ -205,17 +186,9 @@ export function parseCanon(text: string): {
     const s = line.trim();
     if (!s) continue;
     try {
-      const r = JSON.parse(s) as CanonRecord;
-      if (
-        typeof r?.id === "string" &&
-        typeof r?.title === "string" &&
-        r.fileHashes &&
-        typeof r.fileHashes === "object"
-      ) {
-        records.push(r);
-      } else {
-        skipped++;
-      }
+      const r: unknown = JSON.parse(s);
+      if (isCanonRecord(r)) records.push(r);
+      else skipped++;
     } catch {
       skipped++;
     }
@@ -253,6 +226,7 @@ export function serializeCanon(records: CanonRecord[]): string {
       format: r.format,
       id: r.id,
       type: r.type,
+      ...(r.projectKey ? { projectKey: r.projectKey } : {}),
       title: r.title,
       content: r.content,
       concepts: [...r.concepts].sort(),
@@ -286,6 +260,24 @@ export function writeCanon(root: string, records: CanonRecord[]): string {
   writeFileSync(path, serializeCanon(records), "utf8");
   writeCanonReadme(root);
   return path;
+}
+
+export type CanonWriteMode = "merge" | "replace";
+
+/** Default push semantics are a keyed merge: local stored Memory updates the
+ * same ids, while team Canon records absent from this brain survive untouched.
+ * Destructive replacement exists only as an explicit CLI mode. */
+export function mergeCanonRecords(
+  existing: CanonRecord[],
+  promoted: CanonRecord[],
+  mode: CanonWriteMode = "merge",
+): CanonRecord[] {
+  const byId = new Map<string, CanonRecord>();
+  if (mode === "merge") {
+    for (const record of existing) byId.set(record.id, record);
+  }
+  for (const record of promoted) byId.set(record.id, record);
+  return [...byId.values()];
 }
 
 /**
@@ -407,6 +399,17 @@ export function verifyCanon(records: CanonRecord[], root: string): CanonCheck[] 
     if (names.length === 0) {
       return { record, verdict: "missing" as CanonVerdict, drifted: [] };
     }
+    const declared = new Set(record.files ?? []);
+    const unsafe = names.filter(
+      (name) => !isPortableCanonPath(name) || !declared.has(name),
+    );
+    if (unsafe.length > 0 || declared.size !== names.length) {
+      return {
+        record,
+        verdict: "stale" as CanonVerdict,
+        drifted: unsafe.length > 0 ? unsafe : [...declared],
+      };
+    }
     const actual = hashFiles(names, root);
     const expectedNorm = record.fileHashesNormalized ?? {};
     const drifted: string[] = [];
@@ -439,54 +442,110 @@ export function recordFromMemory(
     content: string;
     concepts?: string[];
     files?: string[];
-    type?: string;
+    type?: CanonRecord["type"];
     agentId?: string;
     provenance?: {
       files?: string[];
       fileHashes?: Record<string, string>;
+      /** `host` is accepted for old stored rows; current Provenance calls this
+       * `agent`. */
       host?: string;
+      agent?: string;
+      mixedTrust?: boolean;
+      canon?: {
+        projectKey: string;
+        promotedAt: string;
+        capturedBy?: { host?: string; agentId?: string };
+        reanchoredBy?: string;
+        reanchoredAt?: string;
+      };
     };
   },
   root: string,
   nowIso: string,
 ): CanonRecord | null {
-  const hashes = memory.provenance?.fileHashes;
-  if (!hashes || Object.keys(hashes).length === 0) return null;
+  const provenance = memory.provenance;
+  const hashes = provenance?.fileHashes;
+  // Incomplete evidence must never be laundered into a portable verified
+  // record merely because one of several source files happened to be hashed.
+  if (
+    provenance?.mixedTrust === true ||
+    !hashes ||
+    Object.keys(hashes).length === 0
+  ) {
+    return null;
+  }
+
+  const evidenceFiles = Array.from(
+    new Set([...(provenance.files ?? []), ...Object.keys(hashes)]),
+  );
+  if (evidenceFiles.length === 0) return null;
 
   const fileHashes: Record<string, string> = {};
-  for (const [file, hash] of Object.entries(hashes)) {
+  for (const file of evidenceFiles) {
+    const hash = hashes[file];
+    // Every referenced source needs a capture-time commitment. Silently
+    // dropping an unhashed/out-of-repo source would overstate what the evidence
+    // covers, so the whole Memory is non-promotable.
+    if (!hash || !/^[a-f0-9]{64}$/.test(hash)) return null;
     const rel = toRepoRelative(file, root);
-    if (!rel) continue; // outside the repo: not portable, so not promoted
+    if (!rel || !isPortableCanonPath(rel)) return null;
+    const prior = fileHashes[rel];
+    if (prior && prior !== hash) return null;
     fileHashes[rel] = hash;
   }
-  if (Object.keys(fileHashes).length === 0) return null;
+  const files = Object.keys(fileHashes);
+  if (files.length === 0) return null;
 
+  // A normalized commitment can only be derived now when the raw bytes still
+  // match the capture-time hash. Computing it from an already-drifted checkout
+  // would make arbitrary source changes look like harmless formatting.
+  const current = hashFiles(files, root);
   const fileHashesNormalized: Record<string, string> = {};
-  for (const rel of Object.keys(fileHashes)) {
-    const n = normalizedFileHash(resolve(root, rel));
-    if (n) fileHashesNormalized[rel] = n;
+  for (const rel of files) {
+    if (current[rel] !== fileHashes[rel]) continue;
+    const normalized = normalizedFileHash(resolve(root, rel));
+    if (normalized) fileHashesNormalized[rel] = normalized;
   }
 
-  return {
+  const canonOrigin = provenance.canon;
+  const capturedBy = canonOrigin?.capturedBy ??
+    (provenance.agent || provenance.host || memory.agentId
+      ? {
+          ...(provenance.agent || provenance.host
+            ? { host: provenance.agent ?? provenance.host }
+            : {}),
+          ...(memory.agentId ? { agentId: memory.agentId } : {}),
+        }
+      : undefined);
+  const localProjectKey = projectKey(root);
+  // Only remote-derived keys are portable. `gitroot:/abs/path` and the
+  // non-git path fallback are useful for local API scoping but would leak the
+  // author's checkout and fail in a clone, so format-1 omits them.
+  const portableProjectKey = localProjectKey.startsWith("git:")
+    ? localProjectKey
+    : undefined;
+  const record: CanonRecord = {
     format: CANON_FORMAT,
     id: memory.id,
     type: memory.type ?? "fact",
+    ...(portableProjectKey ? { projectKey: portableProjectKey } : {}),
     title: memory.title,
     content: memory.content,
     concepts: memory.concepts ?? [],
-    files: Object.keys(fileHashes),
+    files,
     fileHashes,
     ...(Object.keys(fileHashesNormalized).length > 0
       ? { fileHashesNormalized }
       : {}),
-    ...(memory.provenance?.host || memory.agentId
-      ? {
-          capturedBy: {
-            ...(memory.provenance?.host ? { host: memory.provenance.host } : {}),
-            ...(memory.agentId ? { agentId: memory.agentId } : {}),
-          },
-        }
+    ...(capturedBy ? { capturedBy } : {}),
+    promotedAt: canonOrigin?.promotedAt ?? nowIso,
+    ...(canonOrigin?.reanchoredBy
+      ? { reanchoredBy: canonOrigin.reanchoredBy }
       : {}),
-    promotedAt: nowIso,
+    ...(canonOrigin?.reanchoredAt
+      ? { reanchoredAt: canonOrigin.reanchoredAt }
+      : {}),
   };
+  return isCanonRecord(record) ? record : null;
 }
