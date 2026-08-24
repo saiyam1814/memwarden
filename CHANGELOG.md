@@ -3,6 +3,50 @@
 All notable changes to memwarden. Dates are release dates; the format loosely follows
 [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.0.7 - unreleased
+
+Follow-ups to the 0.0.6 beta, all found by running the tool against a real
+install rather than a fixture.
+
+### Added
+- **`status` shows what the firewall actually did.** Every firewall-gated recall
+  records its outcome in daily buckets, surfaced in `/memwarden/stats` and
+  `status`: `firewall  🛡 8 stale refused · 50 verified served  (last 30d, 2 recalls)`.
+  memwarden had been blocking stale memory for six weeks on a real install
+  without ever saying so, and silent protection reads as no protection. Counting
+  is deliberately conservative: recall **events** not candidates, memories
+  actually withheld (once per memory per event), no Déjà Fix credit for an empty
+  lookup, and `hasData: false` on a fresh install instead of a confident row of
+  zeros. UTC-keyed buckets, pruned past 45 days on write, so the history stays
+  bounded.
+
+### Fixed
+- **The embedding runtime shipped binaries that can never load.** `npm install
+  @huggingface/transformers` pulls onnxruntime for every target: on a darwin/arm64
+  install, 425MB of runtime held 86MB of `onnxruntime-web` (a browser build Node
+  never loads) and ~145MB of native libraries for linux-x64, linux-arm64,
+  win32-x64, win32-arm64 and darwin-x64. `memwarden up` now prunes to the current
+  platform/arch. Verified live: **425MB → 157MB, 267MB freed**, semantic search
+  still working. With `compact --prune-history` this took a real brain from 848MB
+  to 331MB. `MEMWARDEN_RUNTIME_PRUNE=off` keeps everything.
+- **The `status` storage line is itemized** (`180MB memory + oplog · 152MB
+  embedding runtime`) and only advises the lever that would help the dominant
+  cost — `compact` cannot shrink the model runtime, and suggesting it for that is
+  worse than saying nothing. Also: the database is a file, so it is measured with
+  `stat` (plus its `-wal`/`-shm` siblings) rather than a directory walk that
+  returned 0.
+- **The release workflow could not use trusted publishing.** `NODE_AUTH_TOKEN` was
+  exported unconditionally, so a present-but-stale `NPM_TOKEN` shadowed the OIDC
+  path the workflow had already been granted `id-token` permission for — which is
+  why 0.0.6 failed to publish with a bare `E404`. The token is now exported only
+  when non-empty, the chosen auth path is stated before the attempt, and an E404
+  prints the actual remedy.
+
+### Known
+- `@memwarden/turbovec` throws `mutex lock failed` during daemon shutdown
+  ([#43](https://github.com/saiyam1814/memwarden/issues/43)). Pre-existing, on the
+  teardown path only; `MEMWARDEN_VECTOR_BACKEND=typescript` avoids the native path.
+
 ## 0.0.6 - 2026-08-24
 
 The first public beta. Two of these are corrections to bugs that made the layer
