@@ -62,6 +62,7 @@ import { getSecret } from "../functions/config.js";
 import { dirSizeBytes } from "../functions/doctor.js";
 import {
   canonPath,
+  mergeCanonRecords,
   readCanon,
   reanchorRecord,
   recordFromMemory,
@@ -1434,9 +1435,10 @@ async function canon(rest: string[]): Promise<void> {
     default:
       console.log(
         "usage:\n" +
-          "  memwarden canon push [--root dir] [--all] [--dry-run] [--json]\n" +
-          "        promote this project's verified memories into .memwarden/canon.jsonl\n" +
-          "        (credential-looking memories are always blocked; --all relaxes staleness only)\n" +
+          "  memwarden canon push [--root dir] [--all] [--replace] [--dry-run] [--json]\n" +
+          "        merge this project's verified memories into .memwarden/canon.jsonl\n" +
+          "        (--replace explicitly drops Canon-only records; credentials are always blocked;\n" +
+          "         --all relaxes staleness only)\n" +
           "  memwarden canon verify [--root dir] [--json] [--strict]\n" +
           "        re-hash the committed canon against THIS checkout (CI gate; --strict exits 1\n" +
           "        on real drift or unverifiable records, never on formatting-only changes)\n" +
@@ -1459,28 +1461,40 @@ async function canonPush(rest: string[]): Promise<void> {
   const root = canonRoot(rest);
   const asJson = rest.includes("--json");
   const dryRun = rest.includes("--dry-run");
+  const replace = rest.includes("--replace");
   // Default refuses to promote memory that is ALREADY stale here — committing a
   // known-broken memory would poison every clone that trusts the artifact.
   // --all promotes regardless, for deliberate archaeology.
   const onlyGreen = !rest.includes("--all");
 
-  const res = await fetch(`${DAEMON_URL}/memwarden/search`, {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify({
-      query: "",
-      project: root,
-      limit: 1000,
-      include_memories: true,
-      all_projects: false,
-    }),
-  });
-  if (!res.ok) throw new Error(`canon push failed: HTTP ${res.status}`);
-  const body = (await res.json()) as {
-    results?: Array<Record<string, unknown>>;
-    memories?: Array<Record<string, unknown>>;
-  };
-  const candidates = [...(body.memories ?? []), ...(body.results ?? [])];
+  // Canon inventory is a dedicated, bounded walk over stored Memory rows for
+  // this exact project identity. Semantic search is ranked/incomplete and
+  // returns observation-shaped wrappers, so it can never be an export API.
+  const candidates: Array<Record<string, unknown>> = [];
+  let cursor: string | undefined;
+  const seenCursors = new Set<string>();
+  for (;;) {
+    const res = await fetch(`${DAEMON_URL}/memwarden/canon/export`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ root, limit: 250, ...(cursor ? { cursor } : {}) }),
+    });
+    if (!res.ok) throw new Error(`canon push failed: HTTP ${res.status}`);
+    const body = (await res.json()) as {
+      memories?: Array<Record<string, unknown>>;
+      nextCursor?: string;
+    };
+    if (!Array.isArray(body.memories)) {
+      throw new Error("canon push failed: daemon returned an invalid Memory page");
+    }
+    candidates.push(...body.memories);
+    if (!body.nextCursor) break;
+    if (seenCursors.has(body.nextCursor)) {
+      throw new Error("canon push failed: daemon repeated an export cursor");
+    }
+    seenCursors.add(body.nextCursor);
+    cursor = body.nextCursor;
+  }
 
   const nowIso = new Date().toISOString();
   const seen = new Set<string>();
@@ -1524,18 +1538,30 @@ async function canonPush(rest: string[]): Promise<void> {
     refusedStale = checked.length - promoted.length;
   }
 
-  // Preserve promotedAt for records already in the canon so an unchanged brain
-  // re-pushes byte-identically (a churning artifact trains reviewers to ignore it).
+  // Preserve the complete prior record for unchanged ids (stable promotedAt +
+  // attestation means stable diffs), then MERGE by default so a partial local
+  // brain can never erase team Canon records it has not imported. Destructive
+  // replacement is available only through the explicit --replace flag.
   const existing = readCanon(root);
+  if (existing.skipped > 0 && !replace && !dryRun) {
+    throw new Error(
+      `canon push refused to rewrite ${existing.path}: ${existing.skipped} malformed/unsupported line(s) would be lost; resolve them or use --replace explicitly`,
+    );
+  }
   const priorById = new Map(existing.records.map((r) => [r.id, r]));
-  const merged = promoted.map((r) => {
+  const stablePromoted = promoted.map((r) => {
     const prior = priorById.get(r.id);
     return prior &&
+      prior.title === r.title &&
       prior.content === r.content &&
       JSON.stringify(prior.fileHashes) === JSON.stringify(r.fileHashes)
       ? prior
       : r;
   });
+  const promotedIds = new Set(stablePromoted.map((r) => r.id));
+  const mode = replace ? "replace" : "merge";
+  const merged = mergeCanonRecords(existing.records, stablePromoted, mode);
+  const preserved = merged.filter((r) => !promotedIds.has(r.id)).length;
 
   if (asJson) {
     console.log(
@@ -1543,7 +1569,11 @@ async function canonPush(rest: string[]): Promise<void> {
         {
           root,
           path: canonPath(root),
-          promoted: merged.length,
+          mode,
+          promoted: stablePromoted.length,
+          preserved,
+          total: merged.length,
+          malformedLines: existing.skipped,
           refusedStale,
           skippedNoEvidence,
           secretBlocked,
@@ -1558,7 +1588,21 @@ async function canonPush(rest: string[]): Promise<void> {
   }
 
   console.log(`\nmemwarden canon push — ${root}\n`);
-  console.log(`  promoted   ${merged.length} memories that hold against this checkout`);
+  console.log(`  promoted   ${stablePromoted.length} stored memories that hold against this checkout`);
+  if (mode === "merge") {
+    console.log(`  preserved  ${preserved} existing Canon-only records (default merge)`);
+  } else {
+    console.log(`  mode       replace — records absent from this brain were explicitly dropped`);
+  }
+  console.log(`  total      ${merged.length} records in the Canon`);
+  if (existing.skipped > 0) {
+    console.log(
+      `  warning    ${existing.skipped} malformed/unsupported line(s) ` +
+        (replace
+          ? "will be dropped by explicit replace"
+          : "must be resolved before a real merge"),
+    );
+  }
   if (refusedStale > 0) {
     console.log(
       `  refused    ${refusedStale} already stale against this checkout (use --all to promote anyway)`,
@@ -1784,14 +1828,15 @@ async function canonPull(rest: string[]): Promise<void> {
   // The durable answer is CODEOWNERS on .memwarden/ plus review (documented in
   // the generated .memwarden/README.md); signing is the eventual fix.
   const checked = verifyCanon(records, root);
-  const loadable = checked.filter(
-    (c) => c.verdict === "verified" || c.verdict === "cosmetic",
-  );
+  // Only exact raw capture-hash matches can enter the brain as source-verified.
+  // Cosmetic matches remain useful information in `canon verify`, but importing
+  // one with its old raw hash would immediately classify stale at recall.
+  const loadable = checked.filter((c) => c.verdict === "verified");
   const yes = rest.includes("--yes");
   if (!yes && !asJson) {
     console.log(
       `\nmemwarden canon pull — ${root}\n\n` +
-        `  ${loadable.length} of ${checked.length} record(s) hold against this checkout and would\n` +
+        `  ${loadable.length} of ${checked.length} record(s) exactly match their capture hashes and would\n` +
         `  be loaded into this machine's memory:\n`,
     );
     for (const c of loadable.slice(0, 15)) {
@@ -1801,7 +1846,7 @@ async function canonPull(rest: string[]): Promise<void> {
     const rejected = checked.length - loadable.length;
     if (rejected > 0) {
       console.log(
-        `\n  ${rejected} refused (drifted or unverifiable) — they will not be loaded.`,
+        `\n  ${rejected} refused (drifted, cosmetic-only, or unverifiable) — they will not be loaded.`,
       );
     }
     console.log(
@@ -1813,27 +1858,24 @@ async function canonPull(rest: string[]): Promise<void> {
 
   let loaded = 0;
   let refused = checked.length - loadable.length;
-  for (const c of loadable) {
-    const r = c.record;
-    const res = await fetch(`${DAEMON_URL}/memwarden/observe`, {
+  for (const candidate of loadable) {
+    const record = candidate.record;
+    // Re-run local verification immediately before each import, after any
+    // confirmation delay. The daemon repeats the same raw-hash check at its
+    // core boundary immediately before writing, closing both stale previews and
+    // direct-API attempts to attach trusted status to caller prose.
+    const fresh = verifyCanon([record], root)[0];
+    if (!fresh || fresh.verdict !== "verified") {
+      refused++;
+      continue;
+    }
+    const res = await fetch(`${DAEMON_URL}/memwarden/canon/import`, {
       method: "POST",
       headers: authHeaders(),
-      body: JSON.stringify({
-        hookType: "post_tool_use",
-        sessionId: `canon-${root.replace(/[^a-zA-Z0-9]/g, "").slice(-24)}`,
-        project: root,
-        cwd: root,
-        timestamp: new Date().toISOString(),
-        agent: "canon",
-        data: {
-          tool_name: "CanonPull",
-          tool_input: { files: r.files },
-          tool_output: `${r.title}\n${r.content}`,
-        },
-        provenance: { files: r.files, fileHashes: r.fileHashes, cwd: root },
-      }),
+      body: JSON.stringify({ root, record }),
     });
     if (res.ok) loaded++;
+    else refused++;
   }
 
   if (asJson) {
@@ -1844,7 +1886,7 @@ async function canonPull(rest: string[]): Promise<void> {
     `\nmemwarden canon pull — ${root}\n\n` +
       `  loaded    ${loaded} verified memories into this machine's brain\n` +
       (refused > 0
-        ? `  refused   ${refused} that do not hold against this checkout (stale or unverifiable)\n`
+        ? `  refused   ${refused} without an exact local capture-hash match\n`
         : "") +
       `\n  Your agents now start with the team's verified canon instead of nothing.\n`,
   );

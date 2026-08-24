@@ -4,7 +4,7 @@
 // that validates the request body and delegates to a mem::<x> business
 // handler via sdk.trigger (paths prefixed /memwarden, with the
 // middleware::api-auth chain). Scope: livez, observe, context, search,
-// verify, stats, doctor, export, import.
+// verify, stats, doctor, Canon export/import, and Brain Bundle export/import.
 
 import type { ApiRequest, ISdk } from "../kernel/index.js";
 import type { HookPayload } from "../functions/types.js";
@@ -17,6 +17,11 @@ import { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { metrics } from "../observability/metrics.js";
 import { exportBundle, importBundle, isBrainBundle } from "../bundle/bundle.js";
+import {
+  CANON_EXPORT_MAX_PAGE,
+  isCanonRecord,
+  type CanonImportResult,
+} from "../functions/canon.js";
 import { timingSafeCompare } from "./auth.js";
 
 type Response = {
@@ -339,6 +344,112 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
     function_id: "api::search",
     config: {
       api_path: "/memwarden/search",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  // --- POST /memwarden/canon/export -------------------------------
+  // A bounded inventory of REAL stored Memory rows for exactly one project.
+  // This must never be implemented via search: search is ranked, capped, and
+  // returns observation-shaped results rather than the durable Memory records
+  // whose capture hashes Canon needs.
+  sdk.registerFunction(
+    "api::canon-export",
+    async (
+      req: ApiRequest<{ root?: string; cursor?: string; limit?: number }>,
+    ): Promise<Response> => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const root = asNonEmptyString(body["root"]);
+      if (!root) {
+        return { status_code: 400, body: { error: "root is required" } };
+      }
+      const limit = parseOptionalPositiveInt(body["limit"]);
+      if (limit === null || (limit !== undefined && limit > CANON_EXPORT_MAX_PAGE)) {
+        return {
+          status_code: 400,
+          body: {
+            error: `limit must be an integer between 1 and ${CANON_EXPORT_MAX_PAGE}`,
+          },
+        };
+      }
+      const cursor =
+        body["cursor"] === undefined
+          ? undefined
+          : asNonEmptyString(body["cursor"]);
+      if (body["cursor"] !== undefined && !cursor) {
+        return {
+          status_code: 400,
+          body: { error: "cursor must be a non-empty Memory id" },
+        };
+      }
+      try {
+        const result = await sdk.trigger({
+          function_id: "mem::canon-export",
+          payload: {
+            root,
+            ...(cursor ? { cursor } : {}),
+            ...(limit !== undefined ? { limit } : {}),
+          },
+        });
+        return { status_code: 200, body: result };
+      } catch (err) {
+        return {
+          status_code: 400,
+          body: { error: err instanceof Error ? err.message : String(err) },
+        };
+      }
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::canon-export",
+    config: {
+      api_path: "/memwarden/canon/export",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  // --- POST /memwarden/canon/import -------------------------------
+  // The core handler repeats local hash verification immediately before the
+  // write. The route validates shape for a useful 400, but API validation is
+  // never the trust boundary (in-process callers cannot bypass the core gate).
+  sdk.registerFunction(
+    "api::canon-import",
+    async (
+      req: ApiRequest<{ root?: string; record?: unknown }>,
+    ): Promise<Response> => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const root = asNonEmptyString(body["root"]);
+      if (!root) {
+        return { status_code: 400, body: { error: "root is required" } };
+      }
+      if (!isCanonRecord(body["record"])) {
+        return {
+          status_code: 400,
+          body: { error: "record is not a valid supported Canon record" },
+        };
+      }
+      const result = await sdk.trigger<
+        { root: string; record: unknown },
+        CanonImportResult
+      >({
+        function_id: "mem::canon-import",
+        payload: { root, record: body["record"] },
+      });
+      if (result.ok) return { status_code: 201, body: result };
+      return {
+        status_code: result.code === "invalid_record" ? 400 : 409,
+        body: result,
+      };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::canon-import",
+    config: {
+      api_path: "/memwarden/canon/import",
       http_method: "POST",
       middleware_function_ids: ["middleware::api-auth"],
     },

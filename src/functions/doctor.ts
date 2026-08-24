@@ -19,7 +19,7 @@ import type { StateKV } from "../state/kv.js";
 import type { CompressedObservation, Memory, Session } from "./types.js";
 import { KV } from "../state/schema.js";
 import { classifyProvenance } from "./verify.js";
-import { gitProjectKey } from "./git-identity.js";
+import { projectKey } from "./git-identity.js";
 import { memoryToObservation } from "./memory-utils.js";
 import { canonicalizePath } from "./paths.js";
 import { getDataDir } from "./config.js";
@@ -99,7 +99,7 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
 
       // Same-project memories from another worktree/moved checkout must be
       // verified against THIS checkout's files (see classifyProvenance opts).
-      const rootKey = gitProjectKey(root);
+      const rootKey = projectKey(root);
       const audit = (obs: CompressedObservation, sessionKey?: string) => {
         report.total++;
         const verdict = classifyProvenance(obs.provenance, root, {
@@ -132,11 +132,17 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
           if (m.isLatest === false) continue;
           if (
             projectFilter &&
-            m.project &&
-            canonicalizePath(m.project) !== projectFilter
+            ((m.projectKey !== undefined && m.projectKey !== rootKey) ||
+              (m.projectKey === undefined &&
+                m.project !== undefined &&
+                m.project !== rootKey &&
+                canonicalizePath(m.project) !== projectFilter))
           )
             continue;
-          audit(memoryToObservation(m));
+          audit(
+            memoryToObservation(m),
+            m.projectKey ?? (m.project === rootKey ? rootKey : undefined),
+          );
         }
       } catch (err) {
         logger.warn("doctor: failed to load memories", {

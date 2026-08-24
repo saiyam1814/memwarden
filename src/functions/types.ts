@@ -105,6 +105,18 @@ export type ObservationType =
  * provenance can be checked for staleness (do its files still exist?) and
  * sourcing (is there any evidence at all?); one without is "unsourced".
  */
+export interface CanonAttestation {
+  format: number;
+  recordId: string;
+  /** Stable identity written into the Canon record. Older records may not
+   * carry one; import assigns the identity of the checkout that verified it. */
+  projectKey: string;
+  promotedAt: string;
+  capturedBy?: { host?: string; agentId?: string };
+  reanchoredBy?: string;
+  reanchoredAt?: string;
+}
+
 export interface Provenance {
   cwd?: string;
   files?: string[]; // files the memory references / was derived from
@@ -113,6 +125,10 @@ export interface Provenance {
   agent?: string; // which agent captured it (claude, codex, …)
   capturedAt?: string;
   userConfirmed?: boolean; // explicitly saved by the user vs passively observed
+  /** Set only by the dedicated Canon import boundary after local hash
+   * verification. This records origin/attestation; it is NOT a cached trust
+   * verdict. Recall still re-hashes provenance.fileHashes every time. */
+  canon?: CanonAttestation;
   /** The memory's CONTENT includes material its file evidence does not cover
    * (e.g. a handoff digest mixing code-backed decisions with unsourced
    * prompts/outcomes, or inherited files dropped by a cap). File drift can
@@ -169,7 +185,32 @@ export interface Memory {
   imageData?: string;
   agentId?: string;
   project?: string;
+  /** Stable git/path identity for exact project scoping. Kept alongside the
+   * checkout path so moved clones and worktrees can still match safely. */
+  projectKey?: string;
   provenance?: Provenance; // evidence trail for Verified Recall
+}
+
+/** Portable, committed representation of one distilled Memory. Paths and hash
+ * keys are repository-relative; unknown additive fields remain reader-safe. */
+export interface CanonRecord {
+  format: number;
+  id: string;
+  title: string;
+  content: string;
+  concepts: string[];
+  files: string[];
+  fileHashes: Record<string, string>;
+  fileHashesNormalized?: Record<string, string>;
+  type: Memory["type"];
+  /** Portable remote-derived identity of the repository this record belongs
+   * to. Omitted for old records and remote-less repositories because their
+   * local absolute-path identity must never enter a committed artifact. */
+  projectKey?: string;
+  capturedBy?: { host?: string; agentId?: string };
+  promotedAt: string;
+  reanchoredBy?: string;
+  reanchoredAt?: string;
 }
 
 export interface SessionSummary {
