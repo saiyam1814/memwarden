@@ -13,8 +13,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { KV } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
-import { canonicalizePath } from "./paths.js";
-import { projectKey as computeProjectKey } from "./git-identity.js";
+import { projectIdentityMatchesPath } from "./memory-identity.js";
 
 const DEFAULT_WINDOW_MS = 15 * 60 * 1000;
 // Bounded so a long session's row doesn't grow without limit; recent files
@@ -165,8 +164,6 @@ export async function listActiveAgents(
   withinMs = DEFAULT_WINDOW_MS,
 ): Promise<FleetAgent[]> {
   const all = await kv.list<FleetAgent>(KV.fleetAgents);
-  const wantPath = canonicalizePath(project);
-  const wantKey = computeProjectKey(project);
   const now = Date.now();
   const cutoff = now - withinMs;
 
@@ -181,12 +178,16 @@ export async function listActiveAgents(
   }
 
   return all
-    .filter((a) => {
-      if (a.projectKey && a.projectKey === wantKey) return true;
-      if (a.project && canonicalizePath(a.project) === wantPath) return true;
-      if (a.cwd && canonicalizePath(a.cwd) === wantPath) return true;
-      return false;
-    })
+    .filter((agent) =>
+      projectIdentityMatchesPath(
+        {
+          ...(agent.project ? { projectPath: agent.project } : {}),
+          ...(agent.projectKey ? { projectKey: agent.projectKey } : {}),
+          ...(agent.cwd ? { captureCwd: agent.cwd } : {}),
+        },
+        project,
+      ),
+    )
     .filter((a) => {
       const t = Date.parse(a.lastSeen);
       return Number.isFinite(t) && t >= cutoff;

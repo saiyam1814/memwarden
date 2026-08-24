@@ -6,7 +6,10 @@
 
 import type { CompressedObservation, Memory } from "./types.js";
 
-export function memoryToObservation(memory: Memory): CompressedObservation {
+export function memoryToObservation(
+  memory: Memory,
+  resolved?: { captureCwd?: string },
+): CompressedObservation {
   const obs: CompressedObservation = {
     id: memory.id,
     sessionId: memory.sessionIds?.[0] ?? "memory",
@@ -22,10 +25,18 @@ export function memoryToObservation(memory: Memory): CompressedObservation {
   // Carry provenance so Memory records go through Verified Recall too. If a
   // record has no provenance but does reference files, synthesize a minimal
   // one so at least deletion is detected (content drift needs captured hashes).
+  const captureCwd = resolved?.captureCwd ?? memory.captureCwd;
   if (memory.provenance) {
-    obs.provenance = memory.provenance;
+    obs.provenance =
+      captureCwd && !memory.provenance.cwd
+        ? { ...memory.provenance, cwd: captureCwd }
+        : memory.provenance;
   } else if (memory.files && memory.files.length > 0) {
-    obs.provenance = { files: memory.files, command: "memory" };
+    obs.provenance = {
+      files: memory.files,
+      command: "memory",
+      ...(captureCwd ? { cwd: captureCwd } : {}),
+    };
   }
   return obs;
 }
