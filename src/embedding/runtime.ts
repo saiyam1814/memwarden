@@ -9,7 +9,13 @@
 // Everything stays honest: if neither resolves, the daemon says
 // "lexical-only" instead of silently degrading.
 
-import { existsSync, readFileSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -109,9 +115,99 @@ export function installSemanticRuntime(dataDir?: string): RuntimeInstallResult {
   });
   if (r.error) return { ok: false, message: r.error.message };
   if (r.status !== 0) return { ok: false, message: `npm exited ${r.status}` };
-  return resolveTransformersEntry(root)
-    ? { ok: true, message: root }
-    : { ok: false, message: `npm succeeded but ${PKG} is not resolvable in ${root}` };
+  if (!resolveTransformersEntry(root)) {
+    return { ok: false, message: `npm succeeded but ${PKG} is not resolvable in ${root}` };
+  }
+  const freed = pruneSemanticRuntime(root);
+  return {
+    ok: true,
+    message: freed > 0 ? `${root} (pruned ${mib(freed)} of unusable binaries)` : root,
+  };
+}
+
+function mib(bytes: number): string {
+  return `${Math.round(bytes / (1024 * 1024))}MB`;
+}
+
+/** Recursive delete that reports how many bytes went away. */
+function rmReport(target: string): number {
+  let freed = 0;
+  try {
+    const st = statSync(target);
+    if (st.isDirectory()) {
+      for (const e of readdirSync(target)) freed += rmReport(join(target, e));
+    } else {
+      freed += st.size;
+    }
+    rmSync(target, { recursive: true, force: true });
+  } catch {
+    // best-effort: a runtime we cannot prune still works, just larger
+  }
+  return freed;
+}
+
+/**
+ * Delete the parts of the embedding runtime that can never execute here.
+ *
+ * `npm install @huggingface/transformers` pulls onnxruntime for EVERY target:
+ * measured on a darwin/arm64 install, 425MB of runtime contained 86MB of
+ * `onnxruntime-web` (a browser build Node never loads) and ~145MB of native
+ * libraries for linux-x64, linux-arm64, win32-x64, win32-arm64 and darwin-x64.
+ * None of it is reachable, and a resident daemon quietly holding a quarter
+ * gigabyte of dead weight is a bad neighbour on someone's laptop.
+ *
+ * Only the current platform/arch pair is kept. Moving the brain to a different
+ * OS means re-running `memwarden up`, which reinstalls the runtime; until then
+ * the loader falls back to BM25 and says so, which is the existing honest
+ * degradation path rather than a new failure mode.
+ *
+ * MEMWARDEN_RUNTIME_PRUNE=off keeps everything.
+ */
+export function pruneSemanticRuntime(root: string): number {
+  if ((process.env["MEMWARDEN_RUNTIME_PRUNE"] ?? "").toLowerCase() === "off") {
+    return 0;
+  }
+  const modules = join(root, "node_modules");
+  let freed = 0;
+
+  // The browser build. Node resolves onnxruntime-node; this is never loaded.
+  freed += rmReport(join(modules, "onnxruntime-web"));
+
+  // Native libraries for other targets. The layout is
+  // onnxruntime-node/bin/napi-v3/<platform>/<arch>/...
+  const binRoot = join(modules, "onnxruntime-node", "bin");
+  let napiDirs: string[] = [];
+  try {
+    napiDirs = readdirSync(binRoot).map((d) => join(binRoot, d));
+  } catch {
+    napiDirs = [];
+  }
+  for (const napi of napiDirs) {
+    let platforms: string[] = [];
+    try {
+      platforms = readdirSync(napi);
+    } catch {
+      continue;
+    }
+    for (const plat of platforms) {
+      if (plat !== process.platform) {
+        freed += rmReport(join(napi, plat));
+        continue;
+      }
+      // Right platform: drop the other architectures.
+      const platDir = join(napi, plat);
+      let arches: string[] = [];
+      try {
+        arches = readdirSync(platDir);
+      } catch {
+        continue;
+      }
+      for (const arch of arches) {
+        if (arch !== process.arch) freed += rmReport(join(platDir, arch));
+      }
+    }
+  }
+  return freed;
 }
 
 // Windows shell invocation: quote anything with spaces (e.g. the --prefix
