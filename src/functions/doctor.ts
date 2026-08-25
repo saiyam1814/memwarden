@@ -16,10 +16,23 @@ import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { ISdk } from "../kernel/index.js";
 import type { StateKV } from "../state/kv.js";
-import type { CompressedObservation, Memory, Session } from "./types.js";
+import type {
+  CompressedObservation,
+  Memory,
+  MemoryLifecycleState,
+  Session,
+} from "./types.js";
 import { KV } from "../state/schema.js";
-import { classifyProvenance } from "./verify.js";
-import { isMemoryRecallable, memoryToObservation } from "./memory-utils.js";
+import {
+  classifyProvenance,
+  type EvidenceTrust,
+  type LiveSourceStatus,
+} from "./verify.js";
+import { memoryToObservation } from "./memory-utils.js";
+import {
+  lifecycleProjection,
+  validityIntervalsOf,
+} from "./memory-lifecycle.js";
 import {
   hasProjectIdentity,
   projectIdentityMatchesPath,
@@ -56,7 +69,23 @@ export function dirSizeBytes(dir: string): number {
 export interface DoctorEntry {
   id: string;
   title: string;
+  /** Compatibility summary (the old four-state verdict reason). */
   reason: string;
+  evidenceVerdict: EvidenceTrust;
+  evidenceReason: string;
+  sourceStatus: LiveSourceStatus;
+  sourceReason: string;
+  persistedLifecycle: MemoryLifecycleState;
+  effectiveLifecycle: MemoryLifecycleState;
+  /** The last explicit semantic decision, never replaced by drift text. */
+  transitionReason: string;
+  lifecycleReason: string;
+  observedAt: string;
+  validFrom?: string;
+  validTo?: string;
+  validityReconstruction: "recorded" | "legacy_inferred" | "unavailable";
+  sourceCommit?: string;
+  attestation?: "canon-imported" | "canon-reanchored";
 }
 export interface DoctorFootprint {
   /** Total bytes the brain occupies on disk (whole data dir). */
@@ -68,11 +97,15 @@ export interface DoctorFootprint {
 }
 export interface DoctorReport {
   total: number;
-  safe: number; // verified + sourcedUnverified (everything injectable)
-  verified: number; // code-backed and current
-  sourcedUnverified: number; // sourced but not content-verified
+  safe: number; // compatibility: current verified + sourced_unverified
+  verified: number; // compatibility: legacy verified verdict
+  sourcedUnverified: number; // compatibility: legacy sourced verdict
   stale: DoctorEntry[];
   unsourced: DoctorEntry[];
+  entries: DoctorEntry[];
+  evidence: Record<EvidenceTrust, number>;
+  source: Record<LiveSourceStatus, number>;
+  lifecycle: Record<MemoryLifecycleState, DoctorEntry[]>;
   conflicts: MemoryConflict[];
   /** Disk/size honesty: memory layers that hide their footprint end up
    * surprising users with gigabytes. memwarden reports it on every audit. */
@@ -98,6 +131,23 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
         sourcedUnverified: 0,
         stale: [],
         unsourced: [],
+        entries: [],
+        evidence: { verified: 0, sourced: 0, unsourced: 0 },
+        source: {
+          matched: 0,
+          cosmetic_drift: 0,
+          drifted: 0,
+          missing: 0,
+          unknown: 0,
+        },
+        lifecycle: {
+          active: [],
+          needs_revalidation: [],
+          superseded: [],
+          disputed: [],
+          archived: [],
+          revoked: [],
+        },
         conflicts: [],
         footprint: { bytesOnDisk: 0, dataDir: getDataDir(), oplogEntries: 0 },
       };
@@ -112,24 +162,78 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
         !projectFilter ||
         (hasProjectIdentity(identity) &&
           projectIdentityMatchesPath(identity, projectFilter));
-      const audit = (obs: CompressedObservation, identity: ProjectIdentity) => {
+      const audit = (
+        obs: CompressedObservation,
+        identity: ProjectIdentity,
+        memory: Memory | null = null,
+      ) => {
         report.total++;
         // A stable-key match may widen which memory is audited, but the value
         // passed to the verifier is always `root`, the caller's real checkout.
         const verdict = classifyProvenance(obs.provenance, root, {
           verifyAgainstRoot: projectIdentityMatchesPath(identity, root),
         });
-        const entry: DoctorEntry = { id: obs.id, title: obs.title, reason: verdict.reason };
+        const projection = lifecycleProjection(
+          memory,
+          verdict.sourceStatus,
+          verdict.evidenceTrust === "verified" && verdict.sourceStatus === "unknown",
+        );
+        const intervals = memory ? validityIntervalsOf(memory) : [];
+        const latest = intervals[intervals.length - 1];
+        const observedAt =
+          memory?.observedAt ?? obs.provenance?.capturedAt ?? obs.timestamp;
+        const canon = obs.provenance?.canon;
+        const entry: DoctorEntry = {
+          id: obs.id,
+          title: obs.title,
+          reason: verdict.reason,
+          evidenceVerdict: verdict.evidenceTrust,
+          evidenceReason: verdict.evidenceReason,
+          sourceStatus: verdict.sourceStatus,
+          sourceReason: verdict.sourceReason,
+          persistedLifecycle: projection.persisted,
+          effectiveLifecycle: projection.effective,
+          transitionReason: projection.persistedReason,
+          lifecycleReason: projection.effectiveReason,
+          observedAt,
+          ...(latest?.validFrom
+            ? { validFrom: latest.validFrom }
+            : { validFrom: observedAt }),
+          ...(latest?.validTo ? { validTo: latest.validTo } : {}),
+          validityReconstruction: memory
+            ? intervals.length === 0
+              ? "unavailable"
+              : intervals.some((interval) => interval.inferred)
+                ? "legacy_inferred"
+                : "recorded"
+            : "unavailable",
+          ...(memory?.sourceCommit ? { sourceCommit: memory.sourceCommit } : {}),
+          ...(canon
+            ? {
+                attestation: canon.reanchoredAt
+                  ? ("canon-reanchored" as const)
+                  : ("canon-imported" as const),
+              }
+            : {}),
+        };
+        report.entries.push(entry);
+        report.evidence[verdict.evidenceTrust]++;
+        report.source[verdict.sourceStatus]++;
+        report.lifecycle[projection.effective].push(entry);
         switch (verdict.status) {
           case "verified":
             report.verified++;
-            report.safe++;
-            conflictCandidates.push(obs);
+            if (projection.effective === "active") {
+              report.safe++;
+              conflictCandidates.push(obs);
+            }
             break;
           case "sourced_unverified":
             report.sourcedUnverified++;
-            report.safe++;
-            conflictCandidates.push(obs);
+            if (projection.effective === "active") {
+              report.safe++;
+              conflictCandidates.push(obs);
+            }
             break;
           case "stale":
             report.stale.push(entry);
@@ -143,10 +247,9 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
       try {
         const memories = await kv.list<Memory>(KV.memories);
         for (const memory of memories) {
-          if (!isMemoryRecallable(memory)) continue;
           const identity = resolveMemoryIdentity(memory, sessionsById);
           if (!inScope(identity)) continue;
-          audit(memoryToObservation(memory, identity), identity);
+          audit(memoryToObservation(memory, identity), identity, memory);
         }
       } catch (err) {
         logger.warn("doctor: failed to load memories", {

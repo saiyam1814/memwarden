@@ -248,6 +248,66 @@ export function createMcpServer(opts: McpServerOptions) {
       },
     },
     {
+      name: "memory_lifecycle",
+      description:
+        "Record an explicit lifecycle decision for a stored Memory without deleting its content. Use dispute/archive/revoke/restore for semantic state, revalidate after checking current file evidence, or supersede with an existing successor id. Every transition requires a human-readable reason and is retained with validity lineage.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          memory_id: {
+            type: "string",
+            maxLength: 512,
+            description: "Stored Memory id (not a raw observation id).",
+          },
+          action: {
+            type: "string",
+            enum: [
+              "mark_needs_revalidation",
+              "supersede",
+              "dispute",
+              "archive",
+              "revoke",
+              "restore",
+              "revalidate",
+            ],
+          },
+          reason: {
+            type: "string",
+            maxLength: 1000,
+            description: "Why this semantic transition is being made.",
+          },
+          successor_id: {
+            type: "string",
+            maxLength: 512,
+            description: "Required only for action='supersede'.",
+          },
+          root: {
+            type: "string",
+            maxLength: 4096,
+            description:
+              "Project checkout used by revalidate. Defaults to this MCP server's project.",
+          },
+          actor: {
+            type: "string",
+            maxLength: 256,
+            description: "Optional actor recorded on the transition.",
+          },
+        },
+        required: ["memory_id", "action", "reason"],
+      },
+      call: (a) =>
+        api("POST", "/memwarden/lifecycle", {
+          memory_id: str(a["memory_id"]),
+          action: str(a["action"]),
+          reason: str(a["reason"]),
+          root: str(a["root"], serverCwd),
+          actor: str(a["actor"], "mcp"),
+          ...(typeof a["successor_id"] === "string"
+            ? { successor_id: a["successor_id"] }
+            : {}),
+        }),
+    },
+    {
       name: "memory_search",
       description:
         "Search memories by meaning and keywords (TurboQuant vector + BM25 hybrid). " +
@@ -260,9 +320,16 @@ export function createMcpServer(opts: McpServerOptions) {
           limit: { type: "number", description: "Max results (default 10)" },
           mode: {
             type: "string",
-            enum: ["current", "historical", "all"],
+            enum: ["current", "historical", "as_of", "all"],
             description:
-              "Inclusion policy: current (default, safe), historical (only source-drifted/superseded), or all (both). Classification and labels always run.",
+              "Inclusion policy: current (default, safe), historical (non-active/unresolved), as_of (stored version intervals at as_of), or all. Every result keeps evidence, live source, and lifecycle labels separate.",
+          },
+          as_of: {
+            type: "string",
+            format: "date-time",
+            maxLength: 128,
+            description:
+              "Timestamp for mode='as_of'. Only stored Memory validity intervals are reconstructed; unavailable observation history is excluded and reported honestly.",
           },
           include_drifted: {
             type: "boolean",
@@ -300,8 +367,19 @@ export function createMcpServer(opts: McpServerOptions) {
       // cross-repo lookup, but it never verifies a hit against this server's
       // unrelated cwd; the daemon classifies against each hit's own checkout.
       call: (a) => {
-        const requestedMode =
+        const asOf =
+          typeof a["as_of"] === "string" && a["as_of"].trim()
+            ? a["as_of"].trim()
+            : undefined;
+        const explicitMode =
           typeof a["mode"] === "string" ? a["mode"].trim().toLowerCase() : undefined;
+        if (explicitMode && explicitMode !== "as_of" && asOf) {
+          throw new Error("memory_search: as_of is only compatible with mode=as_of");
+        }
+        if (explicitMode === "as_of" && !asOf) {
+          throw new Error("memory_search: mode=as_of requires as_of");
+        }
+        const requestedMode = explicitMode ?? (asOf ? "as_of" : undefined);
         const aliasMode =
           a["include_drifted"] === true
             ? "all"
@@ -318,6 +396,7 @@ export function createMcpServer(opts: McpServerOptions) {
           query: str(a["query"]),
           limit: typeof a["limit"] === "number" ? a["limit"] : 10,
           mode,
+          ...(asOf ? { as_of: asOf } : {}),
           ...(typeof a["format"] === "string" ? { format: a["format"] } : {}),
           ...(Array.isArray(a["trust"]) ? { trust: a["trust"] } : {}),
           ...(a["all_projects"] === true ? {} : { cwd: serverCwd }),
