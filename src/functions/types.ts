@@ -117,6 +117,89 @@ export interface CanonAttestation {
   reanchoredAt?: string;
 }
 
+/** Fine-grained source commitments are intentionally language-neutral and
+ * payload-free. The raw hash always commits to the exact captured bytes; the
+ * normalized hash is additive and can only distinguish a narrowly defined
+ * cosmetic transformation. */
+export type FineGrainedAnchorNormalization =
+  | "text-lf-trailing-whitespace-v1"
+  | "json-canonical-value-v1";
+
+export interface FineGrainedAnchorOccurrence {
+  /** Exact-content occurrences observed at capture, capped by the writer. */
+  count: number;
+  capped: boolean;
+  unique: boolean;
+}
+
+export interface FineGrainedTextLocation {
+  /** 1-based lines, 0-based UTF-8 byte columns, and exclusive byte end. */
+  startLine: number;
+  endLine: number;
+  startColumn: number;
+  endColumn: number;
+  startByte: number;
+  endByte: number;
+  byteLength: number;
+  lineCount: number;
+  /** Dynamic line boundaries let formatting-only trailing whitespace be
+   * normalized without retaining the captured source text. */
+  startAtLineStart: boolean;
+  endAtLineEnd: boolean;
+}
+
+export interface FineGrainedConfigLocation extends FineGrainedTextLocation {
+  /** This first slice accepts only an explicit, unambiguous top-level JSON key. */
+  keyPath: string[];
+}
+
+export interface FineGrainedAnchorBase {
+  path: string;
+  rawHash: string;
+  normalizedHash: string;
+  normalization: FineGrainedAnchorNormalization;
+  /** Non-cryptographic rolling locator used only to find candidates. Every
+   * candidate is still re-hashed with SHA-256 before it can match. */
+  locatorHash: string;
+  occurrence: FineGrainedAnchorOccurrence;
+  contentCompleteness: "complete";
+  sourceCommit?: string;
+}
+
+export interface FineGrainedEditSpanAnchor extends FineGrainedAnchorBase {
+  kind: "edit_span";
+  location: FineGrainedTextLocation;
+}
+
+export interface FineGrainedLineRangeAnchor extends FineGrainedAnchorBase {
+  kind: "line_range";
+  location: FineGrainedTextLocation;
+}
+
+export interface FineGrainedJsonConfigAnchor extends FineGrainedAnchorBase {
+  kind: "json_config_value";
+  location: FineGrainedConfigLocation;
+}
+
+export type FineGrainedAnchor =
+  | FineGrainedEditSpanAnchor
+  | FineGrainedLineRangeAnchor
+  | FineGrainedJsonConfigAnchor;
+
+export interface FineGrainedEvidence {
+  format: 1;
+  /** `claim` says whether the generated memory claim is wholly supported by
+   * these units; `sources` says whether every referenced source is represented. */
+  coverage: {
+    claim: "complete" | "partial";
+    sources: "complete" | "partial";
+  };
+  /** Derived at capture from coverage plus anchor uniqueness. Readers validate
+   * the derivation and never accept this word as a cached verification result. */
+  completeness: "complete" | "partial";
+  anchors: FineGrainedAnchor[];
+}
+
 export interface Provenance {
   cwd?: string;
   files?: string[]; // files the memory references / was derived from
@@ -125,6 +208,9 @@ export interface Provenance {
    * These may distinguish cosmetic byte drift from semantic source drift, but
    * never replace the raw hashes used for source verification. */
   fileHashesNormalized?: Record<string, string>;
+  /** Bounded fine-grained source commitments. They are advisory unless their
+   * validated capture metadata proves complete claim and source coverage. */
+  anchors?: FineGrainedEvidence;
   command?: string; // tool + command that produced it
   agent?: string; // which agent captured it (claude, codex, …)
   capturedAt?: string;
@@ -286,6 +372,7 @@ export interface CanonRecord {
   files: string[];
   fileHashes: Record<string, string>;
   fileHashesNormalized?: Record<string, string>;
+  anchors?: FineGrainedEvidence;
   type: Memory["type"];
   /** Portable lifecycle and version lineage. These are semantic assertions,
    * not source-verification verdicts; every checkout still verifies hashes. */

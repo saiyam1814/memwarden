@@ -45,6 +45,7 @@
     "typecheck": "tsc --noEmit",
     "demo:firewall": "tsx demo/firewall.ts",
     "eval": "tsx eval/firewall-eval.ts",
+    "eval:anchors": "tsx eval/anchor-eval.ts",
     "eval:halflife": "tsx eval/memory-halflife.ts",
     "inspect": "tsx eval/inspect-store.ts"
   },

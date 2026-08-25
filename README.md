@@ -28,8 +28,9 @@ npm install -g memwarden && memwarden up    # persistent: wire every agent, one 
 memwarden is **self-custodied, verified memory** shared across every coding agent you use - Claude
 Code, Codex, Cursor, Gemini CLI, Kiro, OpenCode, and more. The point isn't to remember *more*. It's
 that a coding agent can settle a question general-purpose memory can't: **is this memory still true?**
-Every code-backed memory is tied to a SHA-256 hash of the files it references; on recall the live repo
-is re-hashed, and anything that no longer checks out is refused before the model ever sees it.
+Every code-backed memory carries capture-time SHA-256 commitments. Whole-file hashes are the safe
+fallback; a bounded, capture-complete source-unit anchor can ignore unrelated same-file edits. Recall
+re-hashes the live repo, and anything that no longer checks out is refused before the model sees it.
 
 ## 🚀 Quick start
 
@@ -85,9 +86,9 @@ Every search hit is classified against its source before an inclusion policy dec
 
 | State | Meaning | Firewall |
 | --- | --- | --- |
-| 🟢 `verified` | a captured source-file hash still matches the file on disk - code-backed and current | **injected** (only content-hash-confirmed memory earns this) |
-| 🔵 `sourced` | has a source (command, or files present but not hashable), no content hash to re-check | injected, **labeled** |
-| 🟠 `stale` / `source-drifted` | a referenced file was deleted or its content changed since capture | **blocked from current recall**; explicit history only |
+| 🟢 `verified` | every complete source commitment (whole file or fine-grained unit) raw-hash-matches live content | **injected** (only content-hash-confirmed memory earns this) |
+| 🔵 `sourced` | has a source but no complete raw match; this includes explicitly normalized cosmetic anchor matches | injected, **labeled** |
+| 🟠 `stale` / `source-drifted` | a complete anchored unit changed/disappeared, or conservative whole-file fallback drifted | **blocked from current recall**; explicit history only |
 | ⚪ `unsourced` | no provenance at all | included by balanced recall, always **labeled** (unverified ≠ dangerous) |
 
 Classification always runs; policy controls **inclusion**, not whether a result gets a verdict. Every

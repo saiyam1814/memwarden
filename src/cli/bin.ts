@@ -1951,15 +1951,21 @@ async function canonPull(rest: string[]): Promise<void> {
   // The durable answer is CODEOWNERS on .memwarden/ plus review (documented in
   // the generated .memwarden/README.md); signing is the eventual fix.
   const checked = verifyCanon(records, root);
-  // Only exact raw capture-hash matches can enter the brain as source-verified.
-  // Cosmetic matches remain useful information in `canon verify`, but importing
-  // one with its old raw hash would immediately classify stale at recall.
-  const loadable = checked.filter((c) => c.verdict === "verified");
+  // Exact raw matches remain verified. A cosmetic result is loadable only when
+  // it came from a capture-complete fine-grained anchor; the core import repeats
+  // that normalized commitment check and stores it as labeled sourced memory.
+  // Whole-file cosmetic drift and partial anchors remain non-loadable.
+  const locallyLoadable = (candidate: (typeof checked)[number]): boolean =>
+    candidate.verdict === "verified" ||
+    (candidate.verdict === "cosmetic" &&
+      candidate.anchorActionable === true &&
+      candidate.anchorStatus === "cosmetic_match");
+  const loadable = checked.filter(locallyLoadable);
   const yes = rest.includes("--yes");
   if (!yes && !asJson) {
     console.log(
       `\nmemwarden canon pull — ${root}\n\n` +
-        `  ${loadable.length} of ${checked.length} record(s) exactly match their capture hashes and would\n` +
+        `  ${loadable.length} of ${checked.length} record(s) locally match complete source commitments and would\n` +
         `  be loaded into this machine's memory:\n`,
     );
     for (const c of loadable.slice(0, 15)) {
@@ -1969,7 +1975,7 @@ async function canonPull(rest: string[]): Promise<void> {
     const rejected = checked.length - loadable.length;
     if (rejected > 0) {
       console.log(
-        `\n  ${rejected} refused (drifted, cosmetic-only, or unverifiable) — they will not be loaded.`,
+        `\n  ${rejected} refused (drifted, whole-file cosmetic-only, partial, or unverifiable) — they will not be loaded.`,
       );
     }
     console.log(
@@ -1984,11 +1990,11 @@ async function canonPull(rest: string[]): Promise<void> {
   for (const candidate of loadable) {
     const record = candidate.record;
     // Re-run local verification immediately before each import, after any
-    // confirmation delay. The daemon repeats the same raw-hash check at its
-    // core boundary immediately before writing, closing both stale previews and
-    // direct-API attempts to attach trusted status to caller prose.
+    // confirmation delay. The daemon repeats the raw/complete-anchor check at
+    // its core boundary immediately before writing, closing both stale previews
+    // and direct-API attempts to attach trusted status to caller prose.
     const fresh = verifyCanon([record], root)[0];
-    if (!fresh || fresh.verdict !== "verified") {
+    if (!fresh || !locallyLoadable(fresh)) {
       refused++;
       continue;
     }
@@ -2007,9 +2013,9 @@ async function canonPull(rest: string[]): Promise<void> {
   }
   console.log(
     `\nmemwarden canon pull — ${root}\n\n` +
-      `  loaded    ${loaded} verified memories into this machine's brain\n` +
+      `  loaded    ${loaded} locally revalidated memories into this machine's brain\n` +
       (refused > 0
-        ? `  refused   ${refused} without an exact local capture-hash match\n`
+        ? `  refused   ${refused} without a complete local source match\n`
         : "") +
       `\n  Your agents now start with the team's verified canon instead of nothing.\n`,
   );

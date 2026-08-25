@@ -77,6 +77,39 @@ export type {
   CanonProjectIdentity,
 } from "./canon.js";
 export {
+  FINE_GRAINED_EVIDENCE_FORMAT,
+  MAX_FINE_GRAINED_ANCHORS,
+  MAX_ANCHOR_FILE_BYTES,
+  MAX_ANCHOR_CONTENT_BYTES,
+  MAX_ANCHOR_LINES,
+  captureFineGrainedEvidence,
+  canonicalFineGrainedEvidence,
+  cloneFineGrainedEvidence,
+  isActionableFineGrainedEvidence,
+  isFineGrainedEvidence,
+  isPortableAnchorPath,
+  sourceCommitAt,
+  verifyFineGrainedEvidence,
+} from "./anchors.js";
+export type {
+  CaptureFineGrainedEvidenceInput,
+  FineGrainedAnchorCheck,
+  FineGrainedAnchorStatus,
+  FineGrainedVerification,
+} from "./anchors.js";
+export type {
+  FineGrainedAnchor,
+  FineGrainedAnchorBase,
+  FineGrainedAnchorNormalization,
+  FineGrainedAnchorOccurrence,
+  FineGrainedConfigLocation,
+  FineGrainedEditSpanAnchor,
+  FineGrainedEvidence,
+  FineGrainedJsonConfigAnchor,
+  FineGrainedLineRangeAnchor,
+  FineGrainedTextLocation,
+} from "./types.js";
+export {
   registerLifecycleFunction,
   transitionMemoryLifecycle,
 } from "./lifecycle.js";

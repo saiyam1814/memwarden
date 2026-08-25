@@ -1,0 +1,32 @@
+[
+  {
+    "id": "unrelated-same-file-constant",
+    "captureContent": "export const TTL = 900;\nexport const RETRIES = 3;\n",
+    "mutationContent": "export const TTL = 900;\nexport const RETRIES = 5;\n",
+    "expectedCurrent": true
+  },
+  {
+    "id": "line-shift-before-anchor",
+    "captureContent": "// policy\nexport const TTL = 900;\n",
+    "mutationContent": "// generated heading\n// policy\nexport const TTL = 900;\n",
+    "expectedCurrent": true
+  },
+  {
+    "id": "declared-cosmetic-formatting",
+    "captureContent": "export const TTL = 900;\nexport const MODE = 'strict';\n",
+    "mutationContent": "export const TTL = 900;   \nexport const MODE = 'strict';\n",
+    "expectedCurrent": true
+  },
+  {
+    "id": "anchored-value-change",
+    "captureContent": "export const TTL = 900;\nexport const RETRIES = 3;\n",
+    "mutationContent": "export const TTL = 60;\nexport const RETRIES = 3;\n",
+    "expectedCurrent": false
+  },
+  {
+    "id": "anchored-unit-removed",
+    "captureContent": "export const TTL = 900;\nexport const RETRIES = 3;\n",
+    "mutationContent": "export const RETRIES = 3;\n",
+    "expectedCurrent": false
+  }
+]

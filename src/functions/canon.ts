@@ -41,6 +41,13 @@ import {
 } from "./memory-lifecycle.js";
 import { classifyProvenance, hashFiles } from "./verify.js";
 import {
+  cloneFineGrainedEvidence,
+  isActionableFineGrainedEvidence,
+  isFineGrainedEvidence,
+  isPortableAnchorPath,
+  verifyFineGrainedEvidence,
+} from "./anchors.js";
+import {
   getSearchIndex,
   vectorIndexAddGuarded,
   vectorIndexRemove,
@@ -59,7 +66,6 @@ const MEMORY_TYPES = new Set<Memory["type"]>([
   "fact",
 ]);
 const SHA256_RE = /^[a-f0-9]{64}$/;
-const UNSAFE_MAP_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 const LIFECYCLE_STATES = new Set<string>(MEMORY_LIFECYCLE_STATES);
 const LIFECYCLE_ACTIONS = new Set<string>([
   "create",
@@ -82,32 +88,10 @@ function isBoundedString(
   );
 }
 
-/** A Canon path must have one portable meaning on every platform and must not
- * be able to make verification read outside the checkout. */
+/** Canon and fine-grained anchors share the same portable, traversal-safe
+ * checkout-relative path grammar. */
 export function isPortableCanonPath(value: unknown): value is string {
-  if (!isBoundedString(value, 1024)) return false;
-  if (
-    value.startsWith("/") ||
-    value.includes("\\") ||
-    /[\u0000-\u001f\u007f:*?"<>|]/.test(value)
-  ) {
-    return false;
-  }
-  const parts = value.split("/");
-  if (
-    parts.some(
-      (part) =>
-        !part ||
-        part === "." ||
-        part === ".." ||
-        part.endsWith(".") ||
-        part.endsWith(" "),
-    ) ||
-    UNSAFE_MAP_KEYS.has(value)
-  ) {
-    return false;
-  }
-  return true;
+  return isPortableAnchorPath(value);
 }
 
 function isIso(value: unknown): value is string {
@@ -248,6 +232,22 @@ export function isCanonRecord(value: unknown): value is CanonRecord {
     !isHashMap(value["fileHashesNormalized"], files, false)
   ) {
     return false;
+  }
+  if (value["anchors"] !== undefined) {
+    if (!isFineGrainedEvidence(value["anchors"])) return false;
+    const anchorPaths = new Set(
+      value["anchors"].anchors.map((anchor) => anchor.path),
+    );
+    if ([...anchorPaths].some((path) => !files.has(path))) return false;
+    // A complete portable assertion must cover exactly the declared sources;
+    // partial anchor sets remain advisory and retain whole-file fallback.
+    if (
+      isActionableFineGrainedEvidence(value["anchors"]) &&
+      (anchorPaths.size !== files.size ||
+        [...files].some((path) => !anchorPaths.has(path)))
+    ) {
+      return false;
+    }
   }
   if (value["projectKey"] !== undefined) {
     if (
@@ -462,8 +462,8 @@ export type CanonImportResult =
       imported: true;
       id: string;
       projectKey: string;
-      /** Local raw-hash verdict, independent of semantic lifecycle/attestation. */
-      verdict: "verified";
+      /** Locally recomputed source verdict, independent of lifecycle/attestation. */
+      verdict: "verified" | "cosmetic";
       lifecycle: MemoryLifecycleState;
       attestation: "canon-imported" | "canon-reanchored";
     }
@@ -510,19 +510,46 @@ export async function importCanonRecord(
     };
   }
 
-  // Exact raw capture hashes are the trust boundary. A normalized/cosmetic
-  // match is useful for `canon verify`, but it cannot become a stored
-  // `verified` Memory because classifyProvenance verifies raw hashes.
+  // Recompute both evidence levels locally. No persisted/caller-supplied anchor
+  // verdict exists in the format. Complete raw/cosmetic anchors may explain an
+  // unrelated whole-file mismatch; incomplete or ambiguous anchors never do.
   const actual = hashFiles(record.files, identity.root);
-  for (const file of record.files) {
-    if (actual[file] !== record.fileHashes[file]) {
-      return {
-        ok: false,
-        code: "hash_mismatch",
-        error: `Canon evidence does not match this checkout: ${file}`,
-        id: record.id,
-      };
-    }
+  const wholeFileMatches = record.files.every(
+    (file) => actual[file] === record.fileHashes[file],
+  );
+  const portableAnchors = record.anchors
+    ? cloneFineGrainedEvidence(record.anchors)
+    : undefined;
+  const anchorCheck = portableAnchors
+    ? verifyFineGrainedEvidence(portableAnchors, identity.root)
+    : undefined;
+  const anchorOverride =
+    anchorCheck?.actionable === true &&
+    (anchorCheck.status === "raw_match" ||
+      anchorCheck.status === "cosmetic_match");
+  if (!wholeFileMatches && !anchorOverride) {
+    const failed = record.files.find(
+      (file) => actual[file] !== record.fileHashes[file],
+    );
+    return {
+      ok: false,
+      code: "hash_mismatch",
+      error: `Canon evidence does not match this checkout: ${failed ?? "source"}`,
+      id: record.id,
+    };
+  }
+  if (
+    anchorCheck?.actionable === true &&
+    (anchorCheck.status === "drifted" ||
+      anchorCheck.status === "missing" ||
+      anchorCheck.status === "ambiguous")
+  ) {
+    return {
+      ok: false,
+      code: "hash_mismatch",
+      error: `Canon fine-grained evidence is not current: ${anchorCheck.reason}`,
+      id: record.id,
+    };
   }
 
   const existing = await kv.get<Memory>(KV.memories, record.id).catch(() => null);
@@ -557,6 +584,7 @@ export async function importCanonRecord(
     ...(record.fileHashesNormalized
       ? { fileHashesNormalized: { ...record.fileHashesNormalized } }
       : {}),
+    ...(portableAnchors ? { anchors: portableAnchors } : {}),
     command: "canon pull",
     userConfirmed: false,
     ...(record.capturedBy?.host ? { agent: record.capturedBy.host } : {}),
@@ -579,7 +607,10 @@ export async function importCanonRecord(
   const verdict = classifyProvenance(provenance, identity.root, {
     verifyAgainstRoot: true,
   });
-  if (verdict.status !== "verified") {
+  if (
+    verdict.sourceStatus !== "matched" ||
+    (verdict.status !== "verified" && verdict.status !== "sourced_unverified")
+  ) {
     return {
       ok: false,
       code: "hash_mismatch",
@@ -587,6 +618,8 @@ export async function importCanonRecord(
       id: record.id,
     };
   }
+  const localVerdict =
+    verdict.status === "verified" ? ("verified" as const) : ("cosmetic" as const);
 
   const now = new Date().toISOString();
   const importedLifecycle =
@@ -672,7 +705,7 @@ export async function importCanonRecord(
     imported: true,
     id: memory.id,
     projectKey: canonProjectKey,
-    verdict: "verified",
+    verdict: localVerdict,
     lifecycle: persistedLifecycleOf(memory),
     attestation: record.reanchoredAt
       ? "canon-reanchored"

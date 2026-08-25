@@ -42,8 +42,8 @@ jobs:
           ./node_modules/.bin/memwarden audit /nonexistent.db 2>&1 | grep -q ENOENT
 
   firewall-eval:
-    # The launch claims, measured on every push: stale-refusal, fresh
-    # retention, project isolation, label accuracy — all must hold at 100%.
+    # The launch claims plus the controlled fine-grained-anchor corpus,
+    # measured on every push; false blocking and missed invalidations must stay 0.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -53,3 +53,4 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run eval
+      - run: npm run eval:anchors
