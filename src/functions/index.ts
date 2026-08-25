@@ -26,6 +26,20 @@ export { registerContextFunction } from "./context.js";
 export { registerSearchFunction } from "./search.js";
 export { registerForgetFunction } from "./forget.js";
 export { registerConsolidateFunction } from "./consolidate.js";
+export {
+  hasProjectIdentity,
+  isStableProjectKey,
+  listMemoryInventory,
+  migrateLegacyMemoryIdentity,
+  projectIdentityMatchesPath,
+  resolveMemoryIdentity,
+  sessionProjectIdentity,
+} from "./memory-identity.js";
+export type {
+  MemoryIdentityRecord,
+  ProjectIdentity,
+  ResolvedMemoryIdentity,
+} from "./memory-identity.js";
 export { registerDoctorFunction } from "./doctor.js";
 export type { DoctorReport } from "./doctor.js";
 export { registerReceiptFunction } from "./receipt.js";
