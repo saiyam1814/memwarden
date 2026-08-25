@@ -9,22 +9,22 @@
 // observation (113 duplicates for one file were measured), and one edit turned
 // all of them stale together.
 //
-// This sweep groups file-backed observations by (project, primary file),
-// distills each group into ONE canonical Memory, and prunes the folded source
-// observations in lockstep with the search + vector indexes (the same
-// discipline mem::auto-forget uses). N near-identical observations about a file
+// This sweep first buckets file-backed observations by (project, primary file),
+// then partitions each bucket by a deterministic CLAIM + EVIDENCE identity.
+// Only members with the same normalized semantic payload and the same trust-
+// relevant provenance are folded. Distinct facts about one file, different file
+// snapshots, and mixed-trust captures remain separate. N true duplicates still
 // collapse to 1 memory, which:
 //   - populates KV.memories so /stats and doctor stop reporting a phantom layer
-//   - bounds storage growth (the folded rows are removed)
-//   - fixes correlated rot: a drifted file yields 1 stale memory, not 113
-//   - stops recall competing against dozens of near-duplicates for one file
+//   - bounds duplicate growth (the folded rows are removed)
+//   - fixes correlated rot without replacing unrelated claims about the file
+//   - stops recall competing against dozens of genuine duplicates
 //
-// Firewall safety: the memory inherits the NEWEST observation's provenance
-// verbatim (files + capture-time fileHashes). Verified Recall therefore
-// re-checks it against the live file exactly as that observation would — a
-// consolidated memory can only be `verified`/`sourced`/`stale` for the same
-// reasons its newest source was. Adopted (hashless) observations stay hashless,
-// so they can never be laundered into `verified`.
+// Firewall safety: a memory contains exactly one evidence-equivalent claim and
+// inherits its newest supporting observation's provenance verbatim (files +
+// capture-time fileHashes). Different hashes, file sets, cwd/command/agent, or
+// mixedTrust state are different identities and can never be laundered through
+// the newest member. Adopted (hashless) observations stay hashless.
 //
 // Conservative by construction: observations that are important (importance
 // above the floor), user-confirmed, or ever-accessed are NEVER folded or
@@ -35,10 +35,16 @@
 // MEMWARDEN_CONSOLIDATE_IMPORTANCE_FLOOR (default 5; above is protected).
 // Cadence + on/off live in the boot timers (CONSOLIDATION_*).
 
+import { createHash } from "node:crypto";
 import type { ISdk } from "../kernel/index.js";
 import type { StateKV } from "../state/kv.js";
-import type { CompressedObservation, Memory, Session } from "./types.js";
-import { KV, fingerprintId } from "../state/schema.js";
+import type {
+  CompressedObservation,
+  Memory,
+  Provenance,
+  Session,
+} from "./types.js";
+import { KV } from "../state/schema.js";
 import {
   getSearchIndex,
   vectorIndexRemove,
@@ -52,6 +58,7 @@ import {
 } from "./memory-identity.js";
 import { getAccessLog, deleteAccessLog } from "./access-tracker.js";
 import { logger } from "./logger.js";
+import { withKeyedLock } from "./keyed-mutex.js";
 
 // Only these observation types are the duplicate-Read/Edit rot bucket #20
 // describes. Conversations, decisions, errors, etc. are left alone.
@@ -91,7 +98,10 @@ function newestOf(group: CompressedObservation[]): CompressedObservation {
     const ot = new Date(o.timestamp).getTime();
     const bv = Number.isNaN(bt) ? -Infinity : bt;
     const ov = Number.isNaN(ot) ? -Infinity : ot;
-    return ov >= bv ? o : best;
+    if (ov !== bv) return ov > bv ? o : best;
+    // Stable tie-breaker: KV enumeration order must not choose which equivalent
+    // source supplies capture metadata when timestamps are equal/bad.
+    return o.id > best.id ? o : best;
   });
 }
 
@@ -99,8 +109,219 @@ function unique(values: Iterable<string>): string[] {
   return Array.from(new Set(values));
 }
 
-interface Grouped {
+/** Claim normalization is deliberately narrow. Whitespace and Unicode form do
+ * not change a prose claim; case, punctuation, code symbols, and numbers can.
+ * If two payloads differ beyond this, they remain separate. */
+function normalizeClaimText(value: string | undefined): string {
+  if (typeof value !== "string") return "";
+  return value.normalize("NFC").replace(/\s+/gu, " ").trim();
+}
+
+function canonicalClaimStrings(values: readonly string[] | undefined): string[] {
+  return unique((values ?? []).map(normalizeClaimText).filter(Boolean)).sort();
+}
+
+function canonicalExactStrings(values: readonly string[] | undefined): string[] {
+  return unique(
+    (values ?? []).filter(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    ),
+  ).sort();
+}
+
+function canonicalFileHashes(
+  hashes: Record<string, string> | undefined,
+): Array<[string, string]> | null {
+  if (hashes === undefined) return null;
+  return Object.entries(hashes).sort(([left], [right]) =>
+    left < right ? -1 : left > right ? 1 : 0,
+  );
+}
+
+function sha256(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+interface ObservationIdentity {
   key: string;
+  claimFingerprint: string;
+  evidenceFingerprint: string;
+}
+
+function evidenceFingerprintFor(args: {
+  files: readonly string[] | undefined;
+  agentId: string | undefined;
+  provenance: Provenance | undefined;
+}): string {
+  const { provenance } = args;
+  return sha256({
+    v: 1,
+    observationFiles: canonicalExactStrings(args.files),
+    agentId: args.agentId ?? null,
+    provenance:
+      provenance === undefined
+        ? null
+        : {
+            cwd: provenance.cwd ?? null,
+            files:
+              provenance.files === undefined
+                ? null
+                : canonicalExactStrings(provenance.files),
+            fileHashes: canonicalFileHashes(provenance.fileHashes),
+            command: provenance.command ?? null,
+            agent: provenance.agent ?? null,
+            userConfirmed: provenance.userConfirmed ?? null,
+            mixedTrust: provenance.mixedTrust ?? null,
+          },
+  });
+}
+
+/**
+ * Exact, explainable equivalence for folding. `capturedAt` is the sole omitted
+ * provenance field: two captures of the same claim against the same hashes and
+ * trust boundary are reinforcement, not different evidence. The newest value
+ * remains on the memory, while every supporting observation id remains linked.
+ */
+function observationIdentity(obs: CompressedObservation): ObservationIdentity {
+  const claimFingerprint = sha256({
+    v: 1,
+    type: obs.type,
+    title: normalizeClaimText(obs.title),
+    subtitle:
+      obs.subtitle === undefined ? null : normalizeClaimText(obs.subtitle),
+    narrative: normalizeClaimText(obs.narrative),
+    facts: canonicalClaimStrings(obs.facts),
+    concepts: canonicalClaimStrings(obs.concepts),
+    confidence:
+      obs.confidence === undefined ? null : String(obs.confidence),
+    imageRef: obs.imageRef ?? null,
+    imageData: obs.imageData ?? null,
+    imageDescription:
+      obs.imageDescription === undefined
+        ? null
+        : normalizeClaimText(obs.imageDescription),
+    modality: obs.modality ?? null,
+  });
+  const evidenceFingerprint = evidenceFingerprintFor({
+    files: obs.files,
+    agentId: obs.agentId,
+    provenance: obs.provenance,
+  });
+  return {
+    key: `${claimFingerprint}\n${evidenceFingerprint}`,
+    claimFingerprint,
+    evidenceFingerprint,
+  };
+}
+
+function contentFor(obs: CompressedObservation, fallbackTitle: string): string {
+  const parts = unique(
+    [obs.narrative, ...(obs.facts ?? []), obs.imageDescription ?? ""]
+      .map(normalizeClaimText)
+      .filter(Boolean),
+  );
+  return parts.join("\n") || fallbackTitle;
+}
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
+}
+
+function optionalClaimText(value: string | undefined): string | null {
+  return value === undefined ? null : normalizeClaimText(value);
+}
+
+/**
+ * Fingerprint-less rows are never accepted merely because their id happens to
+ * occupy a claim slot. Compatibility is reconstructible only when every field
+ * that contributes to the incoming claim/evidence projects to the stored row.
+ * Older file-write/edit memories cannot prove their original observation type,
+ * and rows that flattened non-empty facts cannot prove those facts survived, so
+ * both fail closed and are preserved under their existing id.
+ */
+function fingerprintlessMemoryMatchesIdentity(args: {
+  memory: Memory;
+  obs: CompressedObservation;
+  identity: ObservationIdentity;
+  projectIdentity: string;
+  primaryFile: string;
+}): boolean {
+  const { memory, obs, identity, projectIdentity, primaryFile } = args;
+  if (
+    (memory.claimFingerprint !== undefined &&
+      memory.claimFingerprint !== identity.claimFingerprint) ||
+    (memory.evidenceFingerprint !== undefined &&
+      memory.evidenceFingerprint !== identity.evidenceFingerprint)
+  ) {
+    return false;
+  }
+  // `architecture` loses whether the source was file_write or file_edit. Never
+  // guess when the fingerprint that disambiguates them is absent.
+  if (obs.type !== "file_read" || memory.type !== "fact") return false;
+  if (memory.isLatest !== true) return false;
+
+  const title =
+    normalizeClaimText(obs.title) || `Knowledge about ${primaryFile}`;
+  const facts = canonicalClaimStrings(obs.facts);
+  const concepts = canonicalClaimStrings(obs.concepts);
+  const files = canonicalExactStrings([
+    primaryFile,
+    ...(obs.files ?? []),
+    ...(obs.provenance?.files ?? []),
+  ]);
+  const storedIdentity = resolveMemoryIdentity(memory);
+  const storedIdentityKey =
+    storedIdentity.projectKey ||
+    storedIdentity.projectPath ||
+    storedIdentity.captureCwd ||
+    "_";
+
+  if (normalizeClaimText(memory.title) !== title) return false;
+  if (
+    normalizeClaimText(memory.content) !==
+    normalizeClaimText(contentFor(obs, title))
+  ) {
+    return false;
+  }
+  // A legacy row with no structured facts can prove compatibility only when
+  // the incoming claim has no independent facts to preserve.
+  if (memory.facts === undefined && facts.length > 0) return false;
+  if (!sameStrings(canonicalClaimStrings(memory.facts), facts)) return false;
+  if (!sameStrings(canonicalClaimStrings(memory.concepts), concepts)) {
+    return false;
+  }
+  if (!sameStrings(canonicalExactStrings(memory.files), files)) return false;
+  if (storedIdentityKey !== projectIdentity) return false;
+  if (optionalClaimText(memory.subtitle) !== optionalClaimText(obs.subtitle)) {
+    return false;
+  }
+  if (obs.confidence !== undefined && !Number.isFinite(obs.confidence)) {
+    return false;
+  }
+  if (memory.confidence !== obs.confidence) return false;
+  if (memory.imageRef !== obs.imageRef) return false;
+  if (memory.imageData !== obs.imageData) return false;
+  if (
+    optionalClaimText(memory.imageDescription) !==
+    optionalClaimText(obs.imageDescription)
+  ) {
+    return false;
+  }
+  if (memory.modality !== obs.modality) return false;
+  if (memory.agentId !== obs.agentId) return false;
+
+  const reconstructedEvidence = evidenceFingerprintFor({
+    files: memory.files,
+    agentId: memory.agentId,
+    provenance: memory.provenance,
+  });
+  return reconstructedEvidence === identity.evidenceFingerprint;
+}
+
+interface Grouped {
   /** Stable key when available, otherwise the legacy project path. Used only
    * for grouping/id generation — never as a filesystem verification root. */
   identityKey: string;
@@ -113,69 +334,208 @@ export interface DistillMember extends ProjectIdentity {
   obs: CompressedObservation;
 }
 
+interface DistillArgs {
+  projectIdentity: string;
+  primaryFile: string;
+  members: DistillMember[];
+  now: number;
+}
+
+type DistillResult = { memId: string; folded: number } | null;
+
+interface MemorySlot {
+  memId: string;
+  existing: Memory | null;
+}
+
+function claimMemoryDigest(args: {
+  projectIdentity: string;
+  primaryFile: string;
+  identity: ObservationIdentity;
+}): string {
+  return sha256({
+    v: 2,
+    projectIdentity: args.projectIdentity,
+    primaryFile: args.primaryFile,
+    claimFingerprint: args.identity.claimFingerprint,
+    evidenceFingerprint: args.identity.evidenceFingerprint,
+  });
+}
+
+async function resolveMemorySlot(args: {
+  kv: StateKV;
+  projectIdentity: string;
+  primaryFile: string;
+  obs: CompressedObservation;
+  identity: ObservationIdentity;
+}): Promise<MemorySlot | null> {
+  const { kv, projectIdentity, primaryFile, obs, identity } = args;
+  const digest = claimMemoryDigest({ projectIdentity, primaryFile, identity });
+  // v0.0.9 and earlier used fingerprintId(...): `mem_` + 16 hex chars (20
+  // total). Claim ids use the full digest (`mem_` + 64 hex, 68 total), so a
+  // genuine old per-file id cannot collide. The fallback protects arbitrary ids
+  // restored through Brain Bundle import or manually seeded stores.
+  const candidates = [`mem_${digest}`, `mem_claim_${digest}`] as const;
+
+  for (let index = 0; index < candidates.length; index++) {
+    const memId = candidates[index]!;
+    let existing: Memory | null;
+    try {
+      existing = await kv.get<Memory>(KV.memories, memId);
+    } catch (err) {
+      // Treat an unavailable predecessor as a hard stop, never as a miss:
+      // writing a partial replacement could erase accumulated lineage.
+      logger.warn("distill: failed to read existing memory", {
+        memId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+    if (!existing) return { memId, existing: null };
+
+    if (
+      existing.claimFingerprint === identity.claimFingerprint &&
+      existing.evidenceFingerprint === identity.evidenceFingerprint
+    ) {
+      return { memId, existing };
+    }
+
+    const hasMissingFingerprint =
+      existing.claimFingerprint === undefined ||
+      existing.evidenceFingerprint === undefined;
+    if (
+      hasMissingFingerprint &&
+      fingerprintlessMemoryMatchesIdentity({
+        memory: existing,
+        obs,
+        identity,
+        projectIdentity,
+        primaryFile,
+      })
+    ) {
+      logger.info("distill: migrating compatible fingerprint-less memory", {
+        memId,
+      });
+      return { memId, existing };
+    }
+
+    if (index === 0) {
+      // Never overwrite an imported/corrupt occupant. A separate deterministic
+      // slot lets the new claim become durable while the occupant survives.
+      logger.warn("distill: preserving incompatible memory identity", {
+        memId,
+        fallback: candidates[1],
+      });
+      continue;
+    }
+
+    // Both deterministic slots are occupied by incompatible content. Preserve
+    // them and leave all source observations for retry/manual inspection.
+    logger.warn("distill: claim fallback also occupied; sources retained", {
+      memId,
+    });
+    return null;
+  }
+  return null;
+}
+
 /**
- * Distill one (project, file) group into a single canonical Memory, then prune
- * the source observations in lockstep with every index.
+ * Distill one evidence-equivalent claim into a canonical Memory, then prune its
+ * source observations in lockstep with every index. A defensive identity check
+ * rejects mixed input even if a caller forgets to partition it first.
  *
- * Extracted so the retention sweep can reuse it. That matters more than code
- * tidiness: `mem::auto-forget` used to DELETE expiring observations outright,
- * with no check that anything durable had been distilled from them first. On a
- * real install that made the whole layer a sieve — 15,771 observations captured,
- * 0 memories, everything code-backed silently swept at the TTL. The durability
- * contract is now "code-backed knowledge is distilled, never dropped", and this
- * is the one implementation both paths go through.
+ * Extracted so the retention sweep can reuse it. The durability contract is
+ * "code-backed knowledge is distilled, never dropped": TTL promotion writes one
+ * durable row per claim/evidence identity, while repeated support converges on
+ * that same id.
  *
- * Returns null when the memory could not be written (nothing is pruned in that
- * case — losing the raw rows without a memory to show for it is the exact
- * failure this exists to prevent).
+ * Returns null when equivalence is not established or the successor memory
+ * could not be written. In either case nothing is pruned; the existing memory
+ * and every source observation remain intact for a later retry.
  */
-export async function distillMembers(
+export function distillMembers(
   kv: StateKV,
-  args: {
-    projectIdentity: string;
-    primaryFile: string;
-    members: DistillMember[];
-    now: number;
-  },
-): Promise<{ memId: string; folded: number } | null> {
+  args: DistillArgs,
+): Promise<DistillResult> {
+  if (args.members.length === 0) return Promise.resolve(null);
+  const identity = observationIdentity(args.members[0]!.obs);
+  const lockKey = `distill:${sha256({
+    projectIdentity: args.projectIdentity,
+    primaryFile: args.primaryFile,
+    identity: identity.key,
+  })}`;
+  return withKeyedLock(lockKey, () => distillMembersUnlocked(kv, args));
+}
+
+async function distillMembersUnlocked(
+  kv: StateKV,
+  args: DistillArgs,
+): Promise<DistillResult> {
   const { projectIdentity, primaryFile, members, now } = args;
   if (members.length === 0) return null;
   const nowIso = new Date(now).toISOString();
   const idx = getSearchIndex();
 
   const groupObs = members.map((m) => m.obs);
+  const identity = observationIdentity(groupObs[0]!);
+  if (groupObs.some((obs) => observationIdentity(obs).key !== identity.key)) {
+    logger.warn("distill: refused non-equivalent claims", {
+      projectIdentity,
+      primaryFile,
+      members: members.length,
+    });
+    return null;
+  }
+
   const newest = newestOf(groupObs);
-  const newestMember = members.find((member) => member.obs === newest) ?? members[0]!;
-  // Same (identity, file) key the group map uses, so a promotion and a later
-  // consolidation of the same file converge on ONE memory id rather than
-  // creating a second copy. identity may be stable, but it is NEVER passed to
-  // the verifier as though it were a path.
-  const memId = fingerprintId("mem", `${projectIdentity}\n${primaryFile}`);
-  const existing = await kv.get<Memory>(KV.memories, memId).catch(() => null);
+  const newestMember =
+    members.find((member) => member.obs === newest) ?? members[0]!;
+  // The claim/evidence digest uses the same stable project identity as the
+  // grouping map. It is never passed to the verifier as though it were a path.
+  const slot = await resolveMemorySlot({
+    kv,
+    projectIdentity,
+    primaryFile,
+    obs: newest,
+    identity,
+  });
+  if (!slot) return null;
+  const { memId, existing } = slot;
   const existingIdentity = existing
     ? resolveMemoryIdentity(existing)
     : undefined;
 
-  const concepts = unique(groupObs.flatMap((o) => o.concepts ?? [])).slice(0, 24);
-  const files = unique([
+  const title =
+    normalizeClaimText(newest.title) || `Knowledge about ${primaryFile}`;
+  const facts = canonicalClaimStrings(newest.facts);
+  const concepts = canonicalClaimStrings(newest.concepts);
+  const files = canonicalExactStrings([
+    ...(existing?.files ?? []),
     primaryFile,
-    ...(newest.provenance?.files ?? newest.files ?? []),
+    ...groupObs.flatMap((obs) => obs.files ?? []),
+    ...groupObs.flatMap((obs) => obs.provenance?.files ?? []),
   ]);
-  const priorSources = existing?.sourceObservationIds ?? [];
   const sourceObservationIds = unique([
-    ...priorSources,
-    ...groupObs.map((o) => o.id),
-  ]);
+    ...(existing?.sourceObservationIds ?? existing?.supersedes ?? []),
+    ...groupObs.map((obs) => obs.id),
+  ]).sort();
+  const supersedes = unique([
+    ...(existing?.supersedes ?? []),
+    ...sourceObservationIds,
+  ]).sort();
   const sessionIds = unique([
     ...(existing?.sessionIds ?? []),
-    ...members.map((m) => m.sessionId),
-  ]);
-  // Strength climbs with reinforcement (how many times the file was touched),
-  // capped at the 1-10 scale. Counted over ALL sources ever folded in, so a
-  // memory reinforced one promotion at a time still earns standing.
-  const strength = Math.min(
-    10,
-    5 + Math.floor(Math.log2(Math.max(2, sourceObservationIds.length))),
+    ...members.map((member) => member.sessionId),
+  ]).sort();
+  // Strength climbs with reinforcement, not with unrelated same-file claims.
+  // Never lower an imported row's standing; calculated reinforcement is capped
+  // at the existing 1-10 scale.
+  const strength = Math.max(
+    existing?.strength ?? 0,
+    Math.min(
+      10,
+      5 + Math.floor(Math.log2(Math.max(2, sourceObservationIds.length))),
+    ),
   );
   // Identity follows the observation whose provenance/content won. The
   // capture path stays a path even when the grouping identity is a git key.
@@ -192,26 +552,53 @@ export async function distillMembers(
     createdAt: existing?.createdAt ?? nowIso,
     updatedAt: nowIso,
     type: memoryTypeFor(newest),
-    title: newest.title || `Knowledge about ${primaryFile}`,
-    content: newest.narrative || (newest.facts ?? []).join(" "),
+    title,
+    content: contentFor(newest, title),
+    facts,
     concepts,
     files,
     sessionIds,
     strength,
     version: (existing?.version ?? 0) + 1,
-    supersedes: sourceObservationIds,
+    supersedes,
     sourceObservationIds,
+    claimFingerprint: identity.claimFingerprint,
+    evidenceFingerprint: identity.evidenceFingerprint,
     isLatest: true,
+    ...(newest.subtitle !== undefined
+      ? { subtitle: normalizeClaimText(newest.subtitle) }
+      : {}),
+    ...(newest.confidence !== undefined && Number.isFinite(newest.confidence)
+      ? { confidence: newest.confidence }
+      : {}),
+    ...(newest.imageRef !== undefined ? { imageRef: newest.imageRef } : {}),
+    ...(newest.imageData !== undefined ? { imageData: newest.imageData } : {}),
+    ...(newest.imageDescription !== undefined
+      ? { imageDescription: normalizeClaimText(newest.imageDescription) }
+      : {}),
+    ...(newest.modality !== undefined ? { modality: newest.modality } : {}),
+    ...(newest.agentId !== undefined ? { agentId: newest.agentId } : {}),
+    ...(existing?.parentId !== undefined ? { parentId: existing.parentId } : {}),
+    ...(existing?.relatedIds !== undefined
+      ? { relatedIds: existing.relatedIds }
+      : {}),
+    ...(existing?.forgetAfter !== undefined
+      ? { forgetAfter: existing.forgetAfter }
+      : {}),
     ...(projectPath ? { projectPath } : {}),
     ...(projectKey ? { projectKey } : {}),
     ...(captureCwd ? { captureCwd } : {}),
-    // Carry the newest observation's provenance forward VERBATIM so the memory
-    // verifies against the live file exactly as that observation would. No
-    // synthetic hashes are ever invented.
-    ...(newest.provenance ? { provenance: newest.provenance } : {}),
+    // Equivalent members have identical trust-relevant provenance. Carry the
+    // newest one verbatim so capturedAt remains useful without synthesizing or
+    // merging hashes across trust boundaries.
+    ...(newest.provenance !== undefined
+      ? { provenance: newest.provenance }
+      : {}),
   };
 
   try {
+    // StateKV.set is the successor installation point. It is atomic in both
+    // stores; no source is touched until this resolves successfully.
     await kv.set(KV.memories, memId, memory);
   } catch (err) {
     logger.warn("distill: failed to write memory", {
@@ -222,16 +609,30 @@ export async function distillMembers(
   }
 
   // Refresh the live indexes for the memory (remove-then-add so a re-run
-  // replaces the prior version rather than duplicating it).
-  idx.remove(memId);
-  idx.add(memoryToObservation(memory));
-  vectorIndexRemove(memId);
-  await vectorIndexAddGuarded(
-    memId,
-    memory.sessionIds[0] ?? "memory",
-    memory.title + " " + memory.content,
-    { kind: "memory", logId: memId },
-  );
+  // replaces the prior version rather than duplicating it). If derived-state
+  // refresh unexpectedly fails, keep every source and retry the whole handoff.
+  try {
+    idx.remove(memId);
+    idx.add(memoryToObservation(memory));
+    vectorIndexRemove(memId);
+    await vectorIndexAddGuarded(
+      memId,
+      memory.sessionIds[0] ?? "memory",
+      [memory.title, memory.subtitle, memory.content, ...(memory.facts ?? [])]
+        .filter(
+          (part): part is string =>
+            typeof part === "string" && part.length > 0,
+        )
+        .join(" "),
+      { kind: "memory", logId: memId },
+    );
+  } catch (err) {
+    logger.warn("distill: failed to index successor memory", {
+      memId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 
   // Prune the source observations in lockstep with every index.
   let folded = 0;
@@ -250,8 +651,8 @@ export async function distillMembers(
     }
   }
 
-  // Retention bookkeeping: records how reinforced this memory is and when it
-  // last consolidated, so a retention policy has a real score to act on.
+  // Retention bookkeeping: records how reinforced this one claim is and when
+  // it last consolidated, so a retention policy has a real score to act on.
   try {
     await kv.set(KV.retentionScores, memId, {
       memoryId: memId,
@@ -279,7 +680,6 @@ export function registerConsolidateFunction(sdk: ISdk, kv: StateKV): void {
       protectedKept: number;
     }> => {
       const now = typeof data?.now === "number" ? data.now : Date.now();
-      const nowIso = new Date(now).toISOString();
       const floor = importanceFloor();
       const threshold = minGroup();
 
@@ -315,29 +715,29 @@ export function registerConsolidateFunction(sdk: ISdk, kv: StateKV): void {
           const files = obs.provenance?.files ?? obs.files;
           const primaryFile = files?.find((f) => f && f.trim());
           if (!primaryFile) continue;
-          // Newline delimiter: cannot appear in a project key or a file path,
-          // so (identity, file) can never ambiguously collide.
-          const key = `${identityKey}\n${primaryFile}`;
+          // A serialized tuple is unambiguous even for unusual but legal Unix
+          // paths containing newlines.
+          const key = JSON.stringify([identityKey, primaryFile]);
           let g = groups.get(key);
           if (!g) {
-            g = { key, identityKey, primaryFile, members: [] };
+            g = { identityKey, primaryFile, members: [] };
             groups.set(key, g);
           }
           g.members.push({ sessionId: session.id, obs, ...identity });
         }
       }
 
-      const idx = getSearchIndex();
       let consolidated = 0;
       let folded = 0;
       let protectedKept = 0;
 
-      // 2. Distill each qualifying group into one canonical Memory.
+      // 2. Partition each file bucket by deterministic claim + evidence
+      // identity. The minimum applies to a TRUE-DUPLICATE partition, never to
+      // the file bucket as a whole.
       for (const g of groups.values()) {
         // Protect important / user-confirmed / ever-accessed observations:
         // never fold or delete them. They stay as first-class observations.
-        const foldable: Array<{ sessionId: string; obs: CompressedObservation }> =
-          [];
+        const foldable: DistillMember[] = [];
         for (const m of g.members) {
           const imp = m.obs.importance;
           const isImportant = !Number.isFinite(imp) || imp > floor;
@@ -355,17 +755,28 @@ export function registerConsolidateFunction(sdk: ISdk, kv: StateKV): void {
           foldable.push(m);
         }
 
-        if (foldable.length < threshold) continue; // not worth collapsing
+        if (foldable.length < threshold) continue; // no duplicate set can qualify
 
-        const r = await distillMembers(kv, {
-          projectIdentity: g.identityKey,
-          primaryFile: g.primaryFile,
-          members: foldable,
-          now,
-        });
-        if (!r) continue;
-        folded += r.folded;
-        consolidated++;
+        const equivalent = new Map<string, DistillMember[]>();
+        for (const member of foldable) {
+          const key = observationIdentity(member.obs).key;
+          const claimGroup = equivalent.get(key);
+          if (claimGroup) claimGroup.push(member);
+          else equivalent.set(key, [member]);
+        }
+
+        for (const claimGroup of equivalent.values()) {
+          if (claimGroup.length < threshold) continue;
+          const r = await distillMembers(kv, {
+            projectIdentity: g.identityKey,
+            primaryFile: g.primaryFile,
+            members: claimGroup,
+            now,
+          });
+          if (!r) continue;
+          folded += r.folded;
+          consolidated++;
+        }
       }
 
       if (consolidated > 0) {

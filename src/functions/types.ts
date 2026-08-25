@@ -153,20 +153,35 @@ export interface Memory {
     | "workflow"
     | "fact";
   title: string;
+  /**
+   * Structured claim fields are optional for memories created before claim-level
+   * consolidation. New memories populate them so distillation does not flatten
+   * away independently searchable facts or capture metadata.
+   */
+  subtitle?: string;
   content: string;
+  facts?: string[];
   concepts: string[];
   files: string[];
   sessionIds: string[];
   strength: number;
+  confidence?: number;
   version: number;
   parentId?: string;
   supersedes?: string[];
   relatedIds?: string[];
   sourceObservationIds?: string[];
+  /** Full SHA-256 identities used by conservative claim-level consolidation.
+   * They let a hash collision or incompatible legacy row fail closed instead
+   * of overwriting unrelated knowledge. */
+  claimFingerprint?: string;
+  evidenceFingerprint?: string;
   isLatest: boolean;
   forgetAfter?: string;
   imageRef?: string;
   imageData?: string;
+  imageDescription?: string;
+  modality?: "text" | "image" | "mixed";
   agentId?: string;
   /** Capture-time project filesystem path. Kept separate from projectKey so
    * verification always has a real checkout path to read. */
