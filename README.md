@@ -147,7 +147,8 @@ memwarden memories search <query> [--project .] \
 memwarden memories show <id> [--project .] [--content] [--json]
 
 # Edit is version creation, never in-place mutation. Authorship and the new
-# version's evidence policy are mandatory; old content/evidence remains intact.
+# version's evidence policy are mandatory; old content/evidence and retention
+# remain intact (expiry/retention overrides are rejected).
 memwarden memories edit <id> --title "..." --text "..." \
   --authored-by user|agent (--file src/path.ts ... | --no-file-evidence) \
   [--agent name] [--kind fact] [--project .] [--json]
@@ -171,7 +172,9 @@ capped at 200; `--after`/`--before` apply to the record's latest valid update/cr
 `history` is cycle-safe and capped at 100 linked versions. `projects` returns only path,
 stable key, aggregate evidence/source/lifecycle counts, last activity, and an estimated serialized
 footprint—never titles, files, or content from unrelated projects—and refuses to publish partial
-aggregates if the brain exceeds its 20,000-Memory scan cap. `logs` accepts no path: it reads only
+aggregates if the brain exceeds its 20,000-Memory scan cap. The API returns HTTP 413 with
+`code: "scan_limit"`; the CLI exits nonzero with the same explicit error instead of printing partial
+counts. `logs` accepts no path: it reads only
 `$MEMWARDEN_DATA_DIR/daemon.log` (normally `~/.memwarden/daemon.log`), rejects symlinks, reads at most
 2 MiB, and returns at most 1,000 secret-redacted/control-sanitized lines. `--tail` selects the last N
 lines; it does not start an unbounded follow process.

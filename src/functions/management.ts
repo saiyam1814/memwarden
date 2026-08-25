@@ -497,6 +497,12 @@ function compareCursorKeys(left: string, right: string): number {
   return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
 }
 
+/**
+ * Per-StateKV process cache only. The persisted KV.config value is the source
+ * of truth, so a fresh StateKV/kernel after daemon restart reloads the same key
+ * and can authenticate cursors issued by the prior process. WeakMap avoids
+ * retaining short-lived SDK facades and never substitutes for persistence.
+ */
 const cursorKeyCache = new WeakMap<StateKV, Promise<Buffer>>();
 
 async function cursorKey(kv: StateKV): Promise<Buffer> {
