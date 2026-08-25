@@ -13,9 +13,14 @@ import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { DEJAFIX_SCOPE, type FixMemory } from "../functions/dejafix.js";
 import { migrateLegacyMemoryIdentity } from "../functions/memory-identity.js";
+import {
+  cloneFineGrainedEvidence,
+  isFineGrainedEvidence,
+} from "../functions/anchors.js";
 import type {
   CompressedObservation,
   Memory,
+  Provenance,
   Session,
 } from "../functions/types.js";
 
@@ -53,18 +58,52 @@ function countObservations(map: Record<string, CompressedObservation[]>): number
   return n;
 }
 
+type AnchorCarrier = {
+  provenance?: Provenance;
+};
+
+function anchorsAreValid(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const provenance = (value as AnchorCarrier).provenance;
+  return provenance?.anchors === undefined || isFineGrainedEvidence(provenance.anchors);
+}
+
+/** Export/import keeps valid anchor commitments byte-for-byte in meaning while
+ * dropping unknown status decorations. Malformed private-store anchors are
+ * omitted on export so they cannot be laundered into a portable assertion. */
+function sanitizedAnchorCarrier<T extends AnchorCarrier>(value: T): T {
+  const provenance = value.provenance;
+  if (!provenance || provenance.anchors === undefined) return value;
+  const anchors = cloneFineGrainedEvidence(provenance.anchors);
+  const { anchors: _callerStatusOrMalformed, ...rest } = provenance;
+  return {
+    ...value,
+    provenance: {
+      ...rest,
+      ...(anchors ? { anchors } : {}),
+    },
+  };
+}
+
 /** Gather the durable store into a portable bundle. */
 export async function exportBundle(kv: StateKV): Promise<BrainBundle> {
   const sessions = await kv.list<Session>(KV.sessions).catch(() => []);
   const sessionsById = new Map(sessions.map((session) => [session.id, session]));
   const memories = (await kv.list<Memory>(KV.memories).catch(() => [])).map(
-    (memory) => migrateLegacyMemoryIdentity(memory, sessionsById),
+    (memory) =>
+      sanitizedAnchorCarrier(
+        migrateLegacyMemoryIdentity(memory, sessionsById),
+      ),
   );
   const observations: Record<string, CompressedObservation[]> = {};
   for (const s of sessions) {
-    observations[s.id] = await kv
-      .list<CompressedObservation>(KV.observations(s.id))
-      .catch(() => []);
+    observations[s.id] = (
+      await kv
+        .list<CompressedObservation>(KV.observations(s.id))
+        .catch(() => [])
+    ).map((observation) => sanitizedAnchorCarrier(observation));
   }
   const quantBlob = await kv
     .get<string>(KV.quantParams, QUANT_BLOB_KEY)
@@ -97,14 +136,22 @@ export async function exportBundle(kv: StateKV): Promise<BrainBundle> {
 /** Validate a parsed object is a bundle we can import. */
 export function isBrainBundle(value: unknown): value is BrainBundle {
   const b = value as Partial<BrainBundle> | null;
-  return (
-    !!b &&
-    b.kind === BRAIN_BUNDLE_KIND &&
-    typeof b.version === "number" &&
-    Array.isArray(b.sessions) &&
-    Array.isArray(b.memories) &&
-    typeof b.observations === "object" &&
-    b.observations !== null
+  if (
+    !b ||
+    b.kind !== BRAIN_BUNDLE_KIND ||
+    typeof b.version !== "number" ||
+    !Array.isArray(b.sessions) ||
+    !Array.isArray(b.memories) ||
+    typeof b.observations !== "object" ||
+    b.observations === null ||
+    Array.isArray(b.observations) ||
+    !b.memories.every(anchorsAreValid)
+  ) {
+    return false;
+  }
+  return Object.values(b.observations).every(
+    (observations) =>
+      Array.isArray(observations) && observations.every(anchorsAreValid),
   );
 }
 
@@ -122,6 +169,9 @@ export async function importBundle(
       `unsupported brain bundle version ${bundle.version} (expected ${BRAIN_BUNDLE_VERSION})`,
     );
   }
+  if (!isBrainBundle(bundle)) {
+    throw new Error("invalid brain bundle: malformed fine-grained anchor metadata");
+  }
   const sessionsById = new Map(
     bundle.sessions.map((session) => [session.id, session]),
   );
@@ -134,12 +184,18 @@ export async function importBundle(
     await kv.set(
       KV.memories,
       memory.id,
-      migrateLegacyMemoryIdentity(memory, sessionsById),
+      sanitizedAnchorCarrier(
+        migrateLegacyMemoryIdentity(memory, sessionsById),
+      ),
     );
   }
   for (const sessionId of Object.keys(bundle.observations)) {
     for (const o of bundle.observations[sessionId] ?? []) {
-      await kv.set(KV.observations(sessionId), o.id, o);
+      await kv.set(
+        KV.observations(sessionId),
+        o.id,
+        sanitizedAnchorCarrier(o),
+      );
     }
   }
   // Déjà Fix capsules: the current shape is signature -> FixMemory[]. Tolerate

@@ -260,6 +260,7 @@ function revalidatedSuccessor(args: {
   const {
     canon: _priorCanon,
     fileHashesNormalized: _priorNormalizedHashes,
+    anchors: _priorAnchors,
     ...priorProvenance
   } = memory.provenance ?? {};
   const provenance = {

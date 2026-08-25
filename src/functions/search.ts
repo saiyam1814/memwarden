@@ -65,6 +65,7 @@ import { recordAccessBatch } from "./access-tracker.js";
 import { loadVectorIndex, persistVectorIndex } from "./vector-persistence.js";
 import { logger } from "./logger.js";
 import { metrics } from "../observability/metrics.js";
+import type { FineGrainedAnchorStatus } from "./anchors.js";
 
 let index: SearchIndex | null = null;
 let vectorIndex: VectorIndexLike | null = null;
@@ -571,6 +572,8 @@ interface RecallClassificationFields {
   evidence_reason: string;
   live_source_status: LiveSourceStatus;
   live_source_reason: string;
+  fine_grained_anchor_status?: FineGrainedAnchorStatus;
+  fine_grained_anchor_actionable?: boolean;
   persisted_lifecycle: MemoryLifecycleState;
   effective_lifecycle: MemoryLifecycleState;
   transition_reason: string;
@@ -636,6 +639,12 @@ function classificationFields(
     evidence_reason: verdict.evidenceReason,
     live_source_status: verdict.sourceStatus,
     live_source_reason: verdict.sourceReason,
+    ...(verdict.status !== "unverifiable" && verdict.fineGrained
+      ? {
+          fine_grained_anchor_status: verdict.fineGrained.status,
+          fine_grained_anchor_actionable: verdict.fineGrained.actionable,
+        }
+      : {}),
     persisted_lifecycle: lifecycle.projection.persisted,
     effective_lifecycle: lifecycle.projection.effective,
     transition_reason: lifecycle.projection.persistedReason,

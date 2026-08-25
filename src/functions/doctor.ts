@@ -44,6 +44,7 @@ import { canonicalizePath } from "./paths.js";
 import { getDataDir } from "./config.js";
 import { logger } from "./logger.js";
 import { detectConflicts, type MemoryConflict } from "./conflicts.js";
+import type { FineGrainedAnchorStatus } from "./anchors.js";
 
 /** Recursive size of a directory in bytes; 0 when it doesn't exist. */
 export function dirSizeBytes(dir: string): number {
@@ -75,6 +76,8 @@ export interface DoctorEntry {
   evidenceReason: string;
   sourceStatus: LiveSourceStatus;
   sourceReason: string;
+  fineGrainedAnchorStatus?: FineGrainedAnchorStatus;
+  fineGrainedAnchorActionable?: boolean;
   persistedLifecycle: MemoryLifecycleState;
   effectiveLifecycle: MemoryLifecycleState;
   /** The last explicit semantic decision, never replaced by drift text. */
@@ -191,6 +194,12 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
           evidenceReason: verdict.evidenceReason,
           sourceStatus: verdict.sourceStatus,
           sourceReason: verdict.sourceReason,
+          ...(verdict.fineGrained
+            ? {
+                fineGrainedAnchorStatus: verdict.fineGrained.status,
+                fineGrainedAnchorActionable: verdict.fineGrained.actionable,
+              }
+            : {}),
           persistedLifecycle: projection.persisted,
           effectiveLifecycle: projection.effective,
           transitionReason: projection.persistedReason,

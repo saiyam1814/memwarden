@@ -32,7 +32,8 @@ import { buildSyntheticCompression } from "./compress-synthetic.js";
 import { buildSessionHandoff, MAX_STORED_PROMPT_CHARS } from "./handoff.js";
 import { extractProvenance } from "./provenance.js";
 import { recordFleetActivity } from "./fleet.js";
-import { hashFiles } from "./verify.js";
+import { hashFiles, hashFilesNormalized } from "./verify.js";
+import { captureFineGrainedEvidence } from "./anchors.js";
 import { recordFix, looksLikeResolvedFix } from "./dejafix.js";
 import { getSearchIndex, vectorIndexAddGuarded, vectorIndexRemove } from "./search.js";
 import { logger } from "./logger.js";
@@ -538,7 +539,38 @@ export function registerObserveFunction(
         // — classifyProvenance then caps them at `sourced_unverified`.
         if (!payload.adopted && prov.files && prov.files.length > 0 && payload.cwd) {
           const fileHashes = hashFiles(prov.files, payload.cwd);
-          if (Object.keys(fileHashes).length > 0) prov.fileHashes = fileHashes;
+          if (Object.keys(fileHashes).length > 0) {
+            prov.fileHashes = fileHashes;
+            const normalized = hashFilesNormalized(prov.files, payload.cwd);
+            if (Object.keys(normalized).length > 0) {
+              prov.fileHashesNormalized = normalized;
+            }
+          }
+
+          // Fine-grained capture reads the successful post-tool live file and
+          // stores hashes/locations only. It intentionally inspects the
+          // pre-redaction payload transiently so a secret-bearing replacement
+          // can be committed without retaining that source payload.
+          const originalData =
+            typeof payload.data === "object" && payload.data !== null
+              ? (payload.data as Record<string, unknown>)
+              : {};
+          const anchors = captureFineGrainedEvidence({
+            hookType: payload.hookType,
+            ...(typeof originalData["tool_name"] === "string"
+              ? { toolName: originalData["tool_name"] }
+              : raw.toolName
+                ? { toolName: raw.toolName }
+                : {}),
+            toolInput: originalData["tool_input"],
+            toolOutput:
+              originalData["tool_output"] ?? originalData["error"],
+            cwd: payload.cwd,
+            referencedFiles: prov.files,
+            mixedTrust: prov.mixedTrust === true,
+            observationType: synthetic.type,
+          });
+          if (anchors) prov.anchors = anchors;
         }
         synthetic.provenance = prov;
         metrics.recordObserve(JSON.stringify(raw), JSON.stringify(synthetic));
