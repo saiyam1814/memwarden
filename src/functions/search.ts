@@ -30,16 +30,8 @@ import {
   isScopedVectorSearchEnabled,
 } from "./config.js";
 import { memoryToObservation } from "./memory-utils.js";
-import {
-  hasProjectIdentity,
-  listMemoryInventory,
-  projectIdentityMatchesPath,
-  resolveMemoryIdentity,
-  sessionProjectIdentity,
-  type ProjectIdentity,
-} from "./memory-identity.js";
 import { canonicalizePath } from "./paths.js";
-import { projectKey as computeProjectKey } from "./git-identity.js";
+import { gitProjectKey } from "./git-identity.js";
 import { classifyProvenance, type Verdict } from "./verify.js";
 import { recordFirewallActivity } from "./firewall-stats.js";
 import { recordAccessBatch } from "./access-tracker.js";
@@ -431,20 +423,17 @@ export async function buildScopedAllowedIds(
 ): Promise<{ allowed: Set<string>; sessions: Session[] }> {
   const sessions = await kv.list<Session>(KV.sessions);
   const liveById = new Map(sessions.map((s) => [s.id, s]));
-  const inScope = (session: Session): boolean => {
-    const identity = sessionProjectIdentity(session);
+  const inScope = (s: Session): boolean => {
     if (
       scope.projectFilter &&
-      !(identity.projectKey && identity.projectKey === scope.projectFilterKey) &&
-      (!identity.projectPath ||
-        canonicalizePath(identity.projectPath) !== scope.projectFilter)
+      !(s.projectKey !== undefined && s.projectKey === scope.projectFilterKey) &&
+      canonicalizePath(s.project) !== scope.projectFilter
     )
       return false;
     if (
       scope.cwdFilter &&
-      !(identity.projectKey && identity.projectKey === scope.cwdFilterKey) &&
-      (!identity.captureCwd ||
-        canonicalizePath(identity.captureCwd) !== scope.cwdFilter)
+      !(s.projectKey !== undefined && s.projectKey === scope.cwdFilterKey) &&
+      canonicalizePath(s.cwd) !== scope.cwdFilter
     )
       return false;
     return true;
@@ -455,14 +444,6 @@ export async function buildScopedAllowedIds(
     if (live && !inScope(live)) continue;
     const ids = idx.idsForSession(sessionId);
     if (ids) for (const id of ids) allowed.add(id);
-  }
-  // A distilled memory may be indexed under its first source session id. Do
-  // not let that implementation detail make the optimization narrower than
-  // the correctness post-filter: memory identity is resolved there from the
-  // Memory row + all source sessions.
-  const memories = await kv.list<Memory>(KV.memories).catch(() => [] as Memory[]);
-  for (const memory of memories) {
-    if (memory.isLatest !== false) allowed.add(memory.id);
   }
   return { allowed, sessions };
 }
@@ -554,53 +535,14 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       cwd?: string;
       format?: string;
       token_budget?: number;
-      safe_only?: boolean;
-      /** Inventory mode used by canon push: returns stored Memory records
-       * rather than ranked observations. */
-      include_memories?: boolean;
-      all_projects?: boolean;
     }) => {
       const idx = getSearchIndex();
 
-      // Canon needs an inventory, not a magic broad search query. Keep this an
-      // explicit mode so normal search still rejects empty queries and cannot
-      // accidentally dump the whole brain.
-      const rawQuery =
-        typeof data?.query === "string" ? data.query.trim() : "";
-      if (!rawQuery && data?.include_memories === true) {
-        if (
-          data.limit !== undefined &&
-          (!Number.isInteger(data.limit) || data.limit < 1)
-        ) {
-          throw new Error("mem::search: limit must be a positive integer");
-        }
-        const scope =
-          data.all_projects === true
-            ? undefined
-            : typeof data.project === "string" && data.project.trim()
-              ? data.project.trim()
-              : typeof data.cwd === "string" && data.cwd.trim()
-                ? data.cwd.trim()
-                : undefined;
-        if (data.all_projects !== true && !scope) {
-          throw new Error(
-            "mem::search: memory inventory requires project/cwd unless all_projects is true",
-          );
-        }
-        const memories = await listMemoryInventory(kv, scope);
-        const inventoryLimit = Math.min(data.limit ?? 1000, 10_000);
-        return {
-          format: "inventory",
-          results: [],
-          memories: memories.slice(0, inventoryLimit),
-        };
-      }
-
       // Input validation / normalization.
-      if (!rawQuery) {
+      if (typeof data?.query !== "string" || !data.query.trim()) {
         throw new Error("mem::search: query must be a non-empty string");
       }
-      const query = rawQuery;
+      const query = data.query.trim();
       const MAX_LIMIT = 100;
       let effectiveLimit = 20;
       if (data.limit !== undefined) {
@@ -625,9 +567,8 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       // repo root). Used below to WIDEN the path filters — same key at a
       // different path (another worktree, a moved checkout) still matches.
       const projectFilterKey =
-        projectFilter !== undefined ? computeProjectKey(projectFilter) : null;
-      const cwdFilterKey =
-        cwdFilter !== undefined ? computeProjectKey(cwdFilter) : null;
+        projectFilter !== undefined ? gitProjectKey(projectFilter) : null;
+      const cwdFilterKey = cwdFilter !== undefined ? gitProjectKey(cwdFilter) : null;
       // Verified Recall firewall: when on (recall surfaces default it on),
       // drop results that reference files now deleted or content-changed, so
       // stale memory is never injected. It needs a cwd to check against — and
@@ -635,7 +576,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       // silent downgrade to unfiltered results. Enforced here at the function
       // boundary (not just the HTTP route) so no in-process caller can lose
       // the firewall by omitting cwd.
-      const wantsSafeOnly = data.safe_only === true;
+      const wantsSafeOnly = (data as { safe_only?: unknown }).safe_only === true;
       if (wantsSafeOnly && cwdFilter === undefined) {
         throw new Error(
           "mem::search: safe_only requires a cwd to verify memory against (the firewall fails closed)",
@@ -774,55 +715,42 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         return s ?? null;
       };
 
-      interface CandidateSource {
-        observation: CompressedObservation;
-        /** Present when this index hit came from KV.memories rather than a
-         * per-session observation scope. */
-        memory: Memory | null;
-      }
-      // Resolve the actual source before applying scope. A distilled Memory is
-      // often indexed under a REAL source session id; treating that id as the
-      // Memory's identity is the bug that made direct-memory and observation
-      // verdicts disagree across worktrees.
-      const sourceCache = new Map<string, CandidateSource | null>();
-      const loadCandidateSource = async (r: {
-        obsId: string;
-        sessionId: string;
-      }): Promise<CandidateSource | null> => {
-        const cacheKey = `${r.sessionId}\n${r.obsId}`;
-        if (sourceCache.has(cacheKey)) return sourceCache.get(cacheKey)!;
-        const observation = await kv
-          .get<CompressedObservation>(KV.observations(r.sessionId), r.obsId)
+      // Cache for memory project lookups. Memories indexed via mem::remember
+      // use a synthetic sessionId that either has no KV.sessions entry or
+      // belongs to a different project. When loadSession returns null we
+      // fall through to a KV.memories probe so project-filtered search can
+      // include or exclude them correctly.
+      const memoryProjectCache = new Map<string, string | null>();
+      const loadMemoryProject = async (
+        obsId: string,
+      ): Promise<string | null> => {
+        if (memoryProjectCache.has(obsId))
+          return memoryProjectCache.get(obsId)!;
+        const mem = await kv
+          .get<Memory>(KV.memories, obsId)
           .catch(() => null);
-        if (observation) {
-          const source = { observation, memory: null };
-          sourceCache.set(cacheKey, source);
-          return source;
-        }
-        const memory = await kv
-          .get<Memory>(KV.memories, r.obsId)
-          .catch(() => null);
-        const source = memory
-          ? { observation: memoryToObservation(memory), memory }
-          : null;
-        sourceCache.set(cacheKey, source);
-        return source;
+        const proj = mem?.project ?? null;
+        memoryProjectCache.set(obsId, proj);
+        return proj;
       };
 
-      const memoryIdentityCache = new Map<string, ProjectIdentity>();
-      const loadMemoryIdentity = async (
-        memory: Memory,
-      ): Promise<ProjectIdentity> => {
-        const cached = memoryIdentityCache.get(memory.id);
-        if (cached) return cached;
-        const sourceSessions = new Map<string, Session>();
-        for (const sessionId of memory.sessionIds ?? []) {
-          const session = await loadSession(sessionId);
-          if (session) sourceSessions.set(sessionId, session);
+      // A candidate's observation (or a memory rendered as one). Cached so the
+      // Verified Recall firewall and the final assembly never load it twice.
+      const obsCache = new Map<string, CompressedObservation | null>();
+      const loadObsOrMemory = async (r: {
+        obsId: string;
+        sessionId: string;
+      }): Promise<CompressedObservation | null> => {
+        if (obsCache.has(r.obsId)) return obsCache.get(r.obsId)!;
+        let obs = await kv
+          .get<CompressedObservation>(KV.observations(r.sessionId), r.obsId)
+          .catch(() => null);
+        if (!obs) {
+          const mem = await kv.get<Memory>(KV.memories, r.obsId).catch(() => null);
+          obs = mem ? memoryToObservation(mem) : null;
         }
-        const identity = resolveMemoryIdentity(memory, sourceSessions);
-        memoryIdentityCache.set(memory.id, identity);
-        return identity;
+        obsCache.set(r.obsId, obs);
+        return obs;
       };
 
       // First pass: scope-filter, and — when safe_only is on — apply the
@@ -850,63 +778,65 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       }> = [];
       for (const r of results) {
         if (candidates.length >= candidateTarget) break;
-        const source = await loadCandidateSource(r);
-        if (!source) {
-          if (safeOnly) staleDropped++;
-          continue;
-        }
-        let identity: ProjectIdentity;
-        if (source.memory) {
-          identity = await loadMemoryIdentity(source.memory);
-          // Legacy provenance may rely on the source session for its cwd.
-          source.observation = memoryToObservation(source.memory, identity);
-        } else {
-          const session = await loadSession(r.sessionId);
-          identity = session ? sessionProjectIdentity(session) : {};
-        }
-
         if (filtering) {
-          // Identity widens scope; it never replaces either local path. Plain
-          // search keeps the historical identity-less pass-through, but safe
-          // recall fails closed: an unknown row cannot prove it belongs here.
-          if (safeOnly && !hasProjectIdentity(identity)) {
-            staleDropped++;
-            continue;
-          }
-          if (
-            projectFilter &&
-            hasProjectIdentity(identity) &&
-            !projectIdentityMatchesPath(identity, projectFilter)
-          ) {
-            continue;
-          }
-          if (
-            cwdFilter &&
-            hasProjectIdentity(identity) &&
-            !projectIdentityMatchesPath(identity, cwdFilter)
-          ) {
-            continue;
+          const s = await loadSession(r.sessionId);
+          if (s) {
+            // Project identity WIDENS (never replaces) the path filters: a
+            // session whose stored projectKey matches the query directory's
+            // key is the same project even at a different path (another git
+            // worktree, a moved checkout). Sessions without a key — all
+            // pre-existing data — keep the exact path-match behavior.
+            if (
+              projectFilter &&
+              !(s.projectKey !== undefined && s.projectKey === projectFilterKey) &&
+              canonicalizePath(s.project) !== projectFilter
+            )
+              continue;
+            if (
+              cwdFilter &&
+              !(s.projectKey !== undefined && s.projectKey === cwdFilterKey) &&
+              canonicalizePath(s.cwd) !== cwdFilter
+            )
+              continue;
+          } else if (projectFilter) {
+            // Synthetic/memory entry: a null memProject means "unknown" and is
+            // let through for backward-compatibility; cwd filter doesn't apply.
+            const memProject = await loadMemoryProject(r.obsId);
+            if (
+              memProject !== null &&
+              canonicalizePath(memProject) !== projectFilter
+            )
+              continue;
           }
         }
         if (safeOnly && cwdFilter) {
-          // Fail closed for stale/missing candidates. A stable-key match only
-          // authorizes re-rooting; classifyProvenance still receives the
-          // caller's checkout path, never the stable key or capture path.
-          const obs = source.observation;
-          const verdict = classifyProvenance(obs.provenance, cwdFilter, {
-            verifyAgainstRoot: projectIdentityMatchesPath(identity, cwdFilter),
-          });
+          const obs = await loadObsOrMemory(r);
+          // Fail closed for stale/missing candidates. Sourced-unverified memory
+          // is allowed by design, but stale memory never gets injected.
+          // When the memory's stable projectKey matches the caller's, verify
+          // against the CALLER's checkout — a widened result from another
+          // worktree must be checked against the files the agent is actually
+          // looking at, not the (possibly diverged or deleted) capture dir.
+          const obsSession = await loadSession(r.sessionId);
+          const verdict = !obs
+            ? null
+            : classifyProvenance(obs.provenance, cwdFilter, {
+                verifyAgainstRoot:
+                  obsSession?.projectKey !== undefined &&
+                  obsSession.projectKey === cwdFilterKey,
+              });
           // Policy floor: `balanced` (default) drops only detected-stale;
           // `verified-only` additionally refuses everything that is not
           // hash-verified against the live checkout — the strict answer to
           // memory poisoning via unsourced/unverifiable content (OWASP ASI06).
           const dropUnderPolicy =
+            !verdict ||
             verdict.status === "stale" ||
             (getRecallPolicy() === "verified-only" &&
               verdict.status !== "verified");
-          if (dropUnderPolicy) {
+          if (dropUnderPolicy || !verdict) {
             staleDropped++;
-            if (refusalSamples.length < 5) {
+            if (obs && verdict && refusalSamples.length < 5) {
               refusalSamples.push({
                 obsId: obs.id,
                 reason: verdict.reason,
@@ -950,17 +880,15 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         });
       }
 
-      // Second pass: assemble results, reusing the resolved source above.
-      const sources = await Promise.all(
-        candidates.map((candidate) => loadCandidateSource(candidate)),
-      );
+      // Second pass: assemble results, reusing any observation loaded above.
+      const obsResults = await Promise.all(candidates.map((c) => loadObsOrMemory(c)));
       const enriched: SearchResult[] = [];
       for (let i = 0; i < candidates.length; i++) {
-        const source = sources[i];
+        const obs = obsResults[i];
         const cand = candidates[i]!;
-        if (source) {
+        if (obs) {
           enriched.push({
-            observation: source.observation,
+            observation: obs,
             score: cand.score,
             sessionId: cand.sessionId,
           });

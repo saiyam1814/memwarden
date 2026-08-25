@@ -36,12 +36,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { hashFiles } from "../functions/verify.js";
-import {
-  projectIdentityMatchesPath,
-  resolveMemoryIdentity,
-} from "../functions/memory-identity.js";
 
 // --- secret gate ----------------------------------------------------
 //
@@ -445,14 +441,7 @@ export function recordFromMemory(
     files?: string[];
     type?: string;
     agentId?: string;
-    projectPath?: string;
-    projectKey?: string;
-    captureCwd?: string;
-    /** Legacy overloaded identity, accepted by the migration fallback. */
-    project?: string;
-    sessionIds?: string[];
     provenance?: {
-      cwd?: string;
       files?: string[];
       fileHashes?: Record<string, string>;
       host?: string;
@@ -464,26 +453,9 @@ export function recordFromMemory(
   const hashes = memory.provenance?.fileHashes;
   if (!hashes || Object.keys(hashes).length === 0) return null;
 
-  const identity = resolveMemoryIdentity(memory);
-  const captureCwd = identity.captureCwd;
-  const sameProject = projectIdentityMatchesPath(identity, root);
   const fileHashes: Record<string, string> = {};
   for (const [file, hash] of Object.entries(hashes)) {
-    let rel = toRepoRelative(file, root);
-    // Absolute evidence captured in worktree A is outside worktree B. A stable
-    // identity match authorizes translating its capture-relative suffix, but
-    // the resulting canon path is still rooted in the CALLER's checkout.
-    if (!rel && sameProject && captureCwd && isAbsolute(file)) {
-      const fromCapture = relative(captureCwd, file);
-      if (
-        fromCapture &&
-        fromCapture !== ".." &&
-        !fromCapture.startsWith(`..${sep}`) &&
-        !isAbsolute(fromCapture)
-      ) {
-        rel = toRepoRelative(fromCapture, root);
-      }
-    }
+    const rel = toRepoRelative(file, root);
     if (!rel) continue; // outside the repo: not portable, so not promoted
     fileHashes[rel] = hash;
   }

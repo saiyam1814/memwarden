@@ -244,22 +244,13 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
         cwd?: string;
         format?: string;
         token_budget?: number;
-        include_memories?: boolean;
-        all_projects?: boolean;
       }>,
     ): Promise<Response> => {
       const body = (req.body ?? {}) as Record<string, unknown>;
-      const inventory = body["include_memories"] === true;
-      if (
-        typeof body["query"] !== "string" ||
-        (!body["query"].trim() && !inventory)
-      ) {
+      if (typeof body["query"] !== "string" || !body["query"].trim()) {
         return {
           status_code: 400,
-          body: {
-            error:
-              "query is required and must be non-empty (except explicit memory inventory)",
-          },
+          body: { error: "query is required and must be a non-empty string" },
         };
       }
       if (
@@ -321,8 +312,6 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
         format?: string;
         token_budget?: number;
         safe_only?: boolean;
-        include_memories?: boolean;
-        all_projects?: boolean;
       } = { query: (body["query"] as string).trim() };
       if (body["limit"] !== undefined) payload.limit = body["limit"] as number;
       if (body["project"] !== undefined)
@@ -333,8 +322,6 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
       if (body["token_budget"] !== undefined)
         payload.token_budget = body["token_budget"] as number;
       if (body["safe_only"] === true) payload.safe_only = true;
-      if (inventory) payload.include_memories = true;
-      if (body["all_projects"] === true) payload.all_projects = true;
 
       // Session-start injection is a search; its `agent` field only feeds the
       // liveness heartbeat (never the search itself).
