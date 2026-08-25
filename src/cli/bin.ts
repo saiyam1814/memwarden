@@ -1118,19 +1118,10 @@ async function up(rest: string[]): Promise<void> {
         ? `  daemon    ⚠ could not start at ${daemonUrl} (port in use?)`
         : `  daemon    ✓ ${daemonUrl}  brain: ${dataDir} (detached, no service)`,
     );
-    // `down` deliberately leaves non-default daemons alone (see below), so
-    // pointing people at it here would be a lie — the honest stop is a kill.
-    // Killing the daemon is #16's territory either way.
-    let port = "";
-    try {
-      port = new URL(daemonUrl).port || "80";
-    } catch {
-      /* unparseable URL — omit the kill hint */
-    }
     console.log(
-      `\n  Nothing global was touched. The daemon stays up until killed or reboot.\n` +
-        (port ? `    stop it:   kill $(lsof -ti tcp:${port})\n` : "") +
-        `    clean up:  MEMWARDEN_URL=${daemonUrl} MEMWARDEN_DATA_DIR=${dataDir} memwarden down --data\n`,
+      `\n  Nothing global was touched. This isolated daemon stays up until you stop it.\n` +
+        `    stop it:    MEMWARDEN_URL=${daemonUrl} MEMWARDEN_DATA_DIR=${dataDir} memwarden down\n` +
+        `    clean up:   MEMWARDEN_URL=${daemonUrl} MEMWARDEN_DATA_DIR=${dataDir} memwarden down --data\n`,
     );
     return;
   }
@@ -1307,7 +1298,34 @@ function relativeTime(iso: string): string {
   return `${Math.floor(h / 24)}d ago`;
 }
 
-function down(rest: string[]): void {
+type StopDaemonResult = "stopped" | "not-running" | "unsupported" | "refused";
+
+/** Ask the exact daemon serving this brain to shut down, then prove the port is
+ * gone. The data-dir match is enforced again inside the authenticated daemon
+ * route, so a custom/test `down` cannot kill an unrelated live installation. */
+async function stopTargetDaemon(dataDir: string): Promise<StopDaemonResult> {
+  if (!(await daemonAlive(DAEMON_URL))) return "not-running";
+  let response: globalThis.Response;
+  try {
+    response = await fetch(`${DAEMON_URL}/memwarden/shutdown`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ data_dir: resolve(dataDir) }),
+      signal: AbortSignal.timeout(3000),
+    });
+  } catch {
+    return (await daemonAlive(DAEMON_URL)) ? "refused" : "stopped";
+  }
+  if (response.status === 404) return "unsupported";
+  if (!response.ok) return "refused";
+  for (let i = 0; i < 40; i++) {
+    await new Promise((done) => setTimeout(done, 125));
+    if (!(await daemonAlive(DAEMON_URL))) return "stopped";
+  }
+  return "refused";
+}
+
+async function down(rest: string[]): Promise<void> {
   const all = rest.includes("--all");
   const purgeData = rest.includes("--data");
   const home = homedir();
@@ -1319,11 +1337,18 @@ function down(rest: string[]): void {
   // Scope the damage to what was actually targeted.
   const isDefault = targetsDefaultDaemon();
   if (!isDefault) {
+    const stopped = await stopTargetDaemon(dataDir);
     console.log(
       `[memwarden] this run targets a NON-DEFAULT memwarden (${nonDefaultTarget()}),\n` +
         `so the user-global launchd/systemd service and tool configs were LEFT ALONE.\n` +
-        `Stop that daemon directly, or unset those variables to act on the real install.`,
+        `The targeted daemon is ${stopped === "stopped" ? "stopped" : stopped === "not-running" ? "already down" : "still running"}.`,
     );
+    if (stopped === "unsupported" || stopped === "refused") {
+      console.error(
+        `[memwarden] could not prove a clean shutdown (${stopped}); refusing destructive cleanup.`,
+      );
+      process.exitCode = 1;
+    }
     if (purgeData) {
       // A non-default daemon with NO explicit brain dir means dataDir resolved
       // to the user-global ~/.memwarden — `--data` here would delete the REAL
@@ -1335,7 +1360,8 @@ function down(rest: string[]): void {
             `delete the DEFAULT brain at ${dataDir} while targeting a non-default daemon.\n` +
             `Set MEMWARDEN_DATA_DIR to the brain you mean, or unset the URL/port overrides.`,
         );
-      } else {
+        process.exitCode = 1;
+      } else if (stopped === "stopped" || stopped === "not-running") {
         purgeBrain(dataDir);
       }
     }
@@ -1346,9 +1372,17 @@ function down(rest: string[]): void {
   if (r.ok) {
     console.log(`[memwarden] stopped and removed the ${r.kind} service.`);
   } else {
+    console.log(`[memwarden] no service to remove (${r.message}).`);
+  }
+  const stopped = await stopTargetDaemon(dataDir);
+  if (stopped === "unsupported" || stopped === "refused") {
+    console.error(
+      `[memwarden] could not prove the daemon exited (${stopped}); check ${join(dataDir, "daemon.log")}.`,
+    );
+    process.exitCode = 1;
+  } else {
     console.log(
-      `[memwarden] no service to remove (${r.message}). ` +
-        `A daemon started in the background will exit when you log out.`,
+      `[memwarden] daemon ${stopped === "stopped" ? "shut down cleanly" : "is not running"}.`,
     );
   }
 
@@ -1395,8 +1429,11 @@ function down(rest: string[]): void {
       `'memwarden down --all' from each, or delete the marked block by hand.`,
   );
 
-  if (purgeData) {
+  if (purgeData && (stopped === "stopped" || stopped === "not-running")) {
     purgeBrain(dataDir);
+  } else if (purgeData) {
+    console.error("[memwarden] refusing --data because daemon shutdown was not proven.");
+    process.exitCode = 1;
   } else {
     console.log(
       `[memwarden] your brain is untouched at ${dataDir} — delete it with\n` +

@@ -317,6 +317,8 @@ export interface EmbeddingProvider {
   embed(text: string): Promise<Float32Array>;
   embedBatch(texts: string[]): Promise<Float32Array[]>;
   embedImage?(src: string): Promise<Float32Array>;
+  /** Release native/model sessions before the daemon process exits. */
+  dispose?(): Promise<void> | void;
 }
 
 /** A single vector-stream hit, shared by every vector index implementation. */

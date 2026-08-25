@@ -1,8 +1,8 @@
 name: release
 
 # Publish memwarden to npm with provenance when a v* tag is pushed. The full
-# test suite and a fresh-tarball install must pass first — a release that
-# skipped the gates is not a release.
+# source gates and packed-tarball contract on Linux/macOS must pass first — a
+# release that skipped what users actually install is not a release.
 #
 # Setup (one time): configure npm Trusted Publishing for `memwarden`
 # (npmjs.com -> package Settings -> Trusted Publisher -> this repo + this
@@ -34,20 +34,48 @@ jobs:
         run: npm run eval
       - name: firewall demo end to end
         run: npm run demo:firewall
-      - name: fresh tarball must work
-        run: |
-          npm pack
-          mkdir /tmp/fresh && cd /tmp/fresh && npm init -y
-          npm install "$GITHUB_WORKSPACE"/memwarden-*.tgz --no-fund --no-audit
-          ./node_modules/.bin/memwarden status
       - name: tag must match package.json version
         run: |
           PKG=$(node -p "require('./package.json').version")
           TAG="${GITHUB_REF_NAME#v}"
           test "$PKG" = "$TAG" || { echo "tag v$TAG != package.json $PKG"; exit 1; }
 
+  packed-contract:
+    # Full installed-artifact journeys block publish on both supported desktop
+    # kernels. Linux also exercises the side-loaded TypeScript vector runtime
+    # and native turbovec when that optional package exists for the runner.
+    name: packed contract (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            vectors: "1"
+          - os: macos-latest
+            vectors: "0"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: full packed-tarball beta contract
+        run: npm run test:packed
+        env:
+          MEMWARDEN_PACKED_VECTORS: ${{ matrix.vectors }}
+          MEMWARDEN_PACKED_ARTIFACTS: ${{ runner.temp }}/memwarden-packed-contract
+      - name: archive packed-contract failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: packed-release-${{ runner.os }}
+          path: ${{ runner.temp }}/memwarden-packed-contract
+          if-no-files-found: warn
+
   publish:
-    needs: gate
+    needs: [gate, packed-contract]
     runs-on: ubuntu-latest
     permissions:
       contents: read
