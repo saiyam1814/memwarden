@@ -306,6 +306,10 @@ async function doctor(rest: string[]): Promise<void> {
     sourcedUnverified: number;
     stale: Array<{ id: string; title: string; reason: string }>;
     unsourced: Array<{ id: string; title: string; reason: string }>;
+    lifecycle?: Record<
+      "active" | "needs_revalidation" | "superseded" | "disputed" | "archived" | "revoked",
+      Array<{ id: string; title: string; transitionReason: string; lifecycleReason: string }>
+    >;
     conflicts: Array<{
       olderTitle: string;
       newerTitle: string;
@@ -317,11 +321,21 @@ async function doctor(rest: string[]): Promise<void> {
   console.log(
     `\nmemwarden doctor — ${root}${allProjects ? " (all projects)" : " (this project)"}\n`,
   );
-  console.log(`  VERIFIED:        ${r.verified} memories (code-backed, current)`);
+  console.log(`  VERIFIED:        ${r.verified} memories (hash-backed source currently matches)`);
   console.log(`  SOURCED:         ${r.sourcedUnverified} memories (sourced, not content-verified)`);
   console.log(`  STALE:           ${r.stale.length} memories reference files that changed/deleted`);
   console.log(`  UNSOURCED:       ${r.unsourced.length} memories have no evidence`);
-  console.log(`  CONFLICTS:       ${r.conflicts.length} possible contradictions\n`);
+  console.log(`  CONFLICTS:       ${r.conflicts.length} possible contradictions`);
+  if (r.lifecycle) {
+    console.log(
+      `  LIFECYCLE:       ${r.lifecycle.active.length} active · ` +
+        `${r.lifecycle.needs_revalidation.length} needs revalidation · ` +
+        `${r.lifecycle.disputed.length} disputed · ${r.lifecycle.archived.length} archived · ` +
+        `${r.lifecycle.revoked.length} revoked · ${r.lifecycle.superseded.length} superseded\n`,
+    );
+  } else {
+    console.log("");
+  }
   for (const s of r.stale.slice(0, fixStale ? r.stale.length : 5)) {
     console.log(`  [stale]     ${s.title} (${s.id}) — ${s.reason}`);
   }
@@ -343,12 +357,15 @@ async function doctor(rest: string[]): Promise<void> {
   console.log(`\n  ${r.total} memories audited.`);
   if (r.stale.length > 0 && !fixStale) {
     console.log(
-      `  Tip: \`memwarden why <id>\` explains one memory; \`memwarden doctor . --fix-stale\` forgets all stale ones.`,
+      `  Tip: \`memwarden why <id>\` separates evidence, live source, and lifecycle. Revalidate, supersede, dispute, or archive stale claims; forget only for deliberate erasure.`,
     );
   }
   console.log("");
 
   if (fixStale) {
+    console.log(
+      "  Warning: --fix-stale is a legacy destructive compatibility option. Source drift now belongs in revalidate/archive workflows; this command still forgets content because you requested it explicitly.\n",
+    );
     if (r.stale.length === 0) {
       console.log("  --fix-stale: nothing to forget.\n");
       return;
@@ -419,6 +436,22 @@ async function why(rest: string[]): Promise<void> {
     };
     session?: { id: string; project: string; cwd: string; agentId?: string };
     verdict?: { status: string; reason: string; trust: string };
+    evidenceVerdict?: { status: string; reason: string };
+    sourceStatus?: { status: string; reason: string };
+    lifecycle?: {
+      persisted: string;
+      effective: string;
+      transitionReason: string;
+      effectiveReason: string;
+    };
+    validity?: {
+      observedAt: string;
+      validFrom?: string;
+      validTo?: string;
+      reconstruction?: string;
+      sourceCommit?: string;
+    };
+    attestation?: { status: string; promotedAt: string; reanchoredBy?: string };
     injectable?: boolean;
     provenance?: { files?: string[]; fileHashes?: Record<string, string>; cwd?: string };
     advice?: string;
@@ -469,6 +502,39 @@ async function why(rest: string[]): Promise<void> {
   console.log(`  session    ${o.sessionId}${r.session?.agentId ? ` (${r.session.agentId})` : ""}`);
   if (r.session) console.log(`  project    ${r.session.project}`);
   console.log(`  verdict    [${v.trust}] ${v.status} — ${cleanLine(v.reason)}`);
+  if (r.evidenceVerdict) {
+    console.log(
+      `  evidence   ${r.evidenceVerdict.status} — ${cleanLine(r.evidenceVerdict.reason)}`,
+    );
+  }
+  if (r.sourceStatus) {
+    console.log(
+      `  source     ${r.sourceStatus.status} — ${cleanLine(r.sourceStatus.reason)}`,
+    );
+  }
+  if (r.lifecycle) {
+    console.log(
+      `  lifecycle  persisted ${r.lifecycle.persisted} · effective ${r.lifecycle.effective}`,
+    );
+    console.log(
+      `  transition ${cleanLine(r.lifecycle.transitionReason)} · projection ${cleanLine(r.lifecycle.effectiveReason)}`,
+    );
+  }
+  if (r.validity) {
+    console.log(
+      `  validity   ${r.validity.validFrom ?? r.validity.observedAt}${r.validity.validTo ? ` → ${r.validity.validTo}` : " onward"}` +
+        (r.validity.reconstruction
+          ? ` · ${r.validity.reconstruction}`
+          : "") +
+        (r.validity.sourceCommit ? ` · commit ${r.validity.sourceCommit}` : ""),
+    );
+  }
+  if (r.attestation) {
+    console.log(
+      `  attested   ${r.attestation.status} at ${r.attestation.promotedAt}` +
+        (r.attestation.reanchoredBy ? ` by ${cleanLine(r.attestation.reanchoredBy)}` : ""),
+    );
+  }
   console.log(`  injectable ${r.injectable ? "yes (under current policy)" : "no — firewall / policy withholds it"}`);
   const files = r.provenance?.files ?? [];
   const hashes = r.provenance?.fileHashes ?? {};
@@ -495,6 +561,63 @@ async function why(rest: string[]): Promise<void> {
   }
   if (r.advice) console.log(`\n  → ${r.advice}`);
   console.log("");
+}
+
+// memwarden lifecycle <memoryId> <action> --reason "…" — record an explicit
+// semantic transition without deleting historical content.
+async function lifecycle(rest: string[]): Promise<void> {
+  const memoryId = rest[0];
+  const action = rest[1];
+  const reasonIdx = rest.indexOf("--reason");
+  const reason = reasonIdx >= 0 ? rest[reasonIdx + 1] : undefined;
+  if (!memoryId || !action || !reason) {
+    throw new Error(
+      "usage: memwarden lifecycle <memoryId> <action> --reason <text> [--root path] [--successor id] [--actor name] [--json]",
+    );
+  }
+  const valueAfter = (flag: string): string | undefined => {
+    const index = rest.indexOf(flag);
+    return index >= 0 ? rest[index + 1] : undefined;
+  };
+  const root = valueAfter("--root") ?? process.cwd();
+  const successor = valueAfter("--successor");
+  const actor = valueAfter("--actor") ?? "cli";
+  const response = await fetch(`${DAEMON_URL}/memwarden/lifecycle`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({
+      memory_id: memoryId,
+      action,
+      reason,
+      root,
+      actor,
+      ...(successor ? { successor_id: successor } : {}),
+    }),
+  });
+  const body = (await response.json()) as {
+    ok?: boolean;
+    error?: string;
+    memory?: { id: string; lifecycle?: string; validFrom?: string; validTo?: string };
+    successor?: { id: string; lifecycle?: string; validFrom?: string };
+    effectiveLifecycle?: string;
+  };
+  if (!response.ok || body.ok !== true) {
+    throw new Error(
+      `lifecycle transition failed: ${body.error ?? `HTTP ${response.status}`}`,
+    );
+  }
+  if (rest.includes("--json")) {
+    console.log(JSON.stringify(body, null, 2));
+    return;
+  }
+  console.log(
+    `\n  ${body.memory?.id ?? memoryId}: ${body.memory?.lifecycle ?? action}` +
+      ` (effective ${body.effectiveLifecycle ?? body.memory?.lifecycle ?? "unknown"})`,
+  );
+  if (body.successor) {
+    console.log(`  successor: ${body.successor.id} (${body.successor.lifecycle})`);
+  }
+  console.log(`  reason: ${reason}\n`);
 }
 
 // memwarden forget <obsId> — delete one memory and print the tamper-evident
@@ -2272,8 +2395,10 @@ function printUsage(): void {
       "  memwarden status [--json]                       # daemon, semantic, vector backend, per-tool detected/mcp/hooks/live\n" +
       "  memwarden connect [claude-code|cursor|cline|windsurf] [--with-hooks] [--url URL] [--secret S]\n" +
       "  memwarden doctor [path] [--all-projects] [--fix-stale] [--erase]\n" +
-      "                                                    # audit; --fix-stale forgets every stale memory\n" +
-      "  memwarden why <observationId> [--root path] [--content] [--json]  # explain why a memory is verified/stale/refused\n" +
+      "                                                    # audit lifecycle; --fix-stale is legacy explicit deletion\n" +
+      "  memwarden why <observationId> [--root path] [--content] [--json]  # explain evidence, source status, lifecycle, and policy\n" +
+      "  memwarden lifecycle <memoryId> <action> --reason text [--root path] [--successor id] [--actor name] [--json]\n" +
+      "                                                    # dispute/archive/revoke/restore/revalidate/supersede without deleting history\n" +
       "  memwarden audit <store> [--root repo] [--json] [--html [out.html]]  # audit a FOREIGN store (claude-mem db, CLAUDE.md, Mem0 json)\n" +
       "  memwarden adopt <store> [--root repo] [--project path] [--agent name] [--dry-run] [--json]  # seed a foreign store into the brain (labeled sourced_unverified)\n" +
       "  memwarden exclude [path] | include [path] | exclude --list   # per-project: no capture, no injection\n" +
@@ -2319,6 +2444,8 @@ async function main(): Promise<void> {
       return doctor(rest);
     case "why":
       return why(rest);
+    case "lifecycle":
+      return lifecycle(rest);
     case "audit":
       return audit(rest);
     case "adopt":

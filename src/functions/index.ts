@@ -17,6 +17,7 @@ import { registerReceiptFunction } from "./receipt.js";
 import { registerWhyFunction } from "./why.js";
 import { registerRememberFunction } from "./remember.js";
 import { registerCanonFunctions } from "./canon.js";
+import { registerLifecycleFunction } from "./lifecycle.js";
 import { DedupMap } from "./dedup.js";
 import { getTokenBudget, getMaxObservationsPerSession } from "./config.js";
 
@@ -75,6 +76,27 @@ export type {
   CanonImportResult,
   CanonProjectIdentity,
 } from "./canon.js";
+export {
+  registerLifecycleFunction,
+  transitionMemoryLifecycle,
+} from "./lifecycle.js";
+export type {
+  TransitionMemoryLifecycleInput,
+  TransitionMemoryLifecycleResult,
+} from "./lifecycle.js";
+export {
+  MEMORY_LIFECYCLE_ACTIONS,
+  MEMORY_LIFECYCLE_STATES,
+  applyMemoryLifecycleTransition,
+  evaluateMemoryAsOf,
+  initializeMemoryLifecycle,
+  isValidRecordedLifecycleTransition,
+  lifecycleProjection,
+  memoryLifecycleMetadata,
+  migrateLegacyMemoryLifecycle,
+  persistedLifecycleOf,
+  validityIntervalsOf,
+} from "./memory-lifecycle.js";
 export {
   registerDejaFixFunctions,
   recordFix,
@@ -147,6 +169,7 @@ export function registerCoreFunctions(
   registerWhyFunction(sdk, kv);
   registerRememberFunction(sdk, kv);
   registerCanonFunctions(sdk, kv);
+  registerLifecycleFunction(sdk, kv);
 
   return kv;
 }
