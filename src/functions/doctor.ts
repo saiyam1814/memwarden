@@ -20,7 +20,7 @@ import type { CompressedObservation, Memory, Session } from "./types.js";
 import { KV } from "../state/schema.js";
 import { classifyProvenance } from "./verify.js";
 import { gitProjectKey } from "./git-identity.js";
-import { memoryToObservation } from "./memory-utils.js";
+import { isMemoryRecallable, memoryToObservation } from "./memory-utils.js";
 import { canonicalizePath } from "./paths.js";
 import { getDataDir } from "./config.js";
 import { logger } from "./logger.js";
@@ -129,7 +129,7 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
       try {
         const memories = await kv.list<Memory>(KV.memories);
         for (const m of memories) {
-          if (m.isLatest === false) continue;
+          if (!isMemoryRecallable(m)) continue;
           if (
             projectFilter &&
             m.project &&

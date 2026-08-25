@@ -15,6 +15,7 @@ import { registerDoctorFunction } from "./doctor.js";
 import { registerDejaFixFunctions } from "./dejafix.js";
 import { registerReceiptFunction } from "./receipt.js";
 import { registerWhyFunction } from "./why.js";
+import { registerRememberFunction } from "./remember.js";
 import { DedupMap } from "./dedup.js";
 import { getTokenBudget, getMaxObservationsPerSession } from "./config.js";
 
@@ -32,6 +33,16 @@ export { registerReceiptFunction } from "./receipt.js";
 export type { DeleteReceipt, ForgetResult } from "./receipt.js";
 export { registerWhyFunction } from "./why.js";
 export type { WhyResult } from "./why.js";
+export {
+  registerRememberFunction,
+  rememberMemory,
+  normalizeManualFiles,
+  MANUAL_MEMORY_KINDS,
+} from "./remember.js";
+export type {
+  RememberMemoryInput,
+  RememberMemoryResult,
+} from "./remember.js";
 export {
   registerDejaFixFunctions,
   recordFix,
@@ -102,6 +113,7 @@ export function registerCoreFunctions(
   registerDejaFixFunctions(sdk, kv);
   registerReceiptFunction(sdk, kv);
   registerWhyFunction(sdk, kv);
+  registerRememberFunction(sdk, kv);
 
   return kv;
 }

@@ -6,10 +6,23 @@
 
 import type { CompressedObservation, Memory } from "./types.js";
 
+export function isMemoryExpired(memory: Memory, now = Date.now()): boolean {
+  if (!memory.forgetAfter) return false;
+  const expiresAt = new Date(memory.forgetAfter).getTime();
+  return Number.isFinite(expiresAt) && expiresAt <= now;
+}
+
+export function isMemoryRecallable(memory: Memory, now = Date.now()): boolean {
+  return memory.isLatest !== false && !isMemoryExpired(memory, now);
+}
+
 export function memoryToObservation(memory: Memory): CompressedObservation {
   const obs: CompressedObservation = {
     id: memory.id,
-    sessionId: memory.sessionIds?.[0] ?? "memory",
+    sessionId:
+      memory.origin === "manual"
+        ? `memory:${memory.id}`
+        : (memory.sessionIds?.[0] ?? "memory"),
     timestamp: memory.createdAt,
     type: "decision",
     title: memory.title,
