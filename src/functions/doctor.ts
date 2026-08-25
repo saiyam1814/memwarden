@@ -19,7 +19,7 @@ import type { StateKV } from "../state/kv.js";
 import type { CompressedObservation, Memory, Session } from "./types.js";
 import { KV } from "../state/schema.js";
 import { classifyProvenance } from "./verify.js";
-import { memoryToObservation } from "./memory-utils.js";
+import { isMemoryRecallable, memoryToObservation } from "./memory-utils.js";
 import {
   hasProjectIdentity,
   projectIdentityMatchesPath,
@@ -143,7 +143,7 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
       try {
         const memories = await kv.list<Memory>(KV.memories);
         for (const memory of memories) {
-          if (memory.isLatest === false) continue;
+          if (!isMemoryRecallable(memory)) continue;
           const identity = resolveMemoryIdentity(memory, sessionsById);
           if (!inScope(identity)) continue;
           audit(memoryToObservation(memory, identity), identity);

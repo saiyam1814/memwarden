@@ -13,6 +13,7 @@ import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { projectKey as computeProjectKey } from "./git-identity.js";
 import { canonicalizePath } from "./paths.js";
+import { isMemoryRecallable } from "./memory-utils.js";
 import type { Memory, Session } from "./types.js";
 
 export interface ProjectIdentity {
@@ -195,7 +196,7 @@ export async function listMemoryInventory(
   const scoped = nonEmpty(projectPath);
   const out: Memory[] = [];
   for (const memory of memories) {
-    if (memory.isLatest === false) continue;
+    if (!isMemoryRecallable(memory)) continue;
     const identity = resolveMemoryIdentity(memory, sessionsById);
     if (
       scoped &&

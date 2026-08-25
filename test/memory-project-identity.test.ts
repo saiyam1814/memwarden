@@ -151,18 +151,22 @@ async function captureAndDistill(root: string): Promise<Memory> {
       function_id: "mem::observe",
       payload: {
         hookType: "post_tool_use",
-        sessionId: "capture-session",
+        // Equivalent support arrives across sessions; same-session retries are
+        // correctly suppressed by the capture deduplicator.
+        sessionId: `capture-session-${i}`,
         project: root,
         cwd: root,
         timestamp: new Date(Date.now() + i * 1000).toISOString(),
         data: {
           tool_name: "Edit",
+          // Repeated support must be the same semantic claim. Claim-level
+          // consolidation intentionally preserves distinct edits in one file.
           tool_input: {
             file_path: "src/auth.ts",
-            old_string: `old-${i}`,
-            new_string: `new-${i}`,
+            old_string: "old-policy",
+            new_string: "new-policy",
           },
-          tool_output: `project identity sentinel policy observation ${i}`,
+          tool_output: "project identity sentinel policy observation",
         },
       },
     });

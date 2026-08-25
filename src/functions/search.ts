@@ -1,11 +1,15 @@
 //
 // Search (mem::search): hybrid BM25 + vector (RRF) retrieval with a lazy index
 // rebuild, project/cwd over-fetch + canonical-path post-filter, a memory-scope
-// fallback, an optional Verified Recall firewall (safe_only), and three output
-// formats (full / compact / narrative) with token-budget packing. When an
+// fallback, always-on provenance classification separated from inclusion
+// policy (current / historical / all, with safe_only kept as a compatibility
+// alias), and three output formats (full / compact / narrative) with
+// token-budget packing. When an
 // embedding provider is active (the default: on-device MiniLM + TurboQuant)
 // the vector stream is fused in; with no provider it runs BM25-only.
 
+import { existsSync, statSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import type { ISdk } from "../kernel/index.js";
 import type {
   CompressedObservation,
@@ -29,7 +33,7 @@ import {
   getRecallPolicy,
   isScopedVectorSearchEnabled,
 } from "./config.js";
-import { memoryToObservation } from "./memory-utils.js";
+import { isMemoryRecallable, memoryToObservation } from "./memory-utils.js";
 import {
   hasProjectIdentity,
   listMemoryInventory,
@@ -292,14 +296,15 @@ export async function rebuildIndex(
   try {
     const memories = await kv.list<Memory>(KV.memories);
     for (const memory of memories) {
-      if (memory.isLatest === false) continue;
+      if (!isMemoryRecallable(memory)) continue;
       if (!memory.title || !memory.content) continue;
-      idx.add(memoryToObservation(memory));
+      const observation = memoryToObservation(memory);
+      idx.add(observation);
       liveIds?.add(memory.id);
       if (!preserveVectors || !vectorIndex?.has(memory.id)) {
         pending.push({
           id: memory.id,
-          sessionId: memory.sessionIds?.[0] ?? "memory",
+          sessionId: observation.sessionId,
           text: memory.title + " " + memory.content,
           context: { kind: "memory", logId: memory.id },
         });
@@ -405,6 +410,18 @@ function fuseRrf(a: Ranked[], b: Ranked[], limit: number): Ranked[] {
     .slice(0, limit);
 }
 
+/** Merge independently scored BM25 streams, keeping one row per record. */
+function mergeRanked(a: Ranked[], b: Ranked[], limit: number): Ranked[] {
+  const merged = new Map<string, Ranked>();
+  for (const hit of [...a, ...b]) {
+    const current = merged.get(hit.obsId);
+    if (!current || hit.score > current.score) merged.set(hit.obsId, hit);
+  }
+  return [...merged.values()]
+    .sort((x, y) => y.score - x.score)
+    .slice(0, limit);
+}
+
 /**
  * Builds the obsId allowlist for a scoped vector search, mirroring the
  * post-filter's session predicate EXACTLY: a session is in scope when each
@@ -462,23 +479,38 @@ export async function buildScopedAllowedIds(
   // Memory row + all source sessions.
   const memories = await kv.list<Memory>(KV.memories).catch(() => [] as Memory[]);
   for (const memory of memories) {
-    if (memory.isLatest !== false) allowed.add(memory.id);
+    if (isMemoryRecallable(memory)) allowed.add(memory.id);
   }
   return { allowed, sessions };
 }
 
-// --- recall serialization (labeled) ---------------------------------
+// --- recall classification + serialization (always labeled) --------
 //
-// Balanced recall injects sourced/unsourced memory BY DESIGN, and the
-// promise (README, SECURITY.md) is that it arrives LABELED. This is the ONE
-// serializer for recall output — compact and narrative both go through it —
-// and it attaches the trust verdict the safe_only firewall pass already
-// computed (never reclassified a second time). `trust` is absent only when
-// no verdict exists, i.e. a plain non-safe_only search.
+// Classification and inclusion are deliberately separate. Every candidate
+// that leaves search gets one verdict, even for an explicit historical/all
+// lookup. The mode then decides whether that classified candidate is included.
+// This prevents an unfiltered lookup from laundering a drifted record into
+// unlabeled current context.
 
-export type TrustLabel = "verified" | "sourced" | "unsourced" | "stale";
+export type SearchMode = "current" | "historical" | "all";
+export type SearchVerdict = Verdict | {
+  status: "unverifiable";
+  reason: string;
+};
+export type TrustLabel =
+  | "verified"
+  | "sourced"
+  | "unsourced"
+  | "stale"
+  | "unverifiable";
+export type SourceStatusLabel =
+  | "source-verified"
+  | "sourced"
+  | "unsourced"
+  | "source-drifted"
+  | "unverifiable";
 
-export function trustLabelOf(verdict: Verdict): TrustLabel {
+export function trustLabelOf(verdict: SearchVerdict): TrustLabel {
   switch (verdict.status) {
     case "verified":
       return "verified";
@@ -488,16 +520,47 @@ export function trustLabelOf(verdict: Verdict): TrustLabel {
       return "stale";
     case "unsourced":
       return "unsourced";
+    case "unverifiable":
+      return "unverifiable";
   }
 }
 
-interface RecallItemBase {
+export function sourceStatusOf(verdict: SearchVerdict): SourceStatusLabel {
+  switch (verdict.status) {
+    case "verified":
+      return "source-verified";
+    case "sourced_unverified":
+      return "sourced";
+    case "stale":
+      return "source-drifted";
+    case "unsourced":
+      return "unsourced";
+    case "unverifiable":
+      return "unverifiable";
+  }
+}
+
+interface RecallClassificationFields {
+  /** Backward-compatible four-state label (`unverifiable` is additive). */
+  trust: TrustLabel;
+  /** Explicit source state; drift is never described as merely "stale". */
+  source_status: SourceStatusLabel;
+  /** Capture time used to frame historical records. */
+  captured_at: string;
+  /** Short provenance verdict; historical results always retain this context. */
+  evidence: string;
+  /** True for source-drifted or superseded records. */
+  historical: boolean;
+  /** Present only for a stored Memory version that is no longer latest. */
+  superseded?: true;
+}
+
+interface RecallItemBase extends RecallClassificationFields {
   obsId: string;
   sessionId: string;
   title: string;
   score: number;
   timestamp: string;
-  trust?: TrustLabel;
 }
 export interface CompactRecallItem extends RecallItemBase {
   type: CompressedObservation["type"];
@@ -505,21 +568,41 @@ export interface CompactRecallItem extends RecallItemBase {
 export interface NarrativeRecallItem extends RecallItemBase {
   narrative: string;
 }
+export interface FullRecallItem extends SearchResult, RecallClassificationFields {}
+
+function classificationFields(
+  r: SearchResult,
+  verdict: SearchVerdict,
+  superseded: boolean,
+): RecallClassificationFields {
+  const sourceStatus = sourceStatusOf(verdict);
+  return {
+    trust: trustLabelOf(verdict),
+    source_status: sourceStatus,
+    captured_at: r.observation.provenance?.capturedAt ?? r.observation.timestamp,
+    evidence: verdict.reason,
+    historical: sourceStatus === "source-drifted" || superseded,
+    ...(superseded ? { superseded: true as const } : {}),
+  };
+}
 
 export function serializeRecallItem(
   r: SearchResult,
   format: "compact",
-  verdict?: Verdict,
+  verdict: SearchVerdict,
+  superseded?: boolean,
 ): CompactRecallItem;
 export function serializeRecallItem(
   r: SearchResult,
   format: "narrative",
-  verdict?: Verdict,
+  verdict: SearchVerdict,
+  superseded?: boolean,
 ): NarrativeRecallItem;
 export function serializeRecallItem(
   r: SearchResult,
   format: "compact" | "narrative",
-  verdict?: Verdict,
+  verdict: SearchVerdict,
+  superseded = false,
 ): CompactRecallItem | NarrativeRecallItem {
   const base: RecallItemBase = {
     obsId: r.observation.id,
@@ -527,21 +610,74 @@ export function serializeRecallItem(
     title: r.observation.title,
     score: r.score,
     timestamp: r.observation.timestamp,
-    ...(verdict ? { trust: trustLabelOf(verdict) } : {}),
+    ...classificationFields(r, verdict, superseded),
   };
   return format === "compact"
     ? { ...base, type: r.observation.type }
     : { ...base, narrative: r.observation.narrative };
 }
 
+function serializeFullRecallItem(
+  r: SearchResult,
+  verdict: SearchVerdict,
+  superseded = false,
+): FullRecallItem {
+  return { ...r, ...classificationFields(r, verdict, superseded) };
+}
+
 /** One narrative line, label first — the text surfaces (hooks, proxy, MCP
- * resume) inject exactly this, so the label travels with the memory. */
+ * resume) inject exactly this, so the label travels with the memory. Drifted
+ * content also carries explicit capture-time + evidence framing in the text,
+ * not only in adjacent JSON metadata. */
 export function formatNarrativeItem(
   item: NarrativeRecallItem,
   idx: number,
 ): string {
-  const label = item.trust ? `[${item.trust}] ` : "";
-  return `${idx + 1}. ${label}${item.title}\n${item.narrative}`;
+  const sourceLabel =
+    item.source_status === "source-verified" ? item.trust : item.source_status;
+  const labels = `${item.superseded ? "[superseded] " : ""}[${sourceLabel}] `;
+  const historicalFrame = item.historical
+    ? `Historical record captured ${item.captured_at}. Evidence: ${item.evidence}\n`
+    : "";
+  return `${idx + 1}. ${labels}${item.title}\n${historicalFrame}${item.narrative}`;
+}
+
+function usableCheckoutRoot(value: string | undefined): string | null {
+  if (!value || !isAbsolute(value)) return null;
+  try {
+    return existsSync(value) && statSync(value).isDirectory()
+      ? canonicalizePath(value)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeTrustFilter(raw: unknown): Set<SourceStatusLabel> | null {
+  if (raw === undefined) return null;
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error("mem::search: trust must be a non-empty array");
+  }
+  const aliases: Record<string, SourceStatusLabel> = {
+    verified: "source-verified",
+    "source-verified": "source-verified",
+    sourced: "sourced",
+    "sourced-unverified": "sourced",
+    unsourced: "unsourced",
+    stale: "source-drifted",
+    "source-drifted": "source-drifted",
+    unverifiable: "unverifiable",
+  };
+  const normalized = new Set<SourceStatusLabel>();
+  for (const item of raw) {
+    if (typeof item !== "string" || aliases[item.trim().toLowerCase()] === undefined) {
+      throw new Error(
+        "mem::search: trust entries must be one of source-verified, sourced, unsourced, source-drifted, or unverifiable",
+      );
+    }
+    normalized.add(aliases[item.trim().toLowerCase()]!);
+  }
+  return normalized;
 }
 
 export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
@@ -554,8 +690,15 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       cwd?: string;
       format?: string;
       token_budget?: number;
+      /** Compatibility flag used by existing automatic recall surfaces. */
       safe_only?: boolean;
-      /** Inventory mode used by canon push: returns stored Memory records
+      /** Explicit inclusion policy. Classification runs in every mode. */
+      mode?: string;
+      /** Backward-compatible alias for mode=all when true, current when false. */
+      include_drifted?: boolean;
+      /** Optional source-status allowlist, applied after classification. */
+      trust?: unknown;
+      /** Inventory mode used by Canon push: returns stored Memory records
        * rather than ranked observations. */
       include_memories?: boolean;
       all_projects?: boolean;
@@ -622,26 +765,63 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           ? canonicalizePath(data.cwd)
           : undefined;
       // Stable project identity for each filter directory (git remote / main
-      // repo root). Used below to WIDEN the path filters — same key at a
-      // different path (another worktree, a moved checkout) still matches.
+      // repo root, canonical path fallback). Used below to WIDEN the path
+      // filters — same key at a different path (worktree/moved checkout) matches.
       const projectFilterKey =
         projectFilter !== undefined ? computeProjectKey(projectFilter) : null;
       const cwdFilterKey =
         cwdFilter !== undefined ? computeProjectKey(cwdFilter) : null;
-      // Verified Recall firewall: when on (recall surfaces default it on),
-      // drop results that reference files now deleted or content-changed, so
-      // stale memory is never injected. It needs a cwd to check against — and
-      // it FAILS CLOSED: asking for safe_only without a cwd is an error, not a
-      // silent downgrade to unfiltered results. Enforced here at the function
-      // boundary (not just the HTTP route) so no in-process caller can lose
-      // the firewall by omitting cwd.
+      // Inclusion policy is normalized independently from classification.
+      // `safe_only` remains the fail-closed compatibility switch used by
+      // SessionStart/proxy/resume and is exactly equivalent to mode=current.
       const wantsSafeOnly = data.safe_only === true;
       if (wantsSafeOnly && cwdFilter === undefined) {
         throw new Error(
           "mem::search: safe_only requires a cwd to verify memory against (the firewall fails closed)",
         );
       }
-      const safeOnly = wantsSafeOnly && cwdFilter !== undefined;
+      let explicitMode: SearchMode | undefined;
+      if (data.mode !== undefined) {
+        if (typeof data.mode !== "string") {
+          throw new Error("mem::search: mode must be current, historical, or all");
+        }
+        const normalizedMode = data.mode.trim().toLowerCase();
+        if (!(["current", "historical", "all"] as const).includes(
+          normalizedMode as SearchMode,
+        )) {
+          throw new Error("mem::search: mode must be current, historical, or all");
+        }
+        explicitMode = normalizedMode as SearchMode;
+      }
+      if (
+        data.include_drifted !== undefined &&
+        typeof data.include_drifted !== "boolean"
+      ) {
+        throw new Error("mem::search: include_drifted must be a boolean");
+      }
+      const aliasMode: SearchMode | undefined =
+        data.include_drifted === true
+          ? "all"
+          : data.include_drifted === false
+            ? "current"
+            : undefined;
+      if (explicitMode && aliasMode && explicitMode !== aliasMode) {
+        throw new Error(
+          "mem::search: mode conflicts with include_drifted (true means all; false means current)",
+        );
+      }
+      if (
+        wantsSafeOnly &&
+        ((explicitMode !== undefined && explicitMode !== "current") ||
+          (aliasMode !== undefined && aliasMode !== "current"))
+      ) {
+        throw new Error("mem::search: safe_only is only compatible with mode=current");
+      }
+      const inclusionMode: SearchMode | "legacy" = wantsSafeOnly
+        ? "current"
+        : explicitMode ?? aliasMode ?? "legacy";
+      const currentPolicy = inclusionMode === "current";
+      const trustFilter = normalizeTrustFilter(data.trust);
       const format = typeof data.format === "string" ? data.format : "full";
       if (!["full", "compact", "narrative"].includes(format)) {
         throw new Error(
@@ -685,15 +865,15 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         });
       }
 
-      // When filtering by project/cwd, over-fetch from the index so the
-      // post-filter still has a chance of returning `effectiveLimit` results.
-      // safe_only over-fetches much harder (and caps at SAFE_SCAN_CAP) so a run
-      // of stale high-ranking hits is unlikely to starve a verified result; if
-      // the scan window is exhausted we log it rather than hide it.
-      const SAFE_SCAN_CAP = 2000;
+      // Inclusion filters over-fetch so a run of excluded high-ranking hits
+      // cannot starve eligible results. The hard cap is surfaced in logs when
+      // exhausted rather than pretending the scan was exhaustive.
+      const POLICY_SCAN_CAP = 2000;
       const filtering = !!(projectFilter || cwdFilter);
-      const fetchLimit = safeOnly
-        ? Math.min(SAFE_SCAN_CAP, Math.max(effectiveLimit * 50, 500))
+      const policyFiltering =
+        currentPolicy || inclusionMode === "historical" || trustFilter !== null;
+      const fetchLimit = policyFiltering
+        ? Math.min(POLICY_SCAN_CAP, Math.max(effectiveLimit * 50, 500))
         : filtering
           ? Math.max(effectiveLimit * 10, 100)
           : effectiveLimit;
@@ -724,9 +904,41 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         scopedAllowed = scoped.allowed;
         preloadedSessions = scoped.sessions;
       }
-      const bm25Results = scopedAllowed
+      let bm25Results = scopedAllowed
         ? idx.search(query, fetchLimit, scopedAllowed)
         : idx.search(query, fetchLimit);
+      // Historical mode must preserve one bounded window from BOTH the live
+      // corpus (where source-drifted observations live) and superseded-memory
+      // history. Truncating their merge back to one window before policy would
+      // let 2,000 current hits starve every superseded match.
+      const combinedFetchLimit =
+        inclusionMode === "historical" ? fetchLimit * 2 : fetchLimit;
+
+      // Superseded Memory rows are intentionally absent from the live index.
+      // Historical/all mode builds a bounded temporary BM25 stream for them,
+      // so the default/current ranking remains untouched while deliberate
+      // history inspection can still retrieve old versions.
+      const supersededMemoryById = new Map<string, Memory>();
+      if (inclusionMode === "historical" || inclusionMode === "all") {
+        try {
+          const historicalIndex = new SearchIndex();
+          const memories = await kv.list<Memory>(KV.memories);
+          for (const memory of memories) {
+            if (memory.isLatest !== false || !memory.title || !memory.content) continue;
+            supersededMemoryById.set(memory.id, memory);
+            historicalIndex.add(memoryToObservation(memory));
+          }
+          bm25Results = mergeRanked(
+            bm25Results,
+            historicalIndex.search(query, fetchLimit),
+            combinedFetchLimit,
+          );
+        } catch (err) {
+          logger.warn("search: failed to load superseded memory history", {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       // Fuse in the semantic stream when an embedding provider + vector index
       // are present, so meaning-based queries (different words than the
       // memory) resolve. Provider-less mode stays pure BM25. A failing
@@ -749,7 +961,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
             } else {
               vectorHits = vIdx.search(qVec, fetchLimit);
             }
-            results = fuseRrf(bm25Results, vectorHits, fetchLimit);
+            results = fuseRrf(bm25Results, vectorHits, combinedFetchLimit);
           }
         } catch (err) {
           logger.warn("search: vector stream failed — BM25 only", {
@@ -780,10 +992,22 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
          * per-session observation scope. */
         memory: Memory | null;
       }
+
+      // Cache Memory rows as records. Historical mode already loaded
+      // superseded rows above, so those require no second KV hit.
+      const memoryCache = new Map<string, Memory | null>();
+      for (const [id, memory] of supersededMemoryById) memoryCache.set(id, memory);
+      const loadMemory = async (obsId: string): Promise<Memory | null> => {
+        if (memoryCache.has(obsId)) return memoryCache.get(obsId)!;
+        const memory = await kv.get<Memory>(KV.memories, obsId).catch(() => null);
+        memoryCache.set(obsId, memory ?? null);
+        return memory ?? null;
+      };
+
       // Resolve the actual source before applying scope. A distilled Memory is
-      // often indexed under a REAL source session id; treating that id as the
-      // Memory's identity is the bug that made direct-memory and observation
-      // verdicts disagree across worktrees.
+      // often indexed under a real source session id; treating that id as the
+      // Memory's identity makes direct-memory and observation verdicts disagree
+      // across worktrees.
       const sourceCache = new Map<string, CandidateSource | null>();
       const loadCandidateSource = async (r: {
         obsId: string;
@@ -799,12 +1023,12 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           sourceCache.set(cacheKey, source);
           return source;
         }
-        const memory = await kv
-          .get<Memory>(KV.memories, r.obsId)
-          .catch(() => null);
-        const source = memory
-          ? { observation: memoryToObservation(memory), memory }
-          : null;
+        const memory = await loadMemory(r.obsId);
+        const historical = supersededMemoryById.has(r.obsId);
+        const source =
+          memory && (historical || isMemoryRecallable(memory))
+            ? { observation: memoryToObservation(memory), memory }
+            : null;
         sourceCache.set(cacheKey, source);
         return source;
       };
@@ -825,40 +1049,144 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         return identity;
       };
 
-      // First pass: scope-filter, and — when safe_only is on — apply the
-      // Verified Recall firewall WHILE filling, so stale top hits don't starve
-      // out lower-ranked verified ones. We keep scanning the fetched results
-      // (fetchLimit, up to SAFE_SCAN_CAP) until we have effectiveLimit safe ones.
-      const candidateTarget = safeOnly
-        ? Math.min(fetchLimit, Math.max(effectiveLimit * 3, effectiveLimit + 20))
-        : effectiveLimit;
-      const candidates: typeof results = [];
-      // Verdicts computed by the firewall pass, kept so the serializer can
-      // label recall output without classifying twice.
-      const verdictByObs = new Map<string, Verdict>();
-      let staleDropped = 0;
-      // Samples the SessionStart hook (and `memwarden why`) can surface so the
-      // user *sees* the firewall work — not just silent omission. Evidence
-      // only (id + verdict), never the title: a refused observation's title
-      // carries its content (a handoff title embeds the user's prompt), and
-      // refused content must not ride back to the model inside the refusal
-      // notice. `memwarden why <obsId>` is the inspection path.
+      // Cross-project classification may need another live checkout for the
+      // candidate's own stable project key. Load the session registry at most
+      // once and cache it alongside per-id reads.
+      let allSessions = preloadedSessions;
+      const loadAllSessions = async (): Promise<Session[]> => {
+        if (allSessions) return allSessions;
+        allSessions = await kv.list<Session>(KV.sessions).catch(() => []);
+        for (const session of allSessions) sessionCache.set(session.id, session);
+        return allSessions;
+      };
+
+      const unverifiable = (): SearchVerdict => ({
+        status: "unverifiable",
+        reason:
+          "the source checkout is unavailable, so capture-time file evidence cannot be checked",
+      });
+
+      /** Classify against the caller checkout for a proven same-project scoped
+       * result; otherwise against the candidate's own known live checkout.
+       * Missing cross-project checkouts are not called current or drifted — the
+       * honest answer is unverifiable. */
+      const classifyForSearch = async (
+        obs: CompressedObservation,
+        identity: ProjectIdentity,
+      ): Promise<SearchVerdict> => {
+        const files = obs.provenance?.files ?? [];
+        const needsRelativeRoot = files.some((file) => !isAbsolute(file));
+
+        // File-less provenance (command/user confirmation/none) does not need a
+        // checkout. The classifier can determine sourced vs unsourced directly.
+        if (files.length === 0) {
+          return classifyProvenance(obs.provenance, cwdFilter ?? projectFilter ?? "/");
+        }
+
+        const scopedFilter = cwdFilter ?? projectFilter;
+        if (scopedFilter) {
+          const callerRoot = usableCheckoutRoot(scopedFilter);
+          const sameProject =
+            hasProjectIdentity(identity) &&
+            projectIdentityMatchesPath(identity, scopedFilter);
+          const mustUseCallerCheckout =
+            cwdFilter !== undefined || usableCheckoutRoot(obs.provenance?.cwd) === null;
+          if (callerRoot && sameProject && mustUseCallerCheckout) {
+            return classifyProvenance(obs.provenance, callerRoot, {
+              verifyAgainstRoot: true,
+            });
+          }
+          if (!callerRoot && sameProject && mustUseCallerCheckout) {
+            return unverifiable();
+          }
+        }
+
+        // Unscoped/all-project search verifies a result against its OWN known
+        // checkout, never the caller's unrelated cwd.
+        const provenanceRoot = usableCheckoutRoot(obs.provenance?.cwd);
+        if (provenanceRoot) {
+          return classifyProvenance(obs.provenance, provenanceRoot);
+        }
+
+        const directRoot =
+          usableCheckoutRoot(identity.captureCwd) ??
+          usableCheckoutRoot(identity.projectPath);
+        if (directRoot) {
+          return classifyProvenance(obs.provenance, directRoot, {
+            verifyAgainstRoot: true,
+          });
+        }
+
+        if (identity.projectKey) {
+          const alternate = (await loadAllSessions()).find((candidate) => {
+            const candidateIdentity = sessionProjectIdentity(candidate);
+            return (
+              candidateIdentity.projectKey === identity.projectKey &&
+              (usableCheckoutRoot(candidateIdentity.captureCwd) !== null ||
+                usableCheckoutRoot(candidateIdentity.projectPath) !== null)
+            );
+          });
+          const alternateIdentity = alternate
+            ? sessionProjectIdentity(alternate)
+            : undefined;
+          const alternateRoot = alternateIdentity
+            ? usableCheckoutRoot(alternateIdentity.captureCwd) ??
+              usableCheckoutRoot(alternateIdentity.projectPath)
+            : null;
+          if (alternateRoot) {
+            return classifyProvenance(obs.provenance, alternateRoot, {
+              verifyAgainstRoot: true,
+            });
+          }
+        }
+
+        // A recorded-but-missing capture checkout makes both relative and
+        // checkout-internal absolute paths unverifiable: absence of the whole
+        // checkout is not evidence that the referenced source itself drifted.
+        if (obs.provenance?.cwd && isAbsolute(obs.provenance.cwd)) {
+          return unverifiable();
+        }
+        // With no recorded checkout, absolute evidence identifies its own path
+        // and can still be checked directly. Relative evidence cannot.
+        return needsRelativeRoot
+          ? unverifiable()
+          : classifyProvenance(obs.provenance, "/");
+      };
+
+      // Scope, classify, THEN apply inclusion policy while filling. Every item
+      // that survives already has the verdict its serializer will expose.
+      const enriched: SearchResult[] = [];
+      const verdictByObs = new Map<string, SearchVerdict>();
+      const supersededObs = new Set<string>();
+      let refusedCount = 0;
+      // Evidence only (id + verdict), never title/content: refused content must
+      // not ride back to the model inside its own refusal notice.
       const refusalSamples: Array<{
         obsId: string;
         reason: string;
         status: string;
       }> = [];
       for (const r of results) {
-        if (candidates.length >= candidateTarget) break;
+        if (enriched.length >= effectiveLimit) break;
         const source = await loadCandidateSource(r);
         if (!source) {
-          if (safeOnly) staleDropped++;
+          if (currentPolicy) {
+            refusedCount++;
+            if (refusalSamples.length < 5) {
+              refusalSamples.push({
+                obsId: r.obsId,
+                reason: "the indexed source is no longer recallable",
+                status: "unavailable",
+              });
+            }
+          }
           continue;
         }
+
         let identity: ProjectIdentity;
         if (source.memory) {
           identity = await loadMemoryIdentity(source.memory);
-          // Legacy provenance may rely on the source session for its cwd.
+          // Legacy provenance may rely on a source session for its cwd.
           source.observation = memoryToObservation(source.memory, identity);
         } else {
           const session = await loadSession(r.sessionId);
@@ -866,113 +1194,112 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         }
 
         if (filtering) {
-          // Identity widens scope; it never replaces either local path. Plain
-          // search keeps the historical identity-less pass-through, but safe
-          // recall fails closed: an unknown row cannot prove it belongs here.
-          if (safeOnly && !hasProjectIdentity(identity)) {
-            staleDropped++;
-            continue;
-          }
-          if (
-            projectFilter &&
-            hasProjectIdentity(identity) &&
-            !projectIdentityMatchesPath(identity, projectFilter)
-          ) {
-            continue;
-          }
-          if (
-            cwdFilter &&
-            hasProjectIdentity(identity) &&
-            !projectIdentityMatchesPath(identity, cwdFilter)
-          ) {
-            continue;
+          if (!hasProjectIdentity(identity)) {
+            if (inclusionMode !== "legacy") {
+              if (currentPolicy) {
+                refusedCount++;
+                if (refusalSamples.length < 5) {
+                  refusalSamples.push({
+                    obsId: r.obsId,
+                    reason: "the record has no project identity for scoped recall",
+                    status: "unverifiable",
+                  });
+                }
+              }
+              continue;
+            }
+          } else {
+            if (
+              projectFilter &&
+              !projectIdentityMatchesPath(identity, projectFilter)
+            ) {
+              continue;
+            }
+            if (cwdFilter && !projectIdentityMatchesPath(identity, cwdFilter)) {
+              continue;
+            }
           }
         }
-        if (safeOnly && cwdFilter) {
-          // Fail closed for stale/missing candidates. A stable-key match only
-          // authorizes re-rooting; classifyProvenance still receives the
-          // caller's checkout path, never the stable key or capture path.
-          const obs = source.observation;
-          const verdict = classifyProvenance(obs.provenance, cwdFilter, {
-            verifyAgainstRoot: projectIdentityMatchesPath(identity, cwdFilter),
-          });
-          // Policy floor: `balanced` (default) drops only detected-stale;
-          // `verified-only` additionally refuses everything that is not
-          // hash-verified against the live checkout — the strict answer to
-          // memory poisoning via unsourced/unverifiable content (OWASP ASI06).
-          const dropUnderPolicy =
-            verdict.status === "stale" ||
-            (getRecallPolicy() === "verified-only" &&
-              verdict.status !== "verified");
-          if (dropUnderPolicy) {
-            staleDropped++;
+
+        const obs = source.observation;
+        const superseded = supersededMemoryById.has(r.obsId);
+        const verdict = await classifyForSearch(obs, identity);
+        const sourceStatus = sourceStatusOf(verdict);
+
+        let included = true;
+        if (inclusionMode === "current") {
+          included =
+            !superseded &&
+            sourceStatus !== "source-drifted" &&
+            sourceStatus !== "unverifiable" &&
+            (getRecallPolicy() !== "verified-only" || verdict.status === "verified");
+        } else if (inclusionMode === "historical") {
+          included = superseded || sourceStatus === "source-drifted";
+        }
+        if (included && trustFilter !== null) {
+          included = trustFilter.has(sourceStatus);
+        }
+
+        if (!included) {
+          if (currentPolicy) {
+            refusedCount++;
             if (refusalSamples.length < 5) {
               refusalSamples.push({
                 obsId: obs.id,
-                reason: verdict.reason,
-                status: verdict.status,
+                reason: superseded
+                  ? "a newer memory supersedes this record"
+                  : verdict.reason,
+                status: superseded ? "superseded" : verdict.status,
               });
             }
-            continue;
           }
-          verdictByObs.set(r.obsId, verdict);
+          continue;
         }
-        candidates.push(r);
-      }
-      if (safeOnly && staleDropped > 0) {
-        logger.info("Verified Recall dropped stale results", { dropped: staleDropped });
-      }
-      // Record what the firewall decided, so `status` can show it later. One
-      // recall event, the memories actually withheld, and the ones served —
-      // never per-candidate or per-scan-pass, which would inflate the numbers.
-      // Best-effort and deliberately not awaited into the critical path's
-      // failure modes: a stats write must never fail a recall.
-      if (safeOnly) {
-        void recordFirewallActivity(kv, {
-          recall: true,
-          refused: staleDropped,
-          injected: candidates.length,
+
+        verdictByObs.set(obs.id, verdict);
+        if (superseded) supersededObs.add(obs.id);
+        enriched.push({
+          observation: obs,
+          score: r.score,
+          sessionId: r.sessionId,
         });
       }
-      const firewallMeta = safeOnly
-        ? { refused: staleDropped, samples: refusalSamples }
+
+      if (currentPolicy && refusedCount > 0) {
+        logger.info("Verified Recall refused non-current results", {
+          refused: refusedCount,
+        });
+      }
+      // mode=current is a firewall-gated model-facing recall just like the
+      // safe_only compatibility path, so it contributes honest status metrics.
+      if (currentPolicy) {
+        // The recorder swallows storage failures, so awaiting makes the status
+        // evidence observable when this request completes without adding a new
+        // recall failure mode.
+        await recordFirewallActivity(kv, {
+          recall: true,
+          refused: refusedCount,
+          injected: enriched.length,
+        });
+      }
+      const firewallMeta = currentPolicy
+        ? { refused: refusedCount, samples: refusalSamples }
         : undefined;
-      // No silent cap: if we ran out of safe candidates AND exhausted the scan
-      // window, a verified result could exist beyond it — say so.
       if (
-        safeOnly &&
-        candidates.length < effectiveLimit &&
+        policyFiltering &&
+        enriched.length < effectiveLimit &&
         results.length >= fetchLimit
       ) {
-        logger.warn("Verified Recall scan window exhausted; verified results may exist beyond it", {
+        logger.warn("Search policy scan window exhausted; eligible results may exist beyond it", {
           scanned: results.length,
           fetchLimit,
+          mode: inclusionMode,
         });
       }
 
-      // Second pass: assemble results, reusing the resolved source above.
-      const sources = await Promise.all(
-        candidates.map((candidate) => loadCandidateSource(candidate)),
-      );
-      const enriched: SearchResult[] = [];
-      for (let i = 0; i < candidates.length; i++) {
-        const source = sources[i];
-        const cand = candidates[i]!;
-        if (source) {
-          enriched.push({
-            observation: source.observation,
-            score: cand.score,
-            sessionId: cand.sessionId,
-          });
-        }
-      }
-
-      // Safe recall NEVER silently drops a memory on a fuzzy contradiction
-      // heuristic — that would lose correct facts from a trust tool. The only
-      // thing safe_only firewalls is STALE memory (handled above, when the
-      // referenced files are deleted/changed). Conflict detection is advisory
-      // only and lives in mem::doctor, not in recall.
-      const recallResults = enriched.slice(0, effectiveLimit);
+      // Recall never silently drops a memory on a fuzzy contradiction heuristic.
+      // Trust/source classification and the explicit mode are the only filters.
+      const recallResults = enriched;
 
       void recordAccessBatch(
         kv,
@@ -1008,13 +1335,20 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         return { items: selected, used, truncated: false };
       };
 
+      const modeMeta = inclusionMode === "legacy" ? {} : { mode: inclusionMode };
       if (format === "compact") {
         const compactResults: CompactRecallItem[] = recallResults.map((r) =>
-          serializeRecallItem(r, "compact", verdictByObs.get(r.observation.id)),
+          serializeRecallItem(
+            r,
+            "compact",
+            verdictByObs.get(r.observation.id)!,
+            supersededObs.has(r.observation.id),
+          ),
         );
         const packed = applyTokenBudget(compactResults);
         return {
           format,
+          ...modeMeta,
           results: packed.items,
           tokens_used: packed.used,
           tokens_budget: tokenBudget,
@@ -1025,12 +1359,18 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
 
       if (format === "narrative") {
         const narrativeResults = recallResults.map((r) =>
-          serializeRecallItem(r, "narrative", verdictByObs.get(r.observation.id)),
+          serializeRecallItem(
+            r,
+            "narrative",
+            verdictByObs.get(r.observation.id)!,
+            supersededObs.has(r.observation.id),
+          ),
         );
         const packed = applyTokenBudget(narrativeResults);
         const text = packed.items.map(formatNarrativeItem).join("\n\n");
         return {
           format,
+          ...modeMeta,
           results: packed.items,
           text,
           tokens_used: packed.used,
@@ -1040,7 +1380,14 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         };
       }
 
-      const packed = applyTokenBudget(recallResults);
+      const fullResults: FullRecallItem[] = recallResults.map((r) =>
+        serializeFullRecallItem(
+          r,
+          verdictByObs.get(r.observation.id)!,
+          supersededObs.has(r.observation.id),
+        ),
+      );
+      const packed = applyTokenBudget(fullResults);
 
       // Avoid logging raw cwd/project (host paths). Log only that filters
       // were active.
@@ -1052,6 +1399,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       });
       return {
         format,
+        ...modeMeta,
         results: packed.items,
         tokens_used: packed.used,
         tokens_budget: tokenBudget,

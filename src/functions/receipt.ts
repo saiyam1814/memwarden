@@ -33,11 +33,17 @@
 import { createHash } from "node:crypto";
 import type { ISdk } from "../kernel/index.js";
 import type { StateKV } from "../state/kv.js";
-import type { CompressedObservation, Session, SessionSummary } from "./types.js";
+import type {
+  CompressedObservation,
+  Memory,
+  Session,
+  SessionSummary,
+} from "./types.js";
 import { KV } from "../state/schema.js";
 import { getSearchIndex, vectorIndexRemove, vectorIndexAddGuarded } from "./search.js";
 import { deleteAccessLog } from "./access-tracker.js";
 import { withKeyedLock } from "./keyed-mutex.js";
+import { resolveMemoryIdentity } from "./memory-identity.js";
 import { buildSessionHandoff } from "./handoff.js";
 import { DEJAFIX_SCOPE, type FixMemory } from "./dejafix.js";
 import { logger } from "./logger.js";
@@ -467,6 +473,73 @@ export function registerReceiptFunction(sdk: ISdk, kv: StateKV): void {
     return blocked;
   };
 
+  const forgetStoredMemory = async (
+    memory: Memory,
+    erase: boolean,
+  ): Promise<ForgetResult> => {
+    const identity = resolveMemoryIdentity(memory);
+    const projectIdentity =
+      identity.projectKey ||
+      identity.projectPath ||
+      identity.captureCwd ||
+      "_";
+    await withKeyedLock(`remember:${projectIdentity}`, async () => {
+      await kv.delete(KV.memories, memory.id);
+      getSearchIndex().remove(memory.id);
+      vectorIndexRemove(memory.id);
+      await deleteAccessLog(kv, memory.id);
+    });
+
+    let sourceErased = false;
+    let eraseBlocked: string | undefined;
+    if (erase) {
+      try {
+        eraseBlocked = await oplogErase(KV.memories, memory.id);
+        sourceErased = eraseBlocked === undefined;
+      } catch (err) {
+        eraseBlocked =
+          `oplog erase failed (${err instanceof Error ? err.message : String(err)}) — ` +
+          `run \`memwarden compact\` to erase`;
+      }
+    }
+
+    const { entries } = await sdk.trigger<
+      { key: string; scope: string },
+      { entries: ChainEntry[] }
+    >({
+      function_id: "state::oplog-find",
+      payload: { key: memory.id, scope: KV.memories },
+    });
+    const deleteEntry = [...entries].reverse().find((e) => e.op === "delete") ?? null;
+    const createEntry = entries.find((e) => e.op !== "delete") ?? null;
+    const verdict = await sdk.trigger<Record<string, never>, { ok: boolean }>({
+      function_id: "state::verify",
+      payload: {},
+    });
+    const head = await sdk.trigger<
+      Record<string, never>,
+      { id: number; hash: string }
+    >({ function_id: "state::oplog-head", payload: {} });
+    const base = {
+      obsId: memory.id,
+      title: erase ? "(erased)" : memory.title,
+      deletedAt: deleteEntry?.ts ?? new Date().toISOString(),
+      deleteEntry,
+      createEntry,
+      chainIntact: verdict.ok === true,
+      contentErased: erase && sourceErased,
+      eraseIncomplete: erase ? (eraseBlocked ?? null) : null,
+      residualScan: erase ? ("clean" as const) : null,
+      chainHead: head.hash ? { id: head.id, hash: head.hash } : null,
+    };
+    const receipt: DeleteReceipt = { ...base, receiptHash: receiptHash(base) };
+    return {
+      deleted: true,
+      receipt,
+      ...(eraseBlocked === undefined ? {} : { eraseBlocked }),
+    };
+  };
+
   const forget = async (data: {
     observationId?: string;
     erase?: boolean;
@@ -493,8 +566,10 @@ export function registerReceiptFunction(sdk: ISdk, kv: StateKV): void {
         }
       }
       if (!found) {
+        const memory = await kv.get<Memory>(KV.memories, obsId).catch(() => null);
+        if (memory) return forgetStoredMemory(memory, data?.erase === true);
         // The honest failure: nothing pretended, nothing "succeeded".
-        return { deleted: false, reason: `no observation with id ${obsId}` };
+        return { deleted: false, reason: `no observation or memory with id ${obsId}` };
       }
 
       // Remove from KV and every index in lockstep, under the SAME per-session
