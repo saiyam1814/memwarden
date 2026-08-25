@@ -34,7 +34,10 @@ import {
   persistedLifecycleOf,
 } from "../src/functions/memory-lifecycle.js";
 import { __resetColdRebuildForTests } from "../src/functions/search.js";
-import { classifyProvenance, hashFiles } from "../src/functions/verify.js";
+import {
+  classifyProvenance,
+  hashFileCommitments,
+} from "../src/functions/verify.js";
 import type { CanonRecord, Memory } from "../src/functions/types.js";
 import { exportBundle, importBundle } from "../src/bundle/bundle.js";
 import {
@@ -312,6 +315,32 @@ describe("lifecycle persistence, recall, and diagnostics", () => {
     expect(await kv.get<Memory>(KV.memories, memory.id)).toEqual(before);
   });
 
+  it("keeps cosmetic text conversion current while reporting every axis honestly", async () => {
+    writeFileSync(join(root, "policy.ts"), "export const policy = 'v1';\n");
+    const memory = await remember({
+      text: "LIFECYCLE_POLICY_CANARY survives line ending conversion",
+      title: "Cross-platform policy",
+      at: T0,
+      files: ["policy.ts"],
+    });
+    const before = await kv.get<Memory>(KV.memories, memory.id);
+    writeFileSync(join(root, "policy.ts"), "export const policy = 'v1';\r\n");
+
+    const current = await search({ mode: "current", format: "compact" });
+    expect(current.results).toHaveLength(1);
+    expect(current.results[0]).toMatchObject({
+      trust: "cosmetic",
+      source_status: "source-cosmetic",
+      evidence_trust: "verified",
+      live_source_status: "cosmetic_drift",
+      persisted_lifecycle: "active",
+      effective_lifecycle: "active",
+      historical: false,
+    });
+    expect((await search({ mode: "historical" })).results).toEqual([]);
+    expect(await kv.get<Memory>(KV.memories, memory.id)).toEqual(before);
+  });
+
   it("supersedes without destroying the old version and supports exact as-of recall", async () => {
     const old = await remember({
       text: "LIFECYCLE_POLICY_CANARY used one-hour tokens",
@@ -490,6 +519,9 @@ describe("lifecycle persistence, recall, and diagnostics", () => {
     expect(result.successor!.provenance?.fileHashes?.["policy.ts"]).not.toBe(
       originalHash,
     );
+    expect(
+      result.successor!.provenance?.fileHashesNormalized?.["policy.ts"],
+    ).toBeDefined();
     expect(await kv.list<Memory>(KV.memories)).toHaveLength(2);
     const current = await search({ mode: "current", format: "compact" });
     expect(current.results.map((item) => item["obsId"])).toEqual([
@@ -645,18 +677,24 @@ describe("lifecycle persistence, recall, and diagnostics", () => {
     });
   });
 
-  it("keeps mixed records conservatively sourced even when listed hashes match", () => {
+  it("keeps mixed records conservatively sourced across exact and cosmetic source matches", () => {
     writeFileSync(join(root, "policy.ts"), "export const policy = 'v1';\n");
     const provenance = {
       cwd: root,
       files: ["policy.ts"],
-      fileHashes: hashFiles(["policy.ts"], root),
+      ...hashFileCommitments(["policy.ts"], root),
       mixedTrust: true as const,
     };
     expect(classifyProvenance(provenance, root)).toMatchObject({
       status: "sourced_unverified",
       evidenceTrust: "sourced",
       sourceStatus: "matched",
+    });
+    writeFileSync(join(root, "policy.ts"), "export const policy = 'v1';\r\n");
+    expect(classifyProvenance(provenance, root)).toMatchObject({
+      status: "sourced_unverified",
+      evidenceTrust: "sourced",
+      sourceStatus: "cosmetic_drift",
     });
   });
 

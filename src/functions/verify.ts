@@ -1,12 +1,21 @@
 //
-// Verified Recall: classify capture evidence against live source. Whole-file
-// SHA-256 remains the conservative fallback. A fine-grained anchor set may
-// override whole-file drift only when its validated capture metadata proves
-// complete claim/source coverage and every live anchor is re-hashed.
+// Verified Recall: classify capture commitments against live source. Raw and
+// normalized whole-file commitments are computed from one read (#71/#72).
+// Fine-grained anchors are layered on top and may override unrelated file drift
+// only when source coverage and the exact stored claim are capture-complete.
+//
+//   verified           complete dependencies match raw bytes
+//   cosmetic           complete dependencies match declared normalization
+//   sourced_unverified sourced, but not fully content-current
+//   stale              a complete dependency changed or disappeared
+//   unsourced          no evidence at all
 //
 
 import { isAbsolute, relative, sep } from "node:path";
-import type { Provenance } from "./types.js";
+import type {
+  FineGrainedClaimCommitment,
+  Provenance,
+} from "./types.js";
 import { isUnsourced } from "./provenance.js";
 import {
   isActionableFineGrainedEvidence,
@@ -26,6 +35,16 @@ import {
 
 const MAX_VERIFY_FILES = 256;
 
+interface FileCommitment {
+  raw: string;
+  normalized?: string;
+}
+
+export interface FileHashCommitments {
+  fileHashes: Record<string, string>;
+  fileHashesNormalized: Record<string, string>;
+}
+
 function relativeInside(root: string, file: string): string | null {
   if (!isAbsolute(root) || !isAbsolute(file)) return null;
   const rel = relative(root, file);
@@ -40,9 +59,9 @@ function relativeInside(root: string, file: string): string | null {
   return rel;
 }
 
-/** Relative evidence is always constrained to its checkout. Absolute evidence
- * under that checkout receives the same symlink-escape protection; intentionally
- * external absolute evidence keeps its historical identity for compatibility. */
+/** Relative evidence is constrained to its checkout. Absolute evidence under
+ * that checkout gets the same symlink-escape protection; intentionally external
+ * absolute evidence keeps its historical identity for compatibility. */
 function readEvidenceFile(
   root: string,
   file: string,
@@ -58,47 +77,65 @@ function readEvidenceFile(
     : readBoundedFile(file, maxBytes);
 }
 
-/** Hash referenced files under `root` at capture time. Unsafe, missing,
- * non-file, or oversized entries are omitted, so omission can never mint a
- * verified verdict. */
+function commitmentForRead(read: Extract<BoundedReadResult, { ok: true }>): FileCommitment {
+  const normalized = normalizedTextHash(read.bytes);
+  return {
+    raw: sha256(read.bytes),
+    ...(normalized ? { normalized } : {}),
+  };
+}
+
+/** Hash raw bytes and normalized UTF-8 content from the SAME source read, so
+ * those trust-bearing commitments cannot describe two racing snapshots. */
+export function hashFileCommitments(
+  files: string[] | undefined,
+  root: string,
+): FileHashCommitments {
+  const fileHashes: Record<string, string> = {};
+  const fileHashesNormalized: Record<string, string> = {};
+  if (!Array.isArray(files)) return { fileHashes, fileHashesNormalized };
+  for (const file of files.slice(0, MAX_VERIFY_FILES)) {
+    const read = readEvidenceFile(root, file);
+    if (!read.ok) continue;
+    const commitment = commitmentForRead(read);
+    fileHashes[file] = commitment.raw;
+    if (commitment.normalized) {
+      fileHashesNormalized[file] = commitment.normalized;
+    }
+  }
+  return { fileHashes, fileHashesNormalized };
+}
+
+/** Backward-compatible raw-byte helper. */
 export function hashFiles(
   files: string[] | undefined,
   root: string,
 ): Record<string, string> {
-  const out: Record<string, string> = {};
-  if (!Array.isArray(files)) return out;
-  for (const file of files.slice(0, MAX_VERIFY_FILES)) {
-    const read = readEvidenceFile(root, file);
-    if (read.ok) out[file] = sha256(read.bytes);
-  }
-  return out;
+  return hashFileCommitments(files, root).fileHashes;
 }
 
-/** Formatting-normalized companions for captures that are valid UTF-8. */
+/** Backward-compatible normalized helper, still sharing each read with raw. */
 export function hashFilesNormalized(
   files: string[] | undefined,
   root: string,
 ): Record<string, string> {
-  const out: Record<string, string> = {};
-  if (!Array.isArray(files)) return out;
-  for (const file of files.slice(0, MAX_VERIFY_FILES)) {
-    const read = readEvidenceFile(root, file);
-    if (!read.ok) continue;
-    const normalized = normalizedTextHash(read.bytes);
-    if (normalized) out[file] = normalized;
-  }
-  return out;
+  return hashFileCommitments(files, root).fileHashesNormalized;
+}
+
+/** Shared Canon/live normalization primitive for one absolute source file. */
+export function normalizedFileHash(absolutePath: string): string | null {
+  const read = readBoundedFile(absolutePath, MAX_SOURCE_HASH_BYTES);
+  return read.ok ? normalizedTextHash(read.bytes) : null;
 }
 
 export type VerifyStatus =
   | "verified"
+  | "cosmetic"
   | "sourced_unverified"
   | "stale"
   | "unsourced";
 
-/** Capture evidence quality, independent of what the live checkout looks like. */
 export type EvidenceTrust = "verified" | "sourced" | "unsourced";
-/** The effective live relationship after complete fine-grained fallback. */
 export type LiveSourceStatus =
   | "matched"
   | "cosmetic_drift"
@@ -107,15 +144,13 @@ export type LiveSourceStatus =
   | "unknown";
 
 export interface Verdict {
-  /** Compatibility four-state verdict retained for existing clients. */
   status: VerifyStatus;
-  /** Compatibility summary reason retained for existing clients. */
   reason: string;
   evidenceTrust: EvidenceTrust;
   evidenceReason: string;
   sourceStatus: LiveSourceStatus;
   sourceReason: string;
-  /** Additive diagnostics. This is recomputed and is never persisted. */
+  /** Recomputed diagnostics; never a persisted trust verdict. */
   fineGrained?: FineGrainedVerification;
 }
 
@@ -142,8 +177,8 @@ function declaredAnchorPaths(prov: Provenance): Set<string> | null {
   return paths;
 }
 
-/** Runtime cross-check of the capture's coverage assertion. A caller cannot
- * label one anchored file "complete" while declaring another source file. */
+/** Cross-check capture coverage rather than trusting its stored completeness
+ * word. Mixed/capped evidence can never become actionable. */
 function anchorsCoverDeclaredFiles(prov: Provenance): boolean {
   if (
     prov.mixedTrust === true ||
@@ -160,7 +195,7 @@ function anchorsCoverDeclaredFiles(prov: Provenance): boolean {
   );
 }
 
-/** Classify only capture-time evidence. This does not read the checkout. */
+/** Capture evidence quality only; no checkout read occurs here. */
 export function evidenceTrustOf(prov: Provenance | undefined): EvidenceTrust {
   if (isUnsourced(prov)) return "unsourced";
   const files = prov?.files ?? [];
@@ -189,7 +224,7 @@ function evidenceReason(trust: EvidenceTrust): string {
 }
 
 function staleFromFineGrained(
-  evidenceTrust: EvidenceTrust,
+  trust: EvidenceTrust,
   fineGrained: FineGrainedVerification,
 ): Verdict {
   const sourceStatus: LiveSourceStatus =
@@ -198,8 +233,8 @@ function staleFromFineGrained(
   return {
     status: "stale",
     reason,
-    evidenceTrust,
-    evidenceReason: evidenceReason(evidenceTrust),
+    evidenceTrust: trust,
+    evidenceReason: evidenceReason(trust),
     sourceStatus,
     sourceReason: reason,
     fineGrained,
@@ -210,9 +245,11 @@ export function classifyProvenance(
   prov: Provenance | undefined,
   root: string,
   opts?: {
-    /** Re-root capture-relative files onto a caller checkout only after the
-     * caller has established the same stable project identity (#58). */
+    /** Caller proved this is another checkout of the same #58 identity. */
     verifyAgainstRoot?: boolean;
+    /** Exact stored observation/Memory/Canon claim projection. Without it,
+     * fine-grained completeness is advisory and whole-file fallback wins. */
+    fineGrainedClaim?: FineGrainedClaimCommitment;
   },
 ): Verdict {
   const trust = evidenceTrustOf(prov);
@@ -231,8 +268,6 @@ export function classifyProvenance(
   const files = Array.isArray(prov?.files) ? prov.files : [];
   const hashes = prov?.fileHashes ?? {};
   const normalizedHashes = prov?.fileHashesNormalized ?? {};
-  // Relative paths belong to the capture cwd unless a stable identity match
-  // explicitly authorized checking the caller's worktree.
   const base =
     !opts?.verifyAgainstRoot && prov?.cwd && isAbsolute(prov.cwd)
       ? prov.cwd
@@ -241,9 +276,11 @@ export function classifyProvenance(
 
   let fineGrained: FineGrainedVerification | undefined;
   if (prov?.anchors !== undefined) {
-    fineGrained = verifyFineGrainedEvidence(prov.anchors, base);
-    // Metadata completeness is necessary but not sufficient: declared files
-    // are cross-checked here rather than trusting the stored coverage word.
+    fineGrained = verifyFineGrainedEvidence(
+      prov.anchors,
+      base,
+      opts?.fineGrainedClaim,
+    );
     if (fineGrained.actionable && !anchorsCoverDeclaredFiles(prov)) {
       fineGrained = {
         ...fineGrained,
@@ -256,22 +293,22 @@ export function classifyProvenance(
 
   const deleted: string[] = [];
   const changed: string[] = [];
-  const cosmetic: string[] = [];
   const unsafe: string[] = [];
-  let hashMatched = 0;
+  let exactMatched = 0;
+  let normalizedMatched = 0;
   let unchecked = 0;
+  let inconsistentCommitments = false;
   const boundedFiles = files.slice(0, MAX_VERIFY_FILES);
   if (files.length > MAX_VERIFY_FILES) unsafe.push("file evidence cap exceeded");
 
   for (const file of boundedFiles) {
     if (typeof file !== "string" || !file) {
       unsafe.push("malformed file reference");
+      inconsistentCommitments = true;
       continue;
     }
     let verificationRoot = base;
     let verificationFile = file;
-    // Absolute capture-internal paths follow an identity-authorized worktree
-    // re-root. Absolute external evidence never silently changes identity.
     if (opts?.verifyAgainstRoot && captureCwd && isAbsolute(file)) {
       const rel = relativeInside(captureCwd, file);
       if (rel) {
@@ -290,28 +327,50 @@ export function classifyProvenance(
       else unchecked++;
       continue;
     }
-    const recorded = hashes[file];
-    if (typeof recorded !== "string" || !SHA256_RE.test(recorded)) {
+
+    const recordedRaw = hashes[file];
+    const recordedNormalized = normalizedHashes[file];
+    const validRaw =
+      typeof recordedRaw === "string" && SHA256_RE.test(recordedRaw);
+    const validNormalized =
+      typeof recordedNormalized === "string" &&
+      SHA256_RE.test(recordedNormalized);
+    if (!validRaw && !validNormalized) {
       unchecked++;
       continue;
     }
-    const current = sha256(read.bytes);
-    if (current === recorded) {
-      hashMatched++;
+    if (
+      (recordedRaw !== undefined && !validRaw) ||
+      (recordedNormalized !== undefined && !validNormalized)
+    ) {
+      inconsistentCommitments = true;
+      changed.push(file);
       continue;
     }
-    const expectedNormalized = normalizedHashes[file];
-    const actualNormalized =
-      typeof expectedNormalized === "string" && SHA256_RE.test(expectedNormalized)
-        ? normalizedTextHash(read.bytes)
-        : null;
-    if (actualNormalized && actualNormalized === expectedNormalized) cosmetic.push(file);
-    else changed.push(file);
+
+    const current = commitmentForRead(read);
+    if (validRaw && current.raw === recordedRaw) {
+      // A trust-bearing normalized fallback must describe these same raw bytes.
+      if (validNormalized && current.normalized !== recordedNormalized) {
+        inconsistentCommitments = true;
+        changed.push(file);
+      } else {
+        exactMatched++;
+      }
+    } else if (
+      validNormalized &&
+      current.normalized !== undefined &&
+      current.normalized === recordedNormalized
+    ) {
+      normalizedMatched++;
+    } else {
+      changed.push(file);
+    }
   }
 
-  // Complete anchors are primary dependencies. Their own drift invalidates even
-  // if a contradictory whole-file record happens to match; partial anchors are
-  // advisory and never affect the conservative whole-file result.
+  // Actionable anchor drift is itself a dirty dependency. A raw/cosmetic match
+  // may override unrelated whole-file drift, but never malformed contradictory
+  // commitments.
   if (fineGrained?.actionable) {
     if (
       fineGrained.status === "drifted" ||
@@ -320,9 +379,9 @@ export function classifyProvenance(
     ) {
       return staleFromFineGrained(trust, fineGrained);
     }
-    if (fineGrained.status === "raw_match") {
+    if (!inconsistentCommitments && fineGrained.status === "raw_match") {
       const reason =
-        changed.length + cosmetic.length + deleted.length + unsafe.length > 0
+        changed.length + deleted.length + unsafe.length > 0
           ? "complete fine-grained anchors match; unrelated whole-file drift is advisory"
           : "all complete fine-grained anchors match their captured hashes";
       return {
@@ -335,48 +394,37 @@ export function classifyProvenance(
         fineGrained,
       };
     }
-    // A declared normalization can prove a bounded cosmetic match, but it does
-    // not claim byte identity. Keep it active under balanced recall and surface
-    // the distinction rather than laundering it into raw `verified`.
-    const reason =
-      "complete fine-grained anchors match only after their declared cosmetic normalization";
-    return {
-      status: "sourced_unverified",
-      reason,
-      evidenceTrust: "verified",
-      evidenceReason: evidenceReason("verified"),
-      sourceStatus: "matched",
-      sourceReason: reason,
-      fineGrained,
-    };
+    if (!inconsistentCommitments && fineGrained.status === "cosmetic_match") {
+      const reason =
+        "complete fine-grained anchors match their declared cosmetic normalization";
+      return {
+        status: "cosmetic",
+        reason,
+        evidenceTrust: "verified",
+        evidenceReason: evidenceReason("verified"),
+        sourceStatus: "cosmetic_drift",
+        sourceReason: reason,
+        fineGrained,
+      };
+    }
   }
 
   if (
     deleted.length > 0 ||
     changed.length > 0 ||
-    cosmetic.length > 0 ||
     unsafe.length > 0
   ) {
     const parts: string[] = [];
     if (deleted.length > 0) parts.push(`deleted: ${deleted.slice(0, 2).join(", ")}`);
     if (changed.length > 0) parts.push(`changed: ${changed.slice(0, 2).join(", ")}`);
-    if (cosmetic.length > 0) {
-      parts.push(`cosmetic: ${cosmetic.slice(0, 2).join(", ")}`);
-    }
     if (unsafe.length > 0) parts.push(`unsafe: ${unsafe.slice(0, 2).join(", ")}`);
     const reason = `references files that no longer match (${parts.join("; ")})`;
-    const sourceStatus: LiveSourceStatus =
-      deleted.length > 0
-        ? "missing"
-        : changed.length > 0 || unsafe.length > 0
-          ? "drifted"
-          : "cosmetic_drift";
     return {
       status: "stale",
       reason,
       evidenceTrust: trust,
       evidenceReason: evidenceReason(trust),
-      sourceStatus,
+      sourceStatus: deleted.length > 0 ? "missing" : "drifted",
       sourceReason: reason,
       ...(fineGrained ? { fineGrained } : {}),
     };
@@ -384,36 +432,74 @@ export function classifyProvenance(
 
   if (prov?.mixedTrust === true) {
     const reason =
-      "the memory's evidence is incomplete (mixed or capped at capture); file hashes cannot vouch for all of it";
+      "the memory's evidence is incomplete (mixed or capped at capture); file commitments cannot vouch for all of it";
+    const allCapturedSourcesChecked =
+      files.length > 0 &&
+      unchecked === 0 &&
+      exactMatched + normalizedMatched === files.length;
+    const sourceStatus: LiveSourceStatus = allCapturedSourcesChecked
+      ? normalizedMatched > 0
+        ? "cosmetic_drift"
+        : "matched"
+      : "unknown";
     return {
       status: "sourced_unverified",
       reason,
       evidenceTrust: "sourced",
       evidenceReason: reason,
-      sourceStatus:
-        files.length > 0 && hashMatched === files.length ? "matched" : "unknown",
-      sourceReason:
-        files.length > 0 && hashMatched === files.length
-          ? "all captured source commitments match, but they do not cover the whole memory"
-          : "the captured source subset cannot establish complete live freshness",
+      sourceStatus,
+      sourceReason: allCapturedSourcesChecked
+        ? normalizedMatched > 0
+          ? "all captured normalized source commitments match, but they do not cover the whole memory"
+          : "all captured raw source commitments match, but they do not cover the whole memory"
+        : "the captured source subset cannot establish complete live freshness",
       ...(fineGrained ? { fineGrained } : {}),
     };
   }
 
-  if (hashMatched > 0 && unchecked === 0 && hashMatched === files.length) {
-    const reason = "all referenced files exist and match their captured hashes";
+  if (
+    files.length > 0 &&
+    unchecked === 0 &&
+    exactMatched + normalizedMatched === files.length &&
+    normalizedMatched > 0
+  ) {
+    const reason =
+      "all referenced files match their captured normalized content; only line endings or trailing whitespace differ";
+    return {
+      status: "cosmetic",
+      reason,
+      evidenceTrust: trust,
+      evidenceReason:
+        trust === "verified"
+          ? "all declared source files carry capture-time raw-byte and normalized-text commitments"
+          : "normalized source commitments match, but capture evidence is not fully raw-hash-backed",
+      sourceStatus: "cosmetic_drift",
+      sourceReason: reason,
+      ...(fineGrained ? { fineGrained } : {}),
+    };
+  }
+
+  if (
+    files.length > 0 &&
+    unchecked === 0 &&
+    exactMatched === files.length
+  ) {
+    const reason =
+      "all referenced files exist and match their captured hashes exactly (raw bytes)";
     return {
       status: "verified",
       reason,
-      evidenceTrust: "verified",
-      evidenceReason: evidenceReason("verified"),
+      evidenceTrust: trust,
+      evidenceReason:
+        "all declared source files carry capture-time raw-byte commitments",
       sourceStatus: "matched",
       sourceReason: reason,
       ...(fineGrained ? { fineGrained } : {}),
     };
   }
+
   const reason =
-    hashMatched > 0
+    exactMatched + normalizedMatched > 0
       ? "some referenced files verified, but others could not be content-checked"
       : files.length > 0
         ? "referenced files exist but were not hashed at capture (existence only)"
@@ -424,7 +510,7 @@ export function classifyProvenance(
     evidenceTrust: trust,
     evidenceReason:
       trust === "verified"
-        ? "all declared source dependencies carry capture-time commitments, but the live source could not be fully checked"
+        ? "all declared source files carry capture-time commitments, but the live source could not be fully checked"
         : "the memory has source or confirmation evidence without complete file commitments",
     sourceStatus: "unknown",
     sourceReason: reason,

@@ -15,6 +15,7 @@ import {
   MAX_ANCHOR_FILE_BYTES,
   MAX_ANCHOR_LINES,
   MAX_FINE_GRAINED_ANCHORS,
+  bindFineGrainedEvidenceToMemory,
   captureFineGrainedEvidence,
   cloneFineGrainedEvidence,
   isFineGrainedEvidence,
@@ -23,8 +24,7 @@ import {
 } from "../src/functions/anchors.js";
 import {
   classifyProvenance,
-  hashFiles,
-  hashFilesNormalized,
+  hashFileCommitments,
 } from "../src/functions/verify.js";
 import { lifecycleProjection } from "../src/functions/memory-lifecycle.js";
 import type {
@@ -60,6 +60,12 @@ import {
   registerCoreFunctions,
 } from "../src/functions/index.js";
 import { gitProjectKey, __resetGitIdentityCache } from "../src/functions/git-identity.js";
+import { buildSyntheticCompression } from "../src/functions/compress-synthetic.js";
+import type {
+  CaptureFineGrainedEvidenceInput,
+  FineGrainedMemoryClaim,
+} from "../src/functions/anchors.js";
+import type { RawObservation } from "../src/functions/types.js";
 
 const roots: string[] = [];
 const kernels: Kernel[] = [];
@@ -76,6 +82,31 @@ function write(root: string, path: string, content: string): void {
   writeFileSync(absolute, content, "utf8");
 }
 
+type CaptureWithoutClaims = Omit<
+  CaptureFineGrainedEvidenceInput,
+  "observation" | "operationOnlyObservation"
+>;
+
+function captureEvidence(input: CaptureWithoutClaims): FineGrainedEvidence | undefined {
+  const raw: RawObservation = {
+    id: "obs_anchor_capture",
+    sessionId: "anchor-capture",
+    timestamp: "2026-01-01T00:00:00.000Z",
+    hookType: input.hookType as RawObservation["hookType"],
+    raw: {},
+    ...(input.toolName ? { toolName: input.toolName } : {}),
+    ...(input.toolInput !== undefined ? { toolInput: input.toolInput } : {}),
+    ...(input.toolOutput !== undefined ? { toolOutput: input.toolOutput } : {}),
+  };
+  const observation = buildSyntheticCompression(raw);
+  const { toolOutput: _hostOutput, ...operationOnlyRaw } = raw;
+  return captureFineGrainedEvidence({
+    ...input,
+    observation,
+    operationOnlyObservation: buildSyntheticCompression(operationOnlyRaw),
+  });
+}
+
 function editEvidence(args: {
   root: string;
   path?: string;
@@ -87,7 +118,7 @@ function editEvidence(args: {
 }): FineGrainedEvidence | undefined {
   const path = args.path ?? "src/policy.ts";
   write(args.root, path, args.content);
-  return captureFineGrainedEvidence({
+  return captureEvidence({
     hookType: "post_tool_use",
     toolName: "Edit",
     toolInput: {
@@ -98,7 +129,6 @@ function editEvidence(args: {
     toolOutput: args.output ?? "ok",
     cwd: args.root,
     referencedFiles: args.referencedFiles ?? [path],
-    observationType: "file_edit",
   });
 }
 
@@ -107,17 +137,46 @@ function provenance(
   path: string,
   anchors?: FineGrainedEvidence,
 ): Provenance {
+  const commitments = hashFileCommitments([path], root);
   return {
     cwd: root,
     files: [path],
-    fileHashes: hashFiles([path], root),
-    fileHashesNormalized: hashFilesNormalized([path], root),
+    fileHashes: commitments.fileHashes,
+    fileHashesNormalized: commitments.fileHashesNormalized,
     ...(anchors ? { anchors } : {}),
   };
 }
 
-function activeMemory(prov: Provenance): Memory {
+function provenanceForMemory(
+  prov: Provenance,
+  memory: FineGrainedMemoryClaim,
+): Provenance {
+  if (!prov.anchors) return prov;
   return {
+    ...prov,
+    anchors: bindFineGrainedEvidenceToMemory(
+      prov.anchors,
+      memory,
+      prov.anchors.claimCommitment,
+    )!,
+  };
+}
+
+function classify(
+  prov: Provenance,
+  root: string,
+  opts?: { verifyAgainstRoot?: boolean },
+) {
+  return classifyProvenance(prov, root, {
+    ...opts,
+    ...(prov.anchors
+      ? { fineGrainedClaim: prov.anchors.claimCommitment }
+      : {}),
+  });
+}
+
+function activeMemory(prov: Provenance): Memory {
+  const memory: Memory = {
     id: "mem_anchor",
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
@@ -134,6 +193,17 @@ function activeMemory(prov: Provenance): Memory {
     lifecycleReason: "captured",
     provenance: prov,
   };
+  if (prov.anchors) {
+    memory.provenance = {
+      ...prov,
+      anchors: bindFineGrainedEvidenceToMemory(
+        prov.anchors,
+        memory,
+        prov.anchors.claimCommitment,
+      )!,
+    };
+  }
+  return memory;
 }
 
 function freshKernel(name: string): { sdk: Kernel; kv: StateKV } {
@@ -207,13 +277,12 @@ describe("fine-grained capture", () => {
       completeness: "partial",
     });
 
-    const command = captureFineGrainedEvidence({
+    const command = captureEvidence({
       hookType: "post_tool_use",
       toolName: "Bash",
       toolInput: { command: "npm test" },
       toolOutput: "all tests passed",
       cwd: root,
-      observationType: "command_run",
     });
     expect(command).toBeUndefined();
   });
@@ -221,44 +290,42 @@ describe("fine-grained capture", () => {
   it("captures an explicit valid read range and rejects invalid/oversized ranges", () => {
     const root = tempRoot();
     write(root, "src/read.ts", "first\nTARGET_POLICY\nthird\n");
-    const evidence = captureFineGrainedEvidence({
+    const evidence = captureEvidence({
       hookType: "post_tool_use",
       toolName: "Read",
       toolInput: { file_path: "src/read.ts", start_line: 2, end_line: 2 },
       toolOutput: "TARGET_POLICY",
       cwd: root,
       referencedFiles: ["src/read.ts"],
-      observationType: "file_read",
     });
     expect(evidence).toMatchObject({
       completeness: "complete",
       anchors: [{ kind: "line_range", path: "src/read.ts" }],
     });
     const readProvenance = provenance(root, "src/read.ts", evidence);
-    write(root, "src/read.ts", "inserted\nfirst\nTARGET_POLICY\nchanged third\n");
-    expect(classifyProvenance(readProvenance, root)).toMatchObject({
+    write(root, "src/read.ts", "inserted\nfirst\nTARGET_POLICY\nthird\n");
+    expect(classify(readProvenance, root)).toMatchObject({
       status: "verified",
       fineGrained: { status: "raw_match" },
     });
     write(root, "src/read.ts", "inserted\nfirst\nREPLACED_POLICY\nchanged third\n");
-    expect(classifyProvenance(readProvenance, root)).toMatchObject({
+    expect(classify(readProvenance, root)).toMatchObject({
       status: "stale",
       fineGrained: { status: "drifted" },
     });
 
     expect(
-      captureFineGrainedEvidence({
+      captureEvidence({
         hookType: "post_tool_use",
         toolName: "Read",
         toolInput: { file_path: "src/read.ts", start_line: 2, end_line: 99 },
         toolOutput: "TARGET_POLICY",
         cwd: root,
         referencedFiles: ["src/read.ts"],
-        observationType: "file_read",
-      }),
+        }),
     ).toBeUndefined();
     expect(
-      captureFineGrainedEvidence({
+      captureEvidence({
         hookType: "post_tool_use",
         toolName: "Read",
         toolInput: {
@@ -268,8 +335,7 @@ describe("fine-grained capture", () => {
         },
         cwd: root,
         referencedFiles: ["src/read.ts"],
-        observationType: "file_read",
-      }),
+        }),
     ).toBeUndefined();
   });
 
@@ -280,7 +346,7 @@ describe("fine-grained capture", () => {
       "package.json",
       '{"feature":{"enabled":true,"mode":"strict"},"other":1}\n',
     );
-    const evidence = captureFineGrainedEvidence({
+    const evidence = captureEvidence({
       hookType: "post_tool_use",
       toolName: "ConfigEdit",
       toolInput: {
@@ -291,8 +357,7 @@ describe("fine-grained capture", () => {
       toolOutput: "ok",
       cwd: root,
       referencedFiles: ["package.json"],
-      observationType: "file_edit",
-    });
+      });
     expect(evidence).toMatchObject({
       completeness: "complete",
       anchors: [
@@ -309,9 +374,9 @@ describe("fine-grained capture", () => {
       "package.json",
       '{\n  "other": 2,\n  "feature": { "mode": "strict", "enabled": true }\n}\n',
     );
-    expect(classifyProvenance(configProvenance, root)).toMatchObject({
-      status: "sourced_unverified",
-      sourceStatus: "matched",
+    expect(classify(configProvenance, root)).toMatchObject({
+      status: "cosmetic",
+      sourceStatus: "cosmetic_drift",
       fineGrained: { status: "cosmetic_match" },
     });
     write(
@@ -319,14 +384,14 @@ describe("fine-grained capture", () => {
       "package.json",
       '{"feature":{"enabled":false,"mode":"strict"},"other":2}\n',
     );
-    expect(classifyProvenance(configProvenance, root)).toMatchObject({
+    expect(classify(configProvenance, root)).toMatchObject({
       status: "stale",
       fineGrained: { status: "drifted" },
     });
 
     write(root, "duplicate.json", '{"feature":1,"feature":1}\n');
     expect(
-      captureFineGrainedEvidence({
+      captureEvidence({
         hookType: "post_tool_use",
         toolName: "ConfigEdit",
         toolInput: {
@@ -337,8 +402,7 @@ describe("fine-grained capture", () => {
         toolOutput: "ok",
         cwd: root,
         referencedFiles: ["duplicate.json"],
-        observationType: "file_edit",
-      }),
+          }),
     ).toBeUndefined();
   });
 });
@@ -357,16 +421,27 @@ describe("bounded verification and lifecycle projection", () => {
     write(
       root,
       path,
-      "// newly inserted line\n// heading\nexport const TTL = 900;\nexport const OTHER = 2;\n",
+      "// heading\nexport const TTL = 900;\nexport const OTHER = 2;\n",
     );
-    const verdict = classifyProvenance(prov, root);
-    expect(verdict).toMatchObject({
+    expect(classify(prov, root)).toMatchObject({
+      status: "verified",
+      sourceStatus: "matched",
+      fineGrained: { status: "raw_match", actionable: true },
+    });
+
+    write(
+      root,
+      path,
+      "// newly inserted line\n// heading\nexport const TTL = 900;\nexport const OTHER = 1;\n",
+    );
+    const shifted = classify(prov, root);
+    expect(shifted).toMatchObject({
       status: "verified",
       sourceStatus: "matched",
       fineGrained: { status: "raw_match", actionable: true },
     });
     expect(
-      lifecycleProjection(activeMemory(prov), verdict.sourceStatus).effective,
+      lifecycleProjection(activeMemory(prov), shifted.sourceStatus).effective,
     ).toBe("active");
   });
 
@@ -381,7 +456,7 @@ describe("bounded verification and lifecycle projection", () => {
     const prov = provenance(root, path, evidence);
     write(root, path, "export const TTL = 60;\nexport const OTHER = 1;\n");
 
-    const verdict = classifyProvenance(prov, root);
+    const verdict = classify(prov, root);
     expect(verdict).toMatchObject({
       status: "stale",
       sourceStatus: "drifted",
@@ -401,12 +476,12 @@ describe("bounded verification and lifecycle projection", () => {
       content: "header\nexport const TTL = 900;\nfooter\n",
     })!;
     const prov = provenance(root, path, evidence);
-    write(root, path, "header changed\nexport const TTL = 900;   \nfooter\n");
+    write(root, path, "header\nexport const TTL = 900;   \nfooter\n");
 
-    const verdict = classifyProvenance(prov, root);
+    const verdict = classify(prov, root);
     expect(verdict).toMatchObject({
-      status: "sourced_unverified",
-      sourceStatus: "matched",
+      status: "cosmetic",
+      sourceStatus: "cosmetic_drift",
       fineGrained: { status: "cosmetic_match", actionable: true },
     });
     expect(
@@ -414,7 +489,7 @@ describe("bounded verification and lifecycle projection", () => {
     ).toBe("active");
   });
 
-  it("distinguishes missing and newly ambiguous live anchors", () => {
+  it("keeps an original-location match unambiguous and distinguishes missing source", () => {
     const root = tempRoot();
     const path = "src/policy.ts";
     const content = "export const TTL = 900;\nexport const OTHER = 1;\n";
@@ -422,16 +497,89 @@ describe("bounded verification and lifecycle projection", () => {
     const prov = provenance(root, path, evidence);
 
     write(root, path, `${content}export const TTL = 900;\n`);
-    expect(classifyProvenance(prov, root)).toMatchObject({
-      status: "stale",
-      fineGrained: { status: "ambiguous", actionable: true },
+    expect(classify(prov, root)).toMatchObject({
+      status: "verified",
+      fineGrained: { status: "raw_match", actionable: true },
     });
 
     rmSync(join(root, path));
-    expect(classifyProvenance(prov, root)).toMatchObject({
+    expect(classify(prov, root)).toMatchObject({
       status: "stale",
       sourceStatus: "missing",
       fineGrained: { status: "missing", actionable: true },
+    });
+  });
+
+  it("does not let an innocuous anchor validate an extra unsupported security claim", () => {
+    const root = tempRoot();
+    const path = "src/policy.ts";
+    const evidence = editEvidence({
+      root,
+      path,
+      content:
+        "export const TTL = 900;\nexport const SECURITY_CHECKS = true;\n",
+      output: "Security checks are disabled for every request",
+    })!;
+    expect(evidence).toMatchObject({
+      coverage: { claim: "partial", sources: "complete" },
+      completeness: "partial",
+    });
+    expect(evidence.claimCommitment.hash).not.toBe(evidence.supportHash);
+    expect(
+      isFineGrainedEvidence({
+        ...evidence,
+        coverage: { ...evidence.coverage, claim: "complete" },
+        completeness: "complete",
+      }),
+    ).toBe(false);
+    const prov = provenance(root, path, evidence);
+    write(
+      root,
+      path,
+      "export const TTL = 900;\nexport const SECURITY_CHECKS = false;\n",
+    );
+    expect(classify(prov, root)).toMatchObject({
+      status: "stale",
+      sourceStatus: "drifted",
+      fineGrained: { status: "raw_match", actionable: false },
+    });
+  });
+
+  it("rejects the same snippet relocated into a different structural context", () => {
+    const root = tempRoot();
+    const path = "src/policy.ts";
+    const evidence = editEvidence({
+      root,
+      path,
+      content:
+        "function authPolicy() {\n  export const TTL = 900;\n}\nfunction decoy() {\n}\n",
+    })!;
+    const prov = provenance(root, path, evidence);
+    write(
+      root,
+      path,
+      "function authPolicy() {\n}\nfunction decoy() {\n  export const TTL = 900;\n}\n",
+    );
+    expect(classify(prov, root)).toMatchObject({
+      status: "stale",
+      sourceStatus: "drifted",
+      fineGrained: { status: "ambiguous", actionable: true },
+    });
+  });
+
+  it("rejects same-line relocation when only inline context changes", () => {
+    const root = tempRoot();
+    const path = "src/policy.ts";
+    const evidence = editEvidence({
+      root,
+      path,
+      content: "left(); export const TTL = 900;; right();\n",
+    })!;
+    const prov = provenance(root, path, evidence);
+    write(root, path, "left(); right(); export const TTL = 900;;\n");
+    expect(classify(prov, root)).toMatchObject({
+      status: "stale",
+      fineGrained: { status: "ambiguous", actionable: true },
     });
   });
 
@@ -451,7 +599,31 @@ describe("bounded verification and lifecycle projection", () => {
     expect(isFineGrainedEvidence(incomplete)).toBe(true);
     const prov = provenance(root, path, incomplete);
     write(root, path, "export const TTL = 900;\nexport const OTHER = 2;\n");
-    expect(classifyProvenance(prov, root)).toMatchObject({
+    expect(classify(prov, root)).toMatchObject({
+      status: "stale",
+      sourceStatus: "drifted",
+      fineGrained: { status: "raw_match", actionable: false },
+    });
+  });
+
+  it("never lets mixed/capped evidence upgrade through complete anchor metadata", () => {
+    const root = tempRoot();
+    const path = "src/policy.ts";
+    const evidence = editEvidence({
+      root,
+      path,
+      content: "export const TTL = 900;\nexport const SECURITY_CHECKS = true;\n",
+    })!;
+    const prov = {
+      ...provenance(root, path, evidence),
+      mixedTrust: true as const,
+    };
+    write(
+      root,
+      path,
+      "export const TTL = 900;\nexport const SECURITY_CHECKS = false;\n",
+    );
+    expect(classify(prov, root)).toMatchObject({
       status: "stale",
       sourceStatus: "drifted",
       fineGrained: { status: "raw_match", actionable: false },
@@ -463,9 +635,9 @@ describe("bounded verification and lifecycle projection", () => {
     const path = "src/legacy.ts";
     write(root, path, "export const LEGACY = 1;\n");
     const prov = provenance(root, path);
-    expect(classifyProvenance(prov, root).status).toBe("verified");
+    expect(classify(prov, root).status).toBe("verified");
     write(root, path, "export const LEGACY = 2;\n");
-    const verdict = classifyProvenance(prov, root);
+    const verdict = classify(prov, root);
     expect(verdict.status).toBe("stale");
     expect(verdict.fineGrained).toBeUndefined();
   });
@@ -477,7 +649,7 @@ describe("bounded verification and lifecycle projection", () => {
     symlinkSync(join(outside, "secret.ts"), join(root, "escape.ts"));
 
     expect(
-      captureFineGrainedEvidence({
+      captureEvidence({
         hookType: "post_tool_use",
         toolName: "Edit",
         toolInput: {
@@ -488,8 +660,7 @@ describe("bounded verification and lifecycle projection", () => {
         toolOutput: "ok",
         cwd: root,
         referencedFiles: ["../outside.ts"],
-        observationType: "file_edit",
-      }),
+          }),
     ).toBeUndefined();
 
     const sourceEvidence = editEvidence({
@@ -506,7 +677,7 @@ describe("bounded verification and lifecycle projection", () => {
       fileHashes: { "escape.ts": escaped.anchors[0]!.rawHash },
       anchors: escaped,
     };
-    expect(classifyProvenance(prov, root)).toMatchObject({
+    expect(classify(prov, root)).toMatchObject({
       status: "stale",
       sourceStatus: "drifted",
       fineGrained: { status: "ambiguous", actionable: true },
@@ -538,7 +709,7 @@ describe("bounded verification and lifecycle projection", () => {
 
     const prov = provenance(root, path, evidence);
     write(root, path, "x".repeat(MAX_ANCHOR_FILE_BYTES + 1));
-    expect(classifyProvenance(prov, root)).toMatchObject({
+    expect(classify(prov, root)).toMatchObject({
       status: "stale",
       fineGrained: { status: "ambiguous", actionable: true },
     });
@@ -554,12 +725,16 @@ describe("worktree, Canon, Bundle, and observe integration", () => {
     git(main, "init", "-q");
     git(main, "config", "user.email", "anchor@example.test");
     git(main, "config", "user.name", "Anchor Test");
-    write(main, "src/policy.ts", "export const TTL = 900;\nexport const OTHER = 1;\n");
+    write(
+      main,
+      "src/policy.ts",
+      "// policy\nexport const TTL = 900;\n// stable context a\n// stable context b\nexport const OTHER = 1;\n",
+    );
     git(main, "add", ".");
     git(main, "commit", "-qm", "initial");
     const expectedCommit = git(main, "rev-parse", "HEAD");
 
-    const evidence = captureFineGrainedEvidence({
+    const evidence = captureEvidence({
       hookType: "post_tool_use",
       toolName: "Edit",
       toolInput: {
@@ -570,7 +745,6 @@ describe("worktree, Canon, Bundle, and observe integration", () => {
       toolOutput: "ok",
       cwd: main,
       referencedFiles: ["src/policy.ts"],
-      observationType: "file_edit",
     })!;
     const prov = provenance(main, "src/policy.ts", evidence);
     expect(sourceCommitAt(main)).toBe(expectedCommit);
@@ -582,31 +756,38 @@ describe("worktree, Canon, Bundle, and observe integration", () => {
     write(
       worktree,
       "src/policy.ts",
-      "// worktree-only line\nexport const TTL = 900;\nexport const OTHER = 2;\n",
+      "// worktree-only line\n// policy\nexport const TTL = 900;\n// stable context a\n// stable context b\nexport const OTHER = 2;\n",
     );
     expect(
-      classifyProvenance(prov, worktree, { verifyAgainstRoot: true }),
+      classify(prov, worktree, { verifyAgainstRoot: true }),
     ).toMatchObject({
       status: "verified",
       fineGrained: { status: "raw_match" },
     });
+    const worktreeClaim: FineGrainedMemoryClaim = {
+      title: "Worktree TTL",
+      content: "TTL remains 900",
+      concepts: ["ttl"],
+      type: "architecture",
+      files: ["src/policy.ts"],
+    };
     const worktreeCanon = recordFromMemory(
       {
         id: "mem_worktree_anchor",
-        title: "Worktree TTL",
-        content: "TTL remains 900",
-        concepts: ["ttl"],
-        type: "architecture",
-        files: ["src/policy.ts"],
+        ...worktreeClaim,
         projectPath: main,
         projectKey: gitProjectKey(main)!,
         captureCwd: main,
-        provenance: prov,
+        provenance: provenanceForMemory(prov, worktreeClaim),
       },
       worktree,
       "2026-01-01T00:00:00.000Z",
     );
-    expect(worktreeCanon?.anchors).toEqual(evidence);
+    expect(worktreeCanon?.anchors).toMatchObject({
+      completeness: "complete",
+      claimCommitment: { schema: "canon-claim-v1" },
+      anchors: evidence.anchors,
+    });
     expect(verifyCanon([worktreeCanon!], worktree)[0]).toMatchObject({
       verdict: "verified",
       anchorStatus: "raw_match",
@@ -614,7 +795,7 @@ describe("worktree, Canon, Bundle, and observe integration", () => {
 
     write(worktree, "src/policy.ts", "export const TTL = 60;\n");
     expect(
-      classifyProvenance(prov, worktree, { verifyAgainstRoot: true }),
+      classify(prov, worktree, { verifyAgainstRoot: true }),
     ).toMatchObject({
       status: "stale",
       fineGrained: { status: "drifted" },
@@ -630,25 +811,32 @@ describe("worktree, Canon, Bundle, and observe integration", () => {
       content: "export const TTL = 900;\nexport const OTHER = 1;\n",
     })!;
     const prov = provenance(root, path, evidence);
+    const memoryClaim: FineGrainedMemoryClaim = {
+      title: "TTL policy",
+      content: "TTL is 900 seconds",
+      concepts: ["ttl"],
+      type: "architecture",
+      files: [path],
+    };
     const record = recordFromMemory(
       {
         id: "mem_canon_anchor",
-        title: "TTL policy",
-        content: "TTL is 900 seconds",
-        concepts: ["ttl"],
-        type: "architecture",
-        files: [path],
+        ...memoryClaim,
         projectPath: root,
         captureCwd: root,
-        provenance: prov,
+        provenance: provenanceForMemory(prov, memoryClaim),
       },
       root,
       "2026-01-01T00:00:00.000Z",
     )!;
-    expect(record.anchors).toEqual(evidence);
+    expect(record.anchors).toMatchObject({
+      completeness: "complete",
+      claimCommitment: { schema: "canon-claim-v1" },
+      anchors: evidence.anchors,
+    });
     const parsed = parseCanon(serializeCanon([record])).records[0]!;
     expect(isCanonRecord(parsed)).toBe(true);
-    expect(parsed.anchors).toEqual(evidence);
+    expect(parsed.anchors).toEqual(record.anchors);
 
     write(root, path, "export const TTL = 900;\nexport const OTHER = 2;\n");
     expect(verifyCanon([parsed], root)[0]).toMatchObject({
@@ -666,8 +854,22 @@ describe("worktree, Canon, Bundle, and observe integration", () => {
     const imported = await importCanonRecord(kv, { root, record: asserted });
     expect(imported).toMatchObject({ ok: true, verdict: "verified" });
     const stored = await kv.get<Memory>(KV.memories, parsed.id);
-    expect(stored?.provenance?.anchors).toEqual(evidence);
+    expect(stored?.provenance?.anchors).toMatchObject({
+      completeness: "complete",
+      claimCommitment: { schema: "memory-claim-v1" },
+      anchors: record.anchors?.anchors,
+    });
     expect(JSON.stringify(stored?.provenance?.anchors)).not.toContain('"status"');
+
+    const changedClaim = {
+      ...parsed,
+      id: "mem_canon_changed_claim",
+      content: `${parsed.content}\nSecurity checks are disabled`,
+    };
+    expect(isCanonRecord(changedClaim)).toBe(false);
+    expect(
+      await importCanonRecord(kv, { root, record: changedClaim }),
+    ).toMatchObject({ ok: false, code: "invalid_record" });
 
     write(root, path, "export const TTL = 900;   \nexport const OTHER = 2;\n");
     const cosmeticRecord = { ...parsed, id: "mem_canon_cosmetic" };
@@ -719,7 +921,9 @@ describe("worktree, Canon, Bundle, and observe integration", () => {
     await kv.set(KV.memories, memory.id, memory);
 
     const bundle = await exportBundle(kv);
-    expect(bundle.memories[0]!.provenance?.anchors).toEqual(evidence);
+    expect(bundle.memories[0]!.provenance?.anchors).toEqual(
+      memory.provenance?.anchors,
+    );
     expect(isBrainBundle(bundle)).toBe(true);
 
     const destination = freshKernel("bundle-anchor-destination");
@@ -727,7 +931,7 @@ describe("worktree, Canon, Bundle, and observe integration", () => {
     expect(
       (await destination.kv.get<Memory>(KV.memories, memory.id))?.provenance
         ?.anchors,
-    ).toEqual(evidence);
+    ).toEqual(memory.provenance?.anchors);
 
     const malformed = {
       kind: BRAIN_BUNDLE_KIND,
@@ -748,6 +952,154 @@ describe("worktree, Canon, Bundle, and observe integration", () => {
     await expect(
       importBundle(destination.kv, malformed as never),
     ).rejects.toThrow(/malformed fine-grained anchor metadata/);
+
+    const mixedComplete = {
+      kind: BRAIN_BUNDLE_KIND,
+      version: BRAIN_BUNDLE_VERSION,
+      sessions: [],
+      memories: [
+        {
+          ...memory,
+          provenance: { ...memory.provenance, mixedTrust: true },
+        },
+      ],
+      observations: {},
+    };
+    expect(isBrainBundle(mixedComplete)).toBe(false);
+    await expect(
+      importBundle(destination.kv, mixedComplete as never),
+    ).rejects.toThrow(/malformed fine-grained anchor metadata/);
+
+    const changedBundleClaim = {
+      ...bundle,
+      memories: [{ ...memory, facts: ["Security checks are disabled"] }],
+    };
+    expect(isBrainBundle(changedBundleClaim)).toBe(false);
+    await expect(
+      importBundle(destination.kv, changedBundleClaim as never),
+    ).rejects.toThrow(/malformed fine-grained anchor metadata/);
+  });
+
+  it("rebinds complete observation claims when consolidation creates a Memory", async () => {
+    const root = tempRoot();
+    const path = "src/policy.ts";
+    write(
+      root,
+      path,
+      "export const TTL = 900;\n// stable a\n// stable b\nexport const OTHER = 1;\n",
+    );
+    const { sdk, kv } = freshKernel("consolidated-anchor-claim");
+    for (let index = 0; index < 3; index++) {
+      await sdk.trigger({
+        function_id: "mem::observe",
+        payload: {
+          hookType: "post_tool_use",
+          sessionId: `anchor-distill-${index}`,
+          project: root,
+          cwd: root,
+          timestamp: `2026-01-0${index + 1}T00:00:00.000Z`,
+          data: {
+            tool_name: "Edit",
+            tool_input: {
+              file_path: path,
+              old_string: "export const TTL = 3600;",
+              new_string: "export const TTL = 900;",
+            },
+            tool_output: "ok",
+          },
+        },
+      });
+    }
+    await sdk.trigger({
+      function_id: "mem::consolidate-pipeline",
+      payload: { now: Date.parse("2026-02-01T00:00:00.000Z") },
+    });
+    const memories = await kv.list<Memory>(KV.memories);
+    expect(memories).toHaveLength(1);
+    expect(memories[0]!.provenance?.anchors).toMatchObject({
+      completeness: "complete",
+      claimCommitment: { schema: "memory-claim-v1" },
+    });
+
+    write(
+      root,
+      path,
+      "export const TTL = 900;\n// stable a\n// stable b\nexport const OTHER = 2;\n",
+    );
+    const current = await sdk.trigger<unknown, { results: Array<Record<string, unknown>> }>({
+      function_id: "mem::search",
+      payload: {
+        query: "TTL policy",
+        cwd: root,
+        project: root,
+        mode: "current",
+        format: "compact",
+      },
+    });
+    expect(current.results[0]).toMatchObject({
+      trust: "verified",
+      fine_grained_anchor_status: "raw_match",
+      fine_grained_anchor_actionable: true,
+    });
+  });
+
+  it("derives completeness from the actual stored synthetic claim on observe", async () => {
+    const root = tempRoot();
+    const path = "src/security.ts";
+    write(
+      root,
+      path,
+      "export const TTL = 900;\nexport const SECURITY_CHECKS = true;\n",
+    );
+    const { sdk, kv } = freshKernel("observe-anchor-claim");
+    const result = await sdk.trigger<unknown, { observationId: string }>({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "post_tool_use",
+        sessionId: "anchor-claim-session",
+        project: root,
+        cwd: root,
+        timestamp: "2026-01-01T00:00:00.000Z",
+        data: {
+          tool_name: "Edit",
+          tool_input: {
+            file_path: path,
+            old_string: "export const TTL = 3600;",
+            new_string: "export const TTL = 900;",
+          },
+          tool_output: "Security checks are disabled for every request",
+        },
+      },
+    });
+    const observation = await kv.get<{
+      narrative: string;
+      provenance: Provenance;
+    }>(KV.observations("anchor-claim-session"), result.observationId);
+    expect(observation?.narrative).toContain("Security checks are disabled");
+    expect(observation?.provenance.anchors).toMatchObject({
+      coverage: { claim: "partial", sources: "complete" },
+      completeness: "partial",
+    });
+    expect(observation?.provenance.anchors?.claimCommitment.hash).not.toBe(
+      observation?.provenance.anchors?.supportHash,
+    );
+
+    write(
+      root,
+      path,
+      "export const TTL = 900;\nexport const SECURITY_CHECKS = false;\n",
+    );
+    const current = await sdk.trigger<unknown, { results: unknown[] }>({
+      function_id: "mem::search",
+      payload: {
+        query: "Security checks disabled",
+        cwd: root,
+        project: root,
+        mode: "current",
+        format: "compact",
+      },
+    });
+    expect(current.results).toEqual([]);
   });
 
   it("captures anchors on the real observe path without retaining secret source payloads", async () => {

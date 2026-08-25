@@ -17,7 +17,8 @@ What memwarden defends today:
 - **Memory poisoning (OWASP ASI06)**: known-stale memory is blocked before
   injection; auto-injected recall is delimited and framed as non-instruction
   data; `MEMWARDEN_RECALL_POLICY=verified-only` restricts auto-injection to
-  hash-verified-current memory.
+  raw-byte-verified or normalized-content-current memory, with cosmetic matches
+  explicitly labeled rather than promoted to byte-verified.
 - **Local privacy**: `~/.memwarden` is 0700, the database and every config
   carrying the secret are 0600.
 - **Tamper evidence**: SHA-256 hash-chained oplog. Tamper-evident, NOT

@@ -198,6 +198,7 @@ export function buildSessionHandoff(input: HandoffInput): Handoff {
   const HANDOFF_PROV_FILE_CAP = 50;
   const provFiles: string[] = [];
   const provHashes: Record<string, string> = {};
+  const provHashesNormalized: Record<string, string> = {};
   let provCwd: string | undefined;
   /** All-or-nothing inherit of one observation's file evidence. */
   const tryInherit = (p: Provenance | undefined): boolean => {
@@ -208,6 +209,8 @@ export function buildSessionHandoff(input: HandoffInput): Handoff {
       provFiles.push(f);
       const h = p?.fileHashes?.[f];
       if (h) provHashes[f] = h;
+      const normalized = p?.fileHashesNormalized?.[f];
+      if (normalized) provHashesNormalized[f] = normalized;
     }
     return true;
   };
@@ -309,6 +312,9 @@ export function buildSessionHandoff(input: HandoffInput): Handoff {
       ...(provCwd ? { cwd: provCwd } : {}),
       ...(provFiles.length > 0 ? { files: provFiles } : {}),
       ...(Object.keys(provHashes).length > 0 ? { fileHashes: provHashes } : {}),
+      ...(Object.keys(provHashesNormalized).length > 0
+        ? { fileHashesNormalized: provHashesNormalized }
+        : {}),
       mixedTrust: true,
     };
   }

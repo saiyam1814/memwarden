@@ -4,8 +4,9 @@
 // Canon export is deliberately NOT semantic search: it pages over real stored
 // Memory rows and applies one exact project-identity predicate. Canon import is
 // deliberately NOT observe: it validates the committed record shape, re-hashes
-// every referenced file in this checkout, and only then writes a Memory with
-// the original title/content/evidence and Canon attestation intact.
+// every referenced file in this checkout, requires a raw or normalized content
+// match, and only then writes a Memory with the original evidence and an honest
+// verified/cosmetic Canon attestation intact.
 //
 
 import { statSync } from "node:fs";
@@ -39,9 +40,15 @@ import {
   migrateLegacyMemoryLifecycle,
   persistedLifecycleOf,
 } from "./memory-lifecycle.js";
-import { classifyProvenance, hashFiles } from "./verify.js";
 import {
+  classifyProvenance,
+  hashFileCommitments,
+} from "./verify.js";
+import {
+  bindFineGrainedEvidenceToMemory,
   cloneFineGrainedEvidence,
+  fineGrainedClaimForCanon,
+  fineGrainedEvidenceMatchesClaim,
   isActionableFineGrainedEvidence,
   isFineGrainedEvidence,
   isPortableAnchorPath,
@@ -239,6 +246,20 @@ export function isCanonRecord(value: unknown): value is CanonRecord {
       value["anchors"].anchors.map((anchor) => anchor.path),
     );
     if ([...anchorPaths].some((path) => !files.has(path))) return false;
+    if (
+      !fineGrainedEvidenceMatchesClaim(
+        value["anchors"],
+        fineGrainedClaimForCanon({
+          type: value["type"] as Memory["type"],
+          title: value["title"] as string,
+          content: value["content"] as string,
+          concepts: value["concepts"] as string[],
+          files: value["files"] as string[],
+        }),
+      )
+    ) {
+      return false;
+    }
     // A complete portable assertion must cover exactly the declared sources;
     // partial anchor sets remain advisory and retain whole-file fallback.
     if (
@@ -510,31 +531,43 @@ export async function importCanonRecord(
     };
   }
 
-  // Recompute both evidence levels locally. No persisted/caller-supplied anchor
-  // verdict exists in the format. Complete raw/cosmetic anchors may explain an
-  // unrelated whole-file mismatch; incomplete or ambiguous anchors never do.
-  const actual = hashFiles(record.files, identity.root);
-  const wholeFileMatches = record.files.every(
-    (file) => actual[file] === record.fileHashes[file],
-  );
+  // Recompute both evidence levels locally. Raw and normalized whole-file
+  // commitments come from one read. A capture-complete fine-grained match may
+  // explain unrelated whole-file drift; partial/ambiguous anchors never do.
+  const actual = hashFileCommitments(record.files, identity.root);
+  let wholeFileCurrent = true;
+  let failedFile: string | undefined;
+  for (const file of record.files) {
+    const rawMatches = actual.fileHashes[file] === record.fileHashes[file];
+    const expectedNormalized = record.fileHashesNormalized?.[file];
+    const normalizedMatches =
+      expectedNormalized !== undefined &&
+      actual.fileHashesNormalized[file] === expectedNormalized;
+    // A normalized fallback is trust-bearing too and must describe the same
+    // bytes whenever the raw commitment still matches.
+    const inconsistentNormalized =
+      rawMatches && expectedNormalized !== undefined && !normalizedMatches;
+    if (inconsistentNormalized || (!rawMatches && !normalizedMatches)) {
+      wholeFileCurrent = false;
+      failedFile ??= file;
+    }
+  }
   const portableAnchors = record.anchors
     ? cloneFineGrainedEvidence(record.anchors)
     : undefined;
+  const canonClaim = fineGrainedClaimForCanon(record);
   const anchorCheck = portableAnchors
-    ? verifyFineGrainedEvidence(portableAnchors, identity.root)
+    ? verifyFineGrainedEvidence(portableAnchors, identity.root, canonClaim)
     : undefined;
   const anchorOverride =
     anchorCheck?.actionable === true &&
     (anchorCheck.status === "raw_match" ||
       anchorCheck.status === "cosmetic_match");
-  if (!wholeFileMatches && !anchorOverride) {
-    const failed = record.files.find(
-      (file) => actual[file] !== record.fileHashes[file],
-    );
+  if (!wholeFileCurrent && !anchorOverride) {
     return {
       ok: false,
       code: "hash_mismatch",
-      error: `Canon evidence does not match this checkout: ${failed ?? "source"}`,
+      error: `Canon evidence does not match this checkout: ${failedFile ?? "source"}`,
       id: record.id,
     };
   }
@@ -601,16 +634,14 @@ export async function importCanonRecord(
     },
   };
 
-  // Defense in depth and a second, immediately-pre-write hash check. This also
-  // proves the stored Provenance shape itself classifies as verified; caller
-  // prose or attestation metadata cannot influence the result.
+  // Defense in depth and a second, immediately-pre-write classification of the
+  // exact Provenance shape that will be stored. Only raw-verified or honestly
+  // cosmetic-current evidence can pass.
   const verdict = classifyProvenance(provenance, identity.root, {
     verifyAgainstRoot: true,
+    fineGrainedClaim: canonClaim,
   });
-  if (
-    verdict.sourceStatus !== "matched" ||
-    (verdict.status !== "verified" && verdict.status !== "sourced_unverified")
-  ) {
+  if (verdict.status !== "verified" && verdict.status !== "cosmetic") {
     return {
       ok: false,
       code: "hash_mismatch",
@@ -685,6 +716,27 @@ export async function importCanonRecord(
       ? { agentId: record.capturedBy.agentId }
       : {}),
   };
+  // Canon format 1 carries title/content/concepts/files, not private synthetic
+  // trace fields. Do not let an existing local row smuggle extra claim text
+  // under a freshly imported complete anchor.
+  memory.facts = [record.content];
+  delete memory.subtitle;
+  delete memory.imageRef;
+  delete memory.imageData;
+  delete memory.imageDescription;
+  delete memory.modality;
+  if (memory.provenance?.anchors) {
+    const rebound = bindFineGrainedEvidenceToMemory(
+      memory.provenance.anchors,
+      memory,
+      canonClaim,
+    );
+    const { anchors: _canonClaimBinding, ...rest } = memory.provenance;
+    memory.provenance = {
+      ...rest,
+      ...(rebound ? { anchors: rebound } : {}),
+    };
+  }
 
   await kv.set(KV.memories, memory.id, memory);
   const index = getSearchIndex();

@@ -36,6 +36,7 @@ export function normalizeSourceText(text: string): string {
 }
 
 export function normalizedTextHash(bytes: Uint8Array): string | null {
+  if (bytes.includes(0)) return null;
   const text = decodeUtf8(bytes);
   return text === null ? null : sha256(normalizeSourceText(text));
 }

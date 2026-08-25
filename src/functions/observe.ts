@@ -32,7 +32,7 @@ import { buildSyntheticCompression } from "./compress-synthetic.js";
 import { buildSessionHandoff, MAX_STORED_PROMPT_CHARS } from "./handoff.js";
 import { extractProvenance } from "./provenance.js";
 import { recordFleetActivity } from "./fleet.js";
-import { hashFiles, hashFilesNormalized } from "./verify.js";
+import { hashFileCommitments } from "./verify.js";
 import { captureFineGrainedEvidence } from "./anchors.js";
 import { recordFix, looksLikeResolvedFix } from "./dejafix.js";
 import { getSearchIndex, vectorIndexAddGuarded, vectorIndexRemove } from "./search.js";
@@ -528,9 +528,12 @@ export function registerObserveFunction(
         });
       } else {
         const synthetic = buildSyntheticCompression(raw);
+        const { toolOutput: _hostOutput, ...operationOnlyRaw } = raw;
+        const operationOnlySynthetic = buildSyntheticCompression(operationOnlyRaw);
         // Attach the evidence trail so the doctor and Verified Recall can later
-        // judge whether this memory is sourced and still valid. Hash the
-        // referenced files now (under cwd) so content drift is detectable.
+        // judge whether this memory is sourced and still valid. Commit both
+        // raw bytes and normalized UTF-8 text now so semantic drift is detected
+        // without falsely rejecting cross-platform line-ending conversion.
         const prov = extractProvenance(payload);
         // Adopted memories (seeded from a foreign store by `memwarden adopt`)
         // had no capture-time hashes. Hashing their files against the current
@@ -538,13 +541,14 @@ export function registerObserveFunction(
         // content-anchored, so we keep the file references but never hash them
         // — classifyProvenance then caps them at `sourced_unverified`.
         if (!payload.adopted && prov.files && prov.files.length > 0 && payload.cwd) {
-          const fileHashes = hashFiles(prov.files, payload.cwd);
-          if (Object.keys(fileHashes).length > 0) {
-            prov.fileHashes = fileHashes;
-            const normalized = hashFilesNormalized(prov.files, payload.cwd);
-            if (Object.keys(normalized).length > 0) {
-              prov.fileHashesNormalized = normalized;
-            }
+          // Raw and normalized whole-file commitments come from one read per
+          // source, preserving the #71/#72 snapshot-consistency guarantee.
+          const commitments = hashFileCommitments(prov.files, payload.cwd);
+          if (Object.keys(commitments.fileHashes).length > 0) {
+            prov.fileHashes = commitments.fileHashes;
+          }
+          if (Object.keys(commitments.fileHashesNormalized).length > 0) {
+            prov.fileHashesNormalized = commitments.fileHashesNormalized;
           }
 
           // Fine-grained capture reads the successful post-tool live file and
@@ -568,7 +572,8 @@ export function registerObserveFunction(
             cwd: payload.cwd,
             referencedFiles: prov.files,
             mixedTrust: prov.mixedTrust === true,
-            observationType: synthetic.type,
+            observation: synthetic,
+            operationOnlyObservation: operationOnlySynthetic,
           });
           if (anchors) prov.anchors = anchors;
         }

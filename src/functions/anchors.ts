@@ -20,11 +20,16 @@ import {
   sep,
 } from "node:path";
 import type {
+  CompressedObservation,
   FineGrainedAnchor,
+  FineGrainedClaimCommitment,
   FineGrainedConfigLocation,
+  FineGrainedContextSide,
   FineGrainedEvidence,
+  FineGrainedInlineContextSide,
+  FineGrainedTextContext,
   FineGrainedTextLocation,
-  ObservationType,
+  Memory,
 } from "./types.js";
 import {
   decodeUtf8,
@@ -40,6 +45,9 @@ export const MAX_ANCHOR_FILE_BYTES = 1_000_000;
 export const MAX_ANCHOR_CONTENT_BYTES = 128_000;
 export const MAX_ANCHOR_LINES = 400;
 export const MAX_ANCHOR_OCCURRENCES = 64;
+export const MAX_ANCHOR_CONTEXT_LINES = 2;
+export const MAX_ANCHOR_CONTEXT_BYTES = 32_000;
+export const MAX_ANCHOR_INLINE_CONTEXT_BYTES = 64;
 export const MAX_ANCHOR_NORMALIZED_CANDIDATES = 20_000;
 const MAX_LOCATOR_COLLISIONS = 1_024;
 const MAX_CANDIDATE_HASH_BYTES = 8_000_000;
@@ -115,6 +123,253 @@ function locationFor(
     startAtLineStart: forceLineBoundaries || startByte === start.start,
     endAtLineEnd: forceLineBoundaries || endByte === end.contentEnd,
   };
+}
+
+function logicalLineCount(lines: ByteLine[], bytes: Uint8Array): number {
+  const last = lines[lines.length - 1];
+  return lines.length > 1 && last?.start === bytes.byteLength
+    ? lines.length - 1
+    : lines.length;
+}
+
+function contextSide(
+  bytes: Uint8Array,
+  lines: ByteLine[],
+  startLine: number,
+  endLine: number,
+  direction: "before" | "after",
+): FineGrainedContextSide | null {
+  const logicalCount = logicalLineCount(lines, bytes);
+  let first: number;
+  let last: number;
+  let boundary: boolean;
+  if (direction === "before") {
+    last = startLine - 1;
+    first = Math.max(0, last - MAX_ANCHOR_CONTEXT_LINES + 1);
+    boundary = startLine === 0;
+  } else {
+    first = endLine + 1;
+    last = Math.min(logicalCount - 1, first + MAX_ANCHOR_CONTEXT_LINES - 1);
+    boundary = first >= logicalCount;
+  }
+  const lineCount = last >= first ? last - first + 1 : 0;
+  const contextBytes =
+    lineCount > 0
+      ? bytes.subarray(lines[first]!.start, lines[last]!.contentEnd)
+      : Buffer.alloc(0);
+  if (contextBytes.byteLength > MAX_ANCHOR_CONTEXT_BYTES) return null;
+  const normalizedHash = normalizedTextHash(contextBytes);
+  if (!normalizedHash) return null;
+  return {
+    lineCount,
+    rawHash: sha256(contextBytes),
+    normalizedHash,
+    boundary,
+  };
+}
+
+function inlineContextSide(
+  bytes: Uint8Array,
+): FineGrainedInlineContextSide | null {
+  const normalizedHash = normalizedTextHash(bytes);
+  if (!normalizedHash) return null;
+  return {
+    byteLength: bytes.byteLength,
+    rawHash: sha256(bytes),
+    normalizedHash,
+  };
+}
+
+function textContextFor(
+  bytes: Uint8Array,
+  location: FineGrainedTextLocation,
+): FineGrainedTextContext | null {
+  const lines = byteLines(bytes);
+  const startLine = location.startLine - 1;
+  const endLine = location.endLine - 1;
+  const before = contextSide(bytes, lines, startLine, endLine, "before");
+  const after = contextSide(bytes, lines, startLine, endLine, "after");
+  const prefix = inlineContextSide(
+    bytes.subarray(
+      Math.max(
+        lines[startLine]!.start,
+        location.startByte - MAX_ANCHOR_INLINE_CONTEXT_BYTES,
+      ),
+      location.startByte,
+    ),
+  );
+  const suffix = inlineContextSide(
+    bytes.subarray(
+      location.endByte,
+      Math.min(
+        lines[endLine]!.contentEnd,
+        location.endByte + MAX_ANCHOR_INLINE_CONTEXT_BYTES,
+      ),
+    ),
+  );
+  return before && after && prefix && suffix
+    ? {
+        normalization: "text-lf-trailing-whitespace-v1",
+        before,
+        after,
+        prefix,
+        suffix,
+      }
+    : null;
+}
+
+function sortedStrings(values: readonly string[] | undefined): string[] {
+  return [...(values ?? [])].sort();
+}
+
+/** Claim commitments bind actionable coverage to the exact claim representation
+ * that is persisted at each layer. They are not signatures; Canon review remains
+ * the authorship boundary, while import can detect content changed after capture. */
+export function fineGrainedClaimForObservation(
+  observation: Pick<
+    CompressedObservation,
+    | "type"
+    | "title"
+    | "subtitle"
+    | "facts"
+    | "narrative"
+    | "concepts"
+    | "files"
+    | "imageDescription"
+  >,
+): FineGrainedClaimCommitment {
+  return {
+    schema: "synthetic-observation-v1",
+    hash: sha256(
+      JSON.stringify({
+        type: observation.type,
+        title: observation.title,
+        subtitle: observation.subtitle ?? null,
+        facts: [...(observation.facts ?? [])],
+        narrative: observation.narrative,
+        concepts: sortedStrings(observation.concepts),
+        files: sortedStrings(observation.files),
+        imageDescription: observation.imageDescription ?? null,
+      }),
+    ),
+  };
+}
+
+export type FineGrainedMemoryClaim = Pick<
+  Memory,
+  "type" | "title" | "content" | "concepts" | "files"
+> &
+  Partial<Pick<Memory, "subtitle" | "facts" | "imageDescription">>;
+
+export function fineGrainedClaimForMemory(
+  memory: FineGrainedMemoryClaim,
+): FineGrainedClaimCommitment {
+  return {
+    schema: "memory-claim-v1",
+    hash: sha256(
+      JSON.stringify({
+        type: memory.type,
+        title: memory.title,
+        subtitle: memory.subtitle ?? null,
+        content: memory.content,
+        facts: [...(memory.facts ?? [memory.content])],
+        concepts: sortedStrings(memory.concepts),
+        files: sortedStrings(memory.files),
+        imageDescription: memory.imageDescription ?? null,
+      }),
+    ),
+  };
+}
+
+export type FineGrainedCanonClaim = Pick<
+  Memory,
+  "type" | "title" | "content" | "concepts" | "files"
+>;
+
+export function fineGrainedClaimForCanon(
+  record: FineGrainedCanonClaim,
+): FineGrainedClaimCommitment {
+  return {
+    schema: "canon-claim-v1",
+    hash: sha256(
+      JSON.stringify({
+        type: record.type,
+        title: record.title,
+        content: record.content,
+        concepts: sortedStrings(record.concepts),
+        files: sortedStrings(record.files),
+      }),
+    ),
+  };
+}
+
+function sameClaimCommitment(
+  left: FineGrainedClaimCommitment,
+  right: FineGrainedClaimCommitment,
+): boolean {
+  return left.schema === right.schema && left.hash === right.hash;
+}
+
+export function fineGrainedEvidenceMatchesClaim(
+  evidence: unknown,
+  claim: FineGrainedClaimCommitment | undefined,
+): boolean {
+  return (
+    claim !== undefined &&
+    isFineGrainedEvidence(evidence) &&
+    sameClaimCommitment(evidence.claimCommitment, claim)
+  );
+}
+
+function bindFineGrainedEvidenceToClaim(
+  evidence: unknown,
+  sourceClaim: FineGrainedClaimCommitment,
+  claimCommitment: FineGrainedClaimCommitment,
+): FineGrainedEvidence | null {
+  const cloned = cloneFineGrainedEvidence(evidence);
+  if (!cloned) return null;
+  const sourceMatches = fineGrainedEvidenceMatchesClaim(cloned, sourceClaim);
+  const wasClaimComplete =
+    sourceMatches &&
+    cloned.coverage.claim === "complete" &&
+    cloned.claimCommitment.hash === cloned.supportHash;
+  cloned.claimCommitment = claimCommitment;
+  if (wasClaimComplete) cloned.supportHash = claimCommitment.hash;
+  else if (!sourceMatches && cloned.supportHash === claimCommitment.hash) {
+    cloned.supportHash = sha256(
+      JSON.stringify(["claim-rebind-source-mismatch-v1", cloned.supportHash]),
+    );
+  }
+  cloned.coverage.claim =
+    cloned.claimCommitment.hash === cloned.supportHash ? "complete" : "partial";
+  cloned.completeness = derivedCompleteness(cloned) ? "complete" : "partial";
+  return isFineGrainedEvidence(cloned) ? cloned : null;
+}
+
+/** Rebind a distilled Memory to its full injected claim projection. */
+export function bindFineGrainedEvidenceToMemory(
+  evidence: unknown,
+  memory: FineGrainedMemoryClaim,
+  sourceClaim: FineGrainedClaimCommitment,
+): FineGrainedEvidence | null {
+  return bindFineGrainedEvidenceToClaim(
+    evidence,
+    sourceClaim,
+    fineGrainedClaimForMemory(memory),
+  );
+}
+
+/** Rebind a portable Canon record to only the claim fields Canon carries. */
+export function bindFineGrainedEvidenceToCanon(
+  evidence: unknown,
+  record: FineGrainedCanonClaim,
+  sourceClaim: FineGrainedClaimCommitment,
+): FineGrainedEvidence | null {
+  return bindFineGrainedEvidenceToClaim(
+    evidence,
+    sourceClaim,
+    fineGrainedClaimForCanon(record),
+  );
 }
 
 /** A portable anchor path has one checkout-relative meaning and cannot address
@@ -215,28 +470,57 @@ function sourceCoverage(
     : "partial";
 }
 
-function evidenceFor(
-  anchors: FineGrainedAnchor[],
-  claim: "complete" | "partial",
-  sources: "complete" | "partial",
-): FineGrainedEvidence {
-  const complete =
-    anchors.length > 0 &&
-    claim === "complete" &&
-    sources === "complete" &&
-    anchors.every(
+function derivedCompleteness(
+  evidence: Pick<
+    FineGrainedEvidence,
+    "anchors" | "claimCommitment" | "supportHash" | "coverage"
+  >,
+): boolean {
+  return (
+    evidence.anchors.length > 0 &&
+    evidence.coverage.claim === "complete" &&
+    evidence.coverage.sources === "complete" &&
+    evidence.claimCommitment.hash === evidence.supportHash &&
+    evidence.anchors.every(
       (anchor) =>
         anchor.contentCompleteness === "complete" &&
         anchor.occurrence.unique &&
         !anchor.occurrence.capped &&
         anchor.occurrence.count === 1,
-    );
-  return {
+    )
+  );
+}
+
+function evidenceFor(
+  anchors: FineGrainedAnchor[],
+  sources: "complete" | "partial",
+  observation: CompressedObservation,
+  supportObservation: CompressedObservation,
+  operationSupportsClaim: boolean,
+): FineGrainedEvidence {
+  const claimCommitment = fineGrainedClaimForObservation(observation);
+  const supportedProjectionHash =
+    fineGrainedClaimForObservation(supportObservation).hash;
+  // Keep an explicit cryptographic mismatch when operation structure itself is
+  // unsupported, even if the unsupported fields happened not to render into
+  // the compressed claim. A caller cannot upgrade it by flipping two enums.
+  const supportHash = operationSupportsClaim
+    ? supportedProjectionHash
+    : sha256(JSON.stringify(["unsupported-operation-v1", supportedProjectionHash]));
+  const claim =
+    operationSupportsClaim && claimCommitment.hash === supportHash
+      ? "complete"
+      : "partial";
+  const evidence: FineGrainedEvidence = {
     format: FINE_GRAINED_EVIDENCE_FORMAT,
+    claimCommitment,
+    supportHash,
     coverage: { claim, sources },
-    completeness: complete ? "complete" : "partial",
+    completeness: "partial",
     anchors,
   };
+  evidence.completeness = derivedCompleteness(evidence) ? "complete" : "partial";
+  return evidence;
 }
 
 function objectValue(value: unknown): Record<string, unknown> | null {
@@ -245,11 +529,21 @@ function objectValue(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+const FILE_INPUT_KEYS = ["file_path", "filePath", "path", "file"] as const;
+
 function explicitFile(input: Record<string, unknown>): string | null {
-  const values = ["file_path", "filePath", "path", "file"]
+  const values = FILE_INPUT_KEYS
     .map((key) => input[key])
     .filter((value): value is string => typeof value === "string" && !!value.trim());
   return new Set(values).size === 1 ? values[0]!.trim() : null;
+}
+
+function hasOnlyOperationKeys(
+  input: Record<string, unknown>,
+  operationKeys: readonly string[],
+): boolean {
+  const allowed = new Set<string>([...FILE_INPUT_KEYS, ...operationKeys]);
+  return Object.keys(input).every((key) => allowed.has(key));
 }
 
 function normalizedToolName(value: string | undefined): string {
@@ -269,21 +563,6 @@ function toolLooksLike(name: string | undefined, words: readonly string[]): bool
       normalized.includes(`_${word}_`) ||
       normalized.startsWith(word) ||
       normalized.endsWith(word),
-  );
-}
-
-function genericSuccessOutput(value: unknown): boolean {
-  if (value === undefined || value === null || value === "") return true;
-  if (typeof value === "string") {
-    return /^(?:ok|success(?:ful(?:ly)?)?|done|updated|applied|complete(?:d)?)[.!]?$/i.test(
-      value.trim(),
-    );
-  }
-  const obj = objectValue(value);
-  return (
-    !!obj &&
-    obj["success"] === true &&
-    Object.keys(obj).every((key) => key === "success")
   );
 }
 
@@ -385,7 +664,8 @@ function baseAnchor(
 ): FineGrainedAnchor | null {
   const content = bytes.subarray(location.startByte, location.endByte);
   const normalizedHash = normalizedTextHash(content);
-  if (!normalizedHash) return null;
+  const context = textContextFor(bytes, location);
+  if (!normalizedHash || !context) return null;
   return {
     kind,
     path,
@@ -397,6 +677,7 @@ function baseAnchor(
     contentCompleteness: "complete",
     ...(sourceCommit ? { sourceCommit } : {}),
     location,
+    context,
   };
 }
 
@@ -594,7 +875,8 @@ function captureEditAnchor(
 ): FineGrainedEvidence | null {
   if (
     input.hookType !== "post_tool_use" ||
-    input.observationType !== "file_edit" ||
+    input.observation.type !== "file_edit" ||
+    input.operationOnlyObservation.type !== "file_edit" ||
     !toolLooksLike(input.toolName, ["edit", "replace", "patch"])
   ) {
     return null;
@@ -646,8 +928,14 @@ function captureEditAnchor(
   );
   return evidenceFor(
     [anchor],
-    genericSuccessOutput(input.toolOutput) ? "complete" : "partial",
     sources,
+    input.observation,
+    input.operationOnlyObservation,
+    hasOnlyOperationKeys(toolInput, [
+      "old_string",
+      "new_string",
+      "replace_all",
+    ]),
   );
 }
 
@@ -703,7 +991,7 @@ function captureLineRangeAnchor(
 ): FineGrainedEvidence | null {
   if (
     input.hookType !== "post_tool_use" ||
-    input.observationType !== "file_read" ||
+    input.observation.type !== "file_read" ||
     !toolLooksLike(input.toolName, ["read", "view"])
   ) {
     return null;
@@ -739,17 +1027,32 @@ function captureLineRangeAnchor(
   );
   if (!anchor) return null;
   const selectedText = decodeUtf8(selected);
-  const claim =
-    selectedText !== null && outputContent(input.toolOutput) === selectedText
-      ? "complete"
-      : "partial";
+  const operationSupportsClaim =
+    selectedText !== null &&
+    outputContent(input.toolOutput) === selectedText &&
+    hasOnlyOperationKeys(toolInput, [
+      "start_line",
+      "startLine",
+      "line_start",
+      "end_line",
+      "endLine",
+      "line_end",
+      "offset",
+      "limit",
+    ]);
   const sources = sourceCoverage(
     input.cwd,
     input.referencedFiles,
     [source.path],
     input.mixedTrust === true,
   );
-  return evidenceFor([anchor], claim, sources);
+  return evidenceFor(
+    [anchor],
+    sources,
+    input.observation,
+    operationSupportsClaim ? input.observation : input.operationOnlyObservation,
+    operationSupportsClaim,
+  );
 }
 
 function captureConfigAnchor(
@@ -813,19 +1116,28 @@ function captureConfigAnchor(
       ? toolInput["value"]
       : undefined;
   const suppliedCanonical = canonicalConfigValue(key, supplied);
-  const claim =
+  const operationSupportsClaim =
     supplied !== undefined &&
     suppliedCanonical === normalized &&
-    genericSuccessOutput(input.toolOutput)
-      ? "complete"
-      : "partial";
+    hasOnlyOperationKeys(toolInput, [
+      "config_key",
+      "configKey",
+      "config_value",
+      "value",
+    ]);
   const sources = sourceCoverage(
     input.cwd,
     input.referencedFiles,
     [source.path],
     input.mixedTrust === true,
   );
-  return evidenceFor([anchor], claim, sources);
+  return evidenceFor(
+    [anchor],
+    sources,
+    input.observation,
+    input.operationOnlyObservation,
+    operationSupportsClaim,
+  );
 }
 
 export interface CaptureFineGrainedEvidenceInput {
@@ -836,7 +1148,11 @@ export interface CaptureFineGrainedEvidenceInput {
   cwd: string;
   referencedFiles?: string[];
   mixedTrust?: boolean;
-  observationType?: ObservationType;
+  /** The exact synthetic object that will be persisted. */
+  observation: CompressedObservation;
+  /** The same deterministic compression with host output removed. This binds
+   * completeness to what the anchored operation itself supports. */
+  operationOnlyObservation: CompressedObservation;
 }
 
 /** Capture only anchors whose exact live source bytes can be located after a
@@ -895,6 +1211,46 @@ function isTextLocation(value: unknown): value is FineGrainedTextLocation {
   );
 }
 
+function isContextSide(value: unknown): value is FineGrainedContextSide {
+  const side = objectValue(value);
+  return (
+    !!side &&
+    isIntegerIn(side["lineCount"], 0, MAX_ANCHOR_CONTEXT_LINES) &&
+    typeof side["rawHash"] === "string" &&
+    SHA256_RE.test(side["rawHash"] as string) &&
+    typeof side["normalizedHash"] === "string" &&
+    SHA256_RE.test(side["normalizedHash"] as string) &&
+    typeof side["boundary"] === "boolean" &&
+    side["boundary"] === (side["lineCount"] === 0)
+  );
+}
+
+function isInlineContextSide(
+  value: unknown,
+): value is FineGrainedInlineContextSide {
+  const side = objectValue(value);
+  return (
+    !!side &&
+    isIntegerIn(side["byteLength"], 0, MAX_ANCHOR_INLINE_CONTEXT_BYTES) &&
+    typeof side["rawHash"] === "string" &&
+    SHA256_RE.test(side["rawHash"] as string) &&
+    typeof side["normalizedHash"] === "string" &&
+    SHA256_RE.test(side["normalizedHash"] as string)
+  );
+}
+
+function isTextContext(value: unknown): value is FineGrainedTextContext {
+  const context = objectValue(value);
+  return (
+    !!context &&
+    context["normalization"] === "text-lf-trailing-whitespace-v1" &&
+    isContextSide(context["before"]) &&
+    isContextSide(context["after"]) &&
+    isInlineContextSide(context["prefix"]) &&
+    isInlineContextSide(context["suffix"])
+  );
+}
+
 function isOccurrence(value: unknown): boolean {
   const occurrence = objectValue(value);
   if (!occurrence) return false;
@@ -949,7 +1305,10 @@ function isAnchor(value: unknown): value is FineGrainedAnchor {
       !/[\u0000-\u001f\u007f]/.test(location["keyPath"][0])
     );
   }
-  return anchor["normalization"] === "text-lf-trailing-whitespace-v1";
+  return (
+    anchor["normalization"] === "text-lf-trailing-whitespace-v1" &&
+    isTextContext(anchor["context"])
+  );
 }
 
 /** Strict validation of every trust-bearing field. Unknown additive fields are
@@ -960,9 +1319,22 @@ export function isFineGrainedEvidence(
   const evidence = objectValue(value);
   if (!evidence || evidence["format"] !== FINE_GRAINED_EVIDENCE_FORMAT) return false;
   const coverage = objectValue(evidence["coverage"]);
+  const claimCommitment = objectValue(evidence["claimCommitment"]);
   const anchors = evidence["anchors"];
   if (
     !coverage ||
+    !claimCommitment ||
+    ![
+      "synthetic-observation-v1",
+      "memory-claim-v1",
+      "canon-claim-v1",
+    ].includes(
+      String(claimCommitment["schema"]),
+    ) ||
+    typeof claimCommitment["hash"] !== "string" ||
+    !SHA256_RE.test(claimCommitment["hash"] as string) ||
+    typeof evidence["supportHash"] !== "string" ||
+    !SHA256_RE.test(evidence["supportHash"] as string) ||
     !["complete", "partial"].includes(String(coverage["claim"])) ||
     !["complete", "partial"].includes(String(coverage["sources"])) ||
     !["complete", "partial"].includes(String(evidence["completeness"])) ||
@@ -985,15 +1357,16 @@ export function isFineGrainedEvidence(
     ),
   );
   if (identities.size !== anchors.length) return false;
-  const complete =
+  if (
     coverage["claim"] === "complete" &&
-    coverage["sources"] === "complete" &&
-    anchors.every(
-      (anchor) =>
-        anchor.occurrence.unique &&
-        !anchor.occurrence.capped &&
-        anchor.occurrence.count === 1,
-    );
+    claimCommitment["hash"] !== evidence["supportHash"]
+  ) {
+    return false;
+  }
+  const structurallyTyped = evidence as unknown as FineGrainedEvidence;
+  // Caller flips from partial to complete cannot pass while the exact stored
+  // claim and operation-supported claim commitments differ.
+  const complete = derivedCompleteness(structurallyTyped);
   return evidence["completeness"] === (complete ? "complete" : "partial");
 }
 
@@ -1001,6 +1374,16 @@ export function isActionableFineGrainedEvidence(
   value: unknown,
 ): value is FineGrainedEvidence {
   return isFineGrainedEvidence(value) && value.completeness === "complete";
+}
+
+function cloneContext(context: FineGrainedTextContext): FineGrainedTextContext {
+  return {
+    normalization: "text-lf-trailing-whitespace-v1",
+    before: { ...context.before },
+    after: { ...context.after },
+    prefix: { ...context.prefix },
+    suffix: { ...context.suffix },
+  };
 }
 
 function cloneLocation(location: FineGrainedTextLocation): FineGrainedTextLocation {
@@ -1026,6 +1409,8 @@ export function cloneFineGrainedEvidence(
   if (!isFineGrainedEvidence(value)) return null;
   return {
     format: FINE_GRAINED_EVIDENCE_FORMAT,
+    claimCommitment: { ...value.claimCommitment },
+    supportHash: value.supportHash,
     coverage: { ...value.coverage },
     completeness: value.completeness,
     anchors: value.anchors.map((anchor): FineGrainedAnchor => {
@@ -1056,6 +1441,7 @@ export function cloneFineGrainedEvidence(
         kind: anchor.kind,
         normalization: "text-lf-trailing-whitespace-v1",
         location: cloneLocation(anchor.location),
+        context: cloneContext(anchor.context),
       };
     }),
   };
@@ -1118,11 +1504,21 @@ export interface FineGrainedVerification {
   anchors: FineGrainedAnchorCheck[];
 }
 
+type FineGrainedTextAnchor = Extract<
+  FineGrainedAnchor,
+  { kind: "edit_span" | "line_range" }
+>;
+
+interface CandidateScan {
+  matches: number;
+  contextRejected: boolean;
+}
+
 function rawCandidateFitsLocation(
   lines: ByteLine[],
   start: number,
   end: number,
-  anchor: FineGrainedAnchor,
+  anchor: FineGrainedTextAnchor,
 ): boolean {
   const startIndex = lineIndexAt(lines, start);
   const endIndex = lineIndexAt(lines, end);
@@ -1139,9 +1535,119 @@ function rawCandidateFitsLocation(
   return true;
 }
 
-function rawMatches(bytes: Buffer, anchor: FineGrainedAnchor): number | null {
+function candidateContextSideMatches(
+  bytes: Buffer,
+  lines: ByteLine[],
+  startIndex: number,
+  endIndex: number,
+  direction: "before" | "after",
+  expected: FineGrainedContextSide,
+): boolean {
+  const logicalCount = logicalLineCount(lines, bytes);
+  if (expected.boundary) {
+    return direction === "before"
+      ? startIndex === 0
+      : endIndex >= logicalCount - 1;
+  }
+  let first: number;
+  let last: number;
+  if (direction === "before") {
+    if (startIndex < expected.lineCount) return false;
+    first = startIndex - expected.lineCount;
+    last = startIndex - 1;
+  } else {
+    first = endIndex + 1;
+    last = endIndex + expected.lineCount;
+    if (last >= logicalCount) return false;
+  }
+  const contextBytes = bytes.subarray(lines[first]!.start, lines[last]!.contentEnd);
+  if (contextBytes.byteLength > MAX_ANCHOR_CONTEXT_BYTES) return false;
+  const rawHash = sha256(contextBytes);
+  const normalizedHash = normalizedTextHash(contextBytes);
+  return (
+    rawHash === expected.rawHash ||
+    (normalizedHash !== null && normalizedHash === expected.normalizedHash)
+  );
+}
+
+function candidateInlineContextMatches(
+  bytes: Buffer,
+  lines: ByteLine[],
+  start: number,
+  end: number,
+  direction: "prefix" | "suffix",
+  expected: FineGrainedInlineContextSide,
+): boolean {
+  const lineIndex = lineIndexAt(lines, direction === "prefix" ? start : end);
+  const line = lines[lineIndex]!;
+  const contextBytes =
+    direction === "prefix"
+      ? bytes.subarray(Math.max(line.start, start - expected.byteLength), start)
+      : bytes.subarray(end, Math.min(line.contentEnd, end + expected.byteLength));
+  if (contextBytes.byteLength !== expected.byteLength) return false;
+  const rawHash = sha256(contextBytes);
+  const normalizedHash = normalizedTextHash(contextBytes);
+  return (
+    rawHash === expected.rawHash ||
+    (normalizedHash !== null && normalizedHash === expected.normalizedHash)
+  );
+}
+
+function candidateContextMatches(
+  bytes: Buffer,
+  lines: ByteLine[],
+  start: number,
+  end: number,
+  anchor: FineGrainedTextAnchor,
+): boolean {
+  // The capture location itself is already deterministic. Context is required
+  // only for relocation, preventing an identical snippet in another block from
+  // silently inheriting the claim.
+  if (start === anchor.location.startByte) return true;
+  const startIndex = lineIndexAt(lines, start);
+  const endIndex = lineIndexAt(lines, end);
+  return (
+    candidateContextSideMatches(
+      bytes,
+      lines,
+      startIndex,
+      endIndex,
+      "before",
+      anchor.context.before,
+    ) &&
+    candidateContextSideMatches(
+      bytes,
+      lines,
+      startIndex,
+      endIndex,
+      "after",
+      anchor.context.after,
+    ) &&
+    candidateInlineContextMatches(
+      bytes,
+      lines,
+      start,
+      end,
+      "prefix",
+      anchor.context.prefix,
+    ) &&
+    candidateInlineContextMatches(
+      bytes,
+      lines,
+      start,
+      end,
+      "suffix",
+      anchor.context.suffix,
+    )
+  );
+}
+
+function rawMatches(
+  bytes: Buffer,
+  anchor: FineGrainedTextAnchor,
+): CandidateScan | null {
   const length = anchor.location.byteLength;
-  if (length > bytes.byteLength) return 0;
+  if (length > bytes.byteLength) return { matches: 0, contextRejected: false };
   const lines = byteLines(bytes);
   let hash = 0;
   for (let i = 0; i < length; i++) {
@@ -1153,37 +1659,43 @@ function rawMatches(bytes: Buffer, anchor: FineGrainedAnchor): number | null {
   let locatorCollisions = 0;
   let cryptographicBytes = 0;
   let matches = 0;
+  let contextRejected = false;
   for (let start = 0; start <= bytes.byteLength - length; start++) {
     if (hash === target) {
       locatorCollisions++;
       if (locatorCollisions > MAX_LOCATOR_COLLISIONS) return null;
-      if (rawCandidateFitsLocation(lines, start, start + length, anchor)) {
+      const end = start + length;
+      if (rawCandidateFitsLocation(lines, start, end, anchor)) {
         cryptographicBytes += length;
         if (cryptographicBytes > MAX_CANDIDATE_HASH_BYTES) return null;
-        if (sha256(bytes.subarray(start, start + length)) === anchor.rawHash) {
-          matches++;
-          if (matches > 1) return matches;
+        if (sha256(bytes.subarray(start, end)) === anchor.rawHash) {
+          if (candidateContextMatches(bytes, lines, start, end, anchor)) {
+            matches++;
+            if (matches > 1) return { matches, contextRejected };
+          } else {
+            contextRejected = true;
+          }
         }
       }
     }
     if (start === bytes.byteLength - length) break;
-    const without =
-      (hash - Math.imul(bytes[start]!, power)) >>> 0;
+    const without = (hash - Math.imul(bytes[start]!, power)) >>> 0;
     hash =
       (Math.imul(without, LOCATOR_BASE) + bytes[start + length]!) >>> 0;
   }
-  return matches;
+  return { matches, contextRejected };
 }
 
 function normalizedTextMatches(
   bytes: Buffer,
-  anchor: FineGrainedAnchor,
-): number | null {
+  anchor: FineGrainedTextAnchor,
+): CandidateScan | null {
   const lines = byteLines(bytes);
   if (lines.length > MAX_ANCHOR_NORMALIZED_CANDIDATES) return null;
   const delta = anchor.location.endLine - anchor.location.startLine;
   let hashedBytes = 0;
   let matches = 0;
+  let contextRejected = false;
   for (let index = 0; index + delta < lines.length; index++) {
     const startLine = lines[index]!;
     const endLine = lines[index + delta]!;
@@ -1207,23 +1719,30 @@ function normalizedTextMatches(
     if (hashedBytes > MAX_CANDIDATE_HASH_BYTES) return null;
     const candidate = normalizedTextHash(bytes.subarray(start, end));
     if (candidate === anchor.normalizedHash) {
-      matches++;
-      if (matches > 1) return matches;
+      if (candidateContextMatches(bytes, lines, start, end, anchor)) {
+        matches++;
+        if (matches > 1) return { matches, contextRejected };
+      } else {
+        contextRejected = true;
+      }
     }
   }
-  return matches;
+  return { matches, contextRejected };
 }
 
 function verifyTextAnchor(
   bytes: Buffer,
-  anchor: FineGrainedAnchor,
+  anchor: FineGrainedTextAnchor,
 ): FineGrainedAnchorStatus {
   const raw = rawMatches(bytes, anchor);
-  if (raw === null || raw > 1) return "ambiguous";
-  if (raw === 1) return "raw_match";
+  if (raw === null || raw.matches > 1) return "ambiguous";
+  if (raw.matches === 1) return "raw_match";
   const normalized = normalizedTextMatches(bytes, anchor);
-  if (normalized === null || normalized > 1) return "ambiguous";
-  return normalized === 1 ? "cosmetic_match" : "drifted";
+  if (normalized === null || normalized.matches > 1) return "ambiguous";
+  if (normalized.matches === 1) return "cosmetic_match";
+  return raw.contextRejected || normalized.contextRejected
+    ? "ambiguous"
+    : "drifted";
 }
 
 function verifyConfigAnchor(
@@ -1264,6 +1783,7 @@ function aggregateStatus(
 export function verifyFineGrainedEvidence(
   value: unknown,
   root: string,
+  claim?: FineGrainedClaimCommitment,
 ): FineGrainedVerification {
   if (!isFineGrainedEvidence(value)) {
     return {
@@ -1291,11 +1811,16 @@ export function verifyFineGrainedEvidence(
     checks.push({ kind: anchor.kind, path: anchor.path, status });
   }
   const status = aggregateStatus(checks);
+  const claimMatches = fineGrainedEvidenceMatchesClaim(value, claim);
+  const actionable =
+    isActionableFineGrainedEvidence(value) && claimMatches;
   return {
     status,
-    actionable: isActionableFineGrainedEvidence(value),
+    actionable,
     reason:
-      status === "raw_match"
+      !claimMatches
+        ? "fine-grained claim commitment is missing or does not match stored content"
+        : status === "raw_match"
         ? "all complete fine-grained anchors match their exact capture hashes"
         : status === "cosmetic_match"
           ? "all complete fine-grained anchors match after their declared normalization"

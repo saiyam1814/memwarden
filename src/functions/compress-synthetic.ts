@@ -322,6 +322,11 @@ function narrativeFor(args: {
 function summarizeOutput(text: string): string {
   const t = text.trim();
   if (!t) return "";
+  // A success acknowledgement carries no semantic claim and only makes an
+  // otherwise operation-derived memory depend on arbitrary host wording.
+  if (/^(?:ok|success(?:ful(?:ly)?)?|done|updated|applied|complete(?:d)?)[.!]?$/i.test(t)) {
+    return "";
+  }
   if (!isJsonish(t)) return clip(oneLine(t), 220);
 
   let parsed: unknown;

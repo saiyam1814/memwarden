@@ -4,7 +4,6 @@
 // this checkout. These tests intentionally bypass semantic search/observe.
 //
 
-import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
@@ -23,6 +22,10 @@ import {
   registerCoreFunctions,
 } from "../src/functions/index.js";
 import { projectKey } from "../src/functions/git-identity.js";
+import {
+  classifyProvenance,
+  hashFileCommitments,
+} from "../src/functions/verify.js";
 import type { CanonRecord, Memory } from "../src/functions/types.js";
 import { StateKV } from "../src/state/kv.js";
 import { KV } from "../src/state/schema.js";
@@ -36,10 +39,6 @@ let base: string;
 let temp: string;
 let repoA: string;
 let repoB: string;
-
-function sha256(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
-}
 
 function makeRepo(name: string, remote: string): string {
   const root = join(temp, name);
@@ -81,6 +80,7 @@ function canonRecord(root: string, id = "mem_import"): CanonRecord {
   const source = "export const answer = 42;\n";
   mkdirSync(join(root, "src"), { recursive: true });
   writeFileSync(join(root, "src/source.ts"), source, "utf8");
+  const commitments = hashFileCommitments(["src/source.ts"], root);
   return {
     format: 1,
     id,
@@ -90,7 +90,7 @@ function canonRecord(root: string, id = "mem_import"): CanonRecord {
     content: "The exact imported content says answer is 42.",
     concepts: ["answer", "canon"],
     files: ["src/source.ts"],
-    fileHashes: { "src/source.ts": sha256(source) },
+    ...commitments,
     capturedBy: { host: "claude-code", agentId: "agent-7" },
     promotedAt: "2025-01-02T03:04:05.000Z",
     reanchoredBy: "alice",
@@ -195,6 +195,7 @@ describe("Canon core/API boundary", () => {
         cwd: repoA,
         files: record.files,
         fileHashes: record.fileHashes,
+        fileHashesNormalized: record.fileHashesNormalized,
         agent: "claude-code",
         canon: {
           format: 1,
@@ -210,11 +211,37 @@ describe("Canon core/API boundary", () => {
     expect(stored?.project).toBeUndefined();
   });
 
+  it("imports an LF Canon record into a CRLF checkout as cosmetic/current", async () => {
+    const record = canonRecord(repoA, "mem_cosmetic");
+    writeFileSync(
+      join(repoA, "src/source.ts"),
+      "export const answer = 42;\r\n",
+      "utf8",
+    );
+
+    const response = await post("/canon/import", { root: repoA, record });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      id: record.id,
+      verdict: "cosmetic",
+    });
+    const stored = await kv.get<Memory>(KV.memories, record.id);
+    expect(stored?.provenance?.fileHashes).toEqual(record.fileHashes);
+    expect(stored?.provenance?.fileHashesNormalized).toEqual(
+      record.fileHashesNormalized,
+    );
+    expect(classifyProvenance(stored?.provenance, repoA).status).toBe(
+      "cosmetic",
+    );
+  });
+
   it("rejects caller-claimed verification when hashes do not match, even via the core id", async () => {
     const record = canonRecord(repoA, "mem_forged");
     const forged = {
       ...record,
       fileHashes: { "src/source.ts": "b".repeat(64) },
+      fileHashesNormalized: { "src/source.ts": "c".repeat(64) },
       verified: true,
       verdict: "verified",
     };
@@ -236,6 +263,21 @@ describe("Canon core/API boundary", () => {
     });
     expect(direct).toMatchObject({ ok: false, code: "hash_mismatch" });
     expect(await kv.get(KV.memories, record.id)).toBeNull();
+
+    const inconsistent = {
+      ...record,
+      id: "mem_inconsistent_normalized",
+      fileHashesNormalized: { "src/source.ts": "d".repeat(64) },
+    };
+    const inconsistentResponse = await post("/canon/import", {
+      root: repoA,
+      record: inconsistent,
+    });
+    expect(inconsistentResponse.status).toBe(409);
+    expect(await inconsistentResponse.json()).toMatchObject({
+      ok: false,
+      code: "hash_mismatch",
+    });
   });
 
   it("rejects a valid record from a different project identity", async () => {

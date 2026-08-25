@@ -22,10 +22,16 @@ jobs:
       - run: npm run typecheck
       - run: npx vitest run
 
-  fresh-install:
-    # The "green tests lied" guard: install the actual tarball into a clean
-    # dir and exercise the CLI the way a stranger would.
-    runs-on: ubuntu-latest
+  packed-smoke:
+    # Fast PR subset of the exact npm artifact contract. Linux and macOS run
+    # the supported lifecycle path; Windows runs the same honest public-CLI
+    # subset (install/status/custom-port up+down/hook/MCP/restart/isolation).
+    name: packed smoke (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -33,13 +39,17 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: npm pack
-      - run: |
-          mkdir /tmp/fresh && cd /tmp/fresh
-          npm init -y
-          npm install "$GITHUB_WORKSPACE"/memwarden-*.tgz --no-fund --no-audit
-          ./node_modules/.bin/memwarden status
-          ./node_modules/.bin/memwarden audit /nonexistent.db 2>&1 | grep -q ENOENT
+      - name: packed tarball smoke
+        run: npm run test:packed:smoke
+        env:
+          MEMWARDEN_PACKED_ARTIFACTS: ${{ runner.temp }}/memwarden-packed-contract
+      - name: archive packed-contract failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: packed-smoke-${{ runner.os }}
+          path: ${{ runner.temp }}/memwarden-packed-contract
+          if-no-files-found: warn
 
   firewall-eval:
     # The launch claims plus the controlled fine-grained-anchor corpus,
