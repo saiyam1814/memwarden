@@ -29,7 +29,7 @@ import {
   getRecallPolicy,
   isScopedVectorSearchEnabled,
 } from "./config.js";
-import { memoryToObservation } from "./memory-utils.js";
+import { isMemoryRecallable, memoryToObservation } from "./memory-utils.js";
 import {
   hasProjectIdentity,
   listMemoryInventory,
@@ -292,14 +292,15 @@ export async function rebuildIndex(
   try {
     const memories = await kv.list<Memory>(KV.memories);
     for (const memory of memories) {
-      if (memory.isLatest === false) continue;
+      if (!isMemoryRecallable(memory)) continue;
       if (!memory.title || !memory.content) continue;
-      idx.add(memoryToObservation(memory));
+      const observation = memoryToObservation(memory);
+      idx.add(observation);
       liveIds?.add(memory.id);
       if (!preserveVectors || !vectorIndex?.has(memory.id)) {
         pending.push({
           id: memory.id,
-          sessionId: memory.sessionIds?.[0] ?? "memory",
+          sessionId: observation.sessionId,
           text: memory.title + " " + memory.content,
           context: { kind: "memory", logId: memory.id },
         });
@@ -462,7 +463,7 @@ export async function buildScopedAllowedIds(
   // Memory row + all source sessions.
   const memories = await kv.list<Memory>(KV.memories).catch(() => [] as Memory[]);
   for (const memory of memories) {
-    if (memory.isLatest !== false) allowed.add(memory.id);
+    if (isMemoryRecallable(memory)) allowed.add(memory.id);
   }
   return { allowed, sessions };
 }
@@ -802,7 +803,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         const memory = await kv
           .get<Memory>(KV.memories, r.obsId)
           .catch(() => null);
-        const source = memory
+        const source = memory && isMemoryRecallable(memory)
           ? { observation: memoryToObservation(memory), memory }
           : null;
         sourceCache.set(cacheKey, source);

@@ -39,12 +39,9 @@ const SERVER_VERSION = (() => {
   }
 })();
 
-// Fallback sessionId for memory_remember calls that name none. It must be
-// derived from project identity: a session's project metadata is fixed at
-// creation, so a shared literal "mcp" session created under project A would
-// make every later default remember from project B searchable under A and
-// invisible to B. Hashing the canonical project path gives each project its
-// own long-lived MCP session without touching the observe path.
+// Backward-compatible session metadata for memory_remember calls that name
+// none. Hashing the canonical project path keeps the metadata project-scoped
+// instead of reintroducing the old shared literal "mcp" session id.
 export function projectScopedSessionId(prefix: string, project: string): string {
   const hash = createHash("sha256")
     .update(canonicalizePath(project))
@@ -186,11 +183,38 @@ export function createMcpServer(opts: McpServerOptions) {
     {
       name: "memory_remember",
       description:
-        "Save a memory so any agent can recall it later. Persisted to the local memwarden store.",
+        "Explicitly save a durable manual memory for this project. It survives ordinary retention without needing to be recalled. Supplied files are hashed now for Verified Recall; file-less saves remain honestly labeled sourced but unverified.",
       inputSchema: {
         type: "object",
         properties: {
           text: { type: "string", description: "The content to remember" },
+          title: {
+            type: "string",
+            description: "Optional human title. Defaults to the first content line.",
+          },
+          kind: {
+            type: "string",
+            enum: ["fact", "preference", "pattern", "architecture", "bug", "workflow"],
+            description: "Memory kind (default fact).",
+          },
+          files: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Optional files under the current project to hash as source evidence.",
+          },
+          expires_at: {
+            anyOf: [{ type: "string", format: "date-time" }, { type: "null" }],
+            description: "Optional explicit expiry. Null or omitted means durable.",
+          },
+          expiry: {
+            anyOf: [{ type: "string", format: "date-time" }, { type: "null" }],
+            description: "Alias for expires_at.",
+          },
+          supersedes: {
+            type: "string",
+            description: "Optional memory id this save replaces and archives.",
+          },
           sessionId: { type: "string", description: "Optional session id" },
           project: {
             type: "string",
@@ -200,24 +224,26 @@ export function createMcpServer(opts: McpServerOptions) {
         },
         required: ["text"],
       },
-      // Scope to the server's launch directory by default — a memory saved
-      // under a literal "mcp" project would never be found by memory_resume
-      // running from the real repository. The fallback sessionId is scoped
-      // to the same project (see projectScopedSessionId) so remembers from
-      // two projects never share one session.
+      // Scope to the server's launch directory by default. The fallback
+      // session remains project-specific for backward-compatible metadata,
+      // while the manual memory itself is stored directly in KV.memories.
       call: (a) => {
         const project = str(a["project"], serverCwd);
-        return api("POST", "/memwarden/observe", {
-          hookType: "post_tool_use",
+        const hasExpiresAt = Object.prototype.hasOwnProperty.call(a, "expires_at");
+        const hasExpiry = Object.prototype.hasOwnProperty.call(a, "expiry");
+        const expiry = hasExpiresAt ? a["expires_at"] : hasExpiry ? a["expiry"] : undefined;
+        return api("POST", "/memwarden/remember", {
+          text: typeof a["text"] === "string" ? a["text"] : "",
           sessionId: str(a["sessionId"], projectScopedSessionId("mcp", project)),
           project,
-          cwd: project,
-          timestamp: new Date().toISOString(),
-          data: {
-            tool_name: "memory_remember",
-            tool_input: { text: str(a["text"]) },
-            tool_output: str(a["text"]),
-          },
+          agent: "mcp",
+          ...(typeof a["title"] === "string" ? { title: a["title"] } : {}),
+          ...(typeof a["kind"] === "string" ? { kind: a["kind"] } : {}),
+          ...(a["files"] !== undefined ? { files: a["files"] } : {}),
+          ...(hasExpiresAt || hasExpiry ? { expires_at: expiry } : {}),
+          ...(typeof a["supersedes"] === "string"
+            ? { supersedes: a["supersedes"] }
+            : {}),
         });
       },
     },

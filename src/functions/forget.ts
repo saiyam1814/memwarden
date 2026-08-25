@@ -41,12 +41,17 @@
 
 import type { ISdk } from "../kernel/index.js";
 import type { StateKV } from "../state/kv.js";
-import type { CompressedObservation, Session } from "./types.js";
+import type { CompressedObservation, Memory, Session } from "./types.js";
 import { KV } from "../state/schema.js";
 import { getSearchIndex, vectorIndexRemove } from "./search.js";
 import { getAccessLog, deleteAccessLog } from "./access-tracker.js";
 import { distillMembers } from "./consolidate.js";
-import { sessionProjectIdentity } from "./memory-identity.js";
+import {
+  resolveMemoryIdentity,
+  sessionProjectIdentity,
+} from "./memory-identity.js";
+import { isMemoryExpired } from "./memory-utils.js";
+import { withKeyedLock } from "./keyed-mutex.js";
 import { logger } from "./logger.js";
 
 function ttlMs(): number {
@@ -77,7 +82,12 @@ export function registerForgetFunction(sdk: ISdk, kv: StateKV): void {
     "mem::auto-forget",
     async (
       data?: { now?: number },
-    ): Promise<{ scanned: number; forgotten: number; promoted: number }> => {
+    ): Promise<{
+      scanned: number;
+      forgotten: number;
+      promoted: number;
+      expired: number;
+    }> => {
       const now = typeof data?.now === "number" ? data.now : Date.now();
       const cutoff = now - ttlMs();
       const floor = importanceFloor();
@@ -85,15 +95,46 @@ export function registerForgetFunction(sdk: ISdk, kv: StateKV): void {
       let scanned = 0;
       let forgotten = 0;
       let promoted = 0;
+      let expired = 0;
+      const idx = getSearchIndex();
+
+      const memories = await kv.list<Memory>(KV.memories).catch(() => []);
+      for (const memory of memories) {
+        if (!isMemoryExpired(memory, now)) continue;
+        const identity = resolveMemoryIdentity(memory);
+        const projectIdentity =
+          identity.projectKey ||
+          identity.projectPath ||
+          identity.captureCwd ||
+          "_";
+        try {
+          const removed = await withKeyedLock(
+            `remember:${projectIdentity}`,
+            async () => {
+              const current = await kv.get<Memory>(KV.memories, memory.id);
+              if (!current || !isMemoryExpired(current, now)) return false;
+              await kv.delete(KV.memories, memory.id);
+              idx.remove(memory.id);
+              vectorIndexRemove(memory.id);
+              await deleteAccessLog(kv, memory.id);
+              return true;
+            },
+          );
+          if (removed) expired++;
+        } catch (err) {
+          logger.warn("auto-forget: failed to expire manual memory", {
+            memoryId: memory.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
 
       let sessions: Session[];
       try {
         sessions = await kv.list<Session>(KV.sessions);
       } catch {
-        return { scanned: 0, forgotten: 0, promoted: 0 };
+        return { scanned: 0, forgotten: 0, promoted: 0, expired };
       }
-
-      const idx = getSearchIndex();
       for (const session of sessions) {
         let observations: CompressedObservation[];
         try {
@@ -161,15 +202,16 @@ export function registerForgetFunction(sdk: ISdk, kv: StateKV): void {
         }
       }
       // cutoff is logged for observability of the retention window.
-      if (forgotten > 0 || promoted > 0) {
+      if (forgotten > 0 || promoted > 0 || expired > 0) {
         logger.info("auto-forget: retention sweep", {
           scanned,
           promoted,
           forgotten,
+          expired,
           cutoff: new Date(cutoff).toISOString(),
         });
       }
-      return { scanned, forgotten, promoted };
+      return { scanned, forgotten, promoted, expired };
     },
   );
 }
