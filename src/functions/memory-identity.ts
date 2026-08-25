@@ -11,7 +11,10 @@
 
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
-import { projectKey as computeProjectKey } from "./git-identity.js";
+import {
+  gitProjectKey,
+  projectKey as computeProjectKey,
+} from "./git-identity.js";
 import { canonicalizePath } from "./paths.js";
 import { isMemoryRecallable } from "./memory-utils.js";
 import type { Memory, Session } from "./types.js";
@@ -129,7 +132,11 @@ export function resolveMemoryIdentity(
   const projectKey =
     explicitKey ??
     (legacyIsKey ? legacyProject : undefined) ??
-    sourceIdentity?.projectKey;
+    sourceIdentity?.projectKey ??
+    // A legacy path can still be upgraded read-only when its live checkout
+    // proves a git/worktree identity. Labels, missing paths, and non-git paths
+    // keep exact legacy path scope and are not given a synthetic persisted key.
+    (projectPath ? (gitProjectKey(projectPath) ?? undefined) : undefined);
   const captureCwd = recordedCaptureCwd ?? sourceIdentity?.captureCwd;
 
   return {

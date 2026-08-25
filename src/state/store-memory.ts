@@ -5,6 +5,7 @@
 
 import {
   applyUpdateOps,
+  MAX_STATE_PAGE_LIMIT,
   type MutationListener,
   type OplogCompactOptions,
   type OplogCompactResult,
@@ -12,6 +13,7 @@ import {
   type OplogEraseResult,
   type StateEventType,
   type StateMutationEvent,
+  type StatePage,
   type StateStore,
   type UpdateOp,
 } from "./store.js";
@@ -29,6 +31,11 @@ import {
 function clone<T>(value: T): T {
   if (value === null || typeof value !== "object") return value;
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+/** Match SQLite's default BINARY text collation (UTF-8 byte order). */
+function compareOpaqueKeys(left: string, right: string): number {
+  return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
 }
 
 export class StoreMemory implements StateStore {
@@ -106,6 +113,38 @@ export class StoreMemory implements StateStore {
     const scopeMap = this.store.get(scope);
     if (!scopeMap) return [];
     return Array.from(scopeMap.values(), (v) => clone(v) as T);
+  }
+
+  async listPage<T = unknown>(
+    scope: string,
+    options: { after?: string; limit: number },
+  ): Promise<StatePage<T>> {
+    if (
+      !Number.isInteger(options.limit) ||
+      options.limit < 1 ||
+      options.limit > MAX_STATE_PAGE_LIMIT
+    ) {
+      throw new Error(
+        `listPage limit must be an integer between 1 and ${MAX_STATE_PAGE_LIMIT}`,
+      );
+    }
+    const scopeMap = this.store.get(scope);
+    if (!scopeMap) return { entries: [], hasMore: false };
+    const keys = [...scopeMap.keys()]
+      .filter(
+        (key) =>
+          options.after === undefined ||
+          compareOpaqueKeys(key, options.after) > 0,
+      )
+      .sort(compareOpaqueKeys);
+    const selected = keys.slice(0, options.limit);
+    return {
+      entries: selected.map((key) => ({
+        key,
+        value: clone(scopeMap.get(key)) as T,
+      })),
+      hasMore: keys.length > selected.length,
+    };
   }
 
   onMutation(listener: MutationListener): () => void {

@@ -53,6 +53,11 @@ export interface TransitionMemoryLifecycleInput {
   at?: string;
   root?: string;
   successorId?: string;
+  /** Internal management-surface guard: re-check project identity under the
+   * lifecycle lock. HTTP callers cannot set this field directly. */
+  requireProjectScope?: boolean;
+  /** Resolved by the management boundary for session-backed legacy identity. */
+  expectedProjectKey?: string;
 }
 
 export type TransitionMemoryLifecycleResult =
@@ -304,7 +309,13 @@ async function revalidateMemory(
     );
   }
   const identity = resolveMemoryIdentity(memory);
+  const boundaryResolvedLegacyMatch =
+    input.requireProjectScope === true &&
+    !identity.projectKey &&
+    typeof input.expectedProjectKey === "string" &&
+    input.expectedProjectKey === computeProjectKey(root);
   if (
+    !boundaryResolvedLegacyMatch &&
     hasProjectIdentity(identity) &&
     !projectIdentityMatchesPath(identity, root)
   ) {
@@ -542,6 +553,27 @@ export async function transitionMemoryLifecycle(
       .catch(() => null);
     if (!memory) {
       return transitionFailure("not_found", `no Memory with id ${initial.id}`, initial.id);
+    }
+    if (input.requireProjectScope === true) {
+      const scopedRoot = existingDirectory(input.root);
+      const scopedIdentity = resolveMemoryIdentity(memory);
+      const boundaryResolvedLegacyMatch =
+        scopedRoot !== null &&
+        !scopedIdentity.projectKey &&
+        typeof input.expectedProjectKey === "string" &&
+        input.expectedProjectKey === computeProjectKey(scopedRoot);
+      if (
+        !scopedRoot ||
+        (!boundaryResolvedLegacyMatch &&
+          (!hasProjectIdentity(scopedIdentity) ||
+            !projectIdentityMatchesPath(scopedIdentity, scopedRoot)))
+      ) {
+        return transitionFailure(
+          "project_mismatch",
+          "memory is not scoped to the requested project",
+          memory.id,
+        );
+      }
     }
 
     if (input.action === "revalidate") {
