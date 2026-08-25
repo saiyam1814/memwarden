@@ -765,8 +765,8 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           ? canonicalizePath(data.cwd)
           : undefined;
       // Stable project identity for each filter directory (git remote / main
-      // repo root). Used below to WIDEN the path filters — same key at a
-      // different path (another worktree, a moved checkout) still matches.
+      // repo root, canonical path fallback). Used below to WIDEN the path
+      // filters — same key at a different path (worktree/moved checkout) matches.
       const projectFilterKey =
         projectFilter !== undefined ? computeProjectKey(projectFilter) : null;
       const cwdFilterKey =
