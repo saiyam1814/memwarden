@@ -7,7 +7,7 @@
 // the loop.
 
 import { spawn } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { chmodSync, closeSync, mkdirSync, openSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +22,11 @@ export const DAEMON_ENTRY = join(
 /** The stable, user-global brain location (one memory across every tool). */
 export function defaultDataDir(): string {
   return process.env.MEMWARDEN_DATA_DIR ?? join(homedir(), ".memwarden");
+}
+
+/** The one configured daemon log. The CLI intentionally accepts no path override. */
+export function daemonLogPath(dataDir: string = defaultDataDir()): string {
+  return join(dataDir, "daemon.log");
 }
 
 const sleep = (ms: number): Promise<void> =>
@@ -53,11 +58,28 @@ export async function ensureDaemon(
   // libSQL won't create the data directory; make it so the daemon can open
   // its db instead of crashing on boot.
   mkdirSync(dataDir, { recursive: true });
-  const child = spawn(process.execPath, [DAEMON_ENTRY], {
-    detached: true,
-    stdio: "ignore",
-    env: { ...process.env, MEMWARDEN_DATA_DIR: dataDir },
-  });
+  let logFd: number | null = null;
+  try {
+    logFd = openSync(daemonLogPath(dataDir), "a", 0o600);
+    try {
+      chmodSync(daemonLogPath(dataDir), 0o600);
+    } catch {
+      // best-effort on filesystems without chmod
+    }
+  } catch {
+    // Starting the daemon is more important than optional detached logs.
+    logFd = null;
+  }
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(process.execPath, [DAEMON_ENTRY], {
+      detached: true,
+      stdio: logFd === null ? "ignore" : ["ignore", logFd, logFd],
+      env: { ...process.env, MEMWARDEN_DATA_DIR: dataDir },
+    });
+  } finally {
+    if (logFd !== null) closeSync(logFd);
+  }
   child.unref();
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {

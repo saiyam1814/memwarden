@@ -158,16 +158,39 @@ export interface OplogCompactResult {
 }
 
 /**
- * The single persistence chokepoint. All five methods mirror the original
- * StateKV semantics exactly. Implementations: StoreLibsql (durable, libSQL)
+ * The single persistence chokepoint. The original five methods mirror StateKV
+ * semantics exactly; listPage is an additive bounded keyset primitive.
+ * Implementations: StoreLibsql (durable, libSQL)
  * and StoreMemory (in-process Map mirror, used for parity tests).
  */
+export const MAX_STATE_PAGE_LIMIT = 10_000;
+
+export interface StatePageEntry<T = unknown> {
+  readonly key: string;
+  readonly value: T;
+}
+
+export interface StatePage<T = unknown> {
+  readonly entries: StatePageEntry<T>[];
+  readonly hasMore: boolean;
+}
+
 export interface StateStore {
   get<T = unknown>(scope: string, key: string): Promise<T | null>;
   set<T = unknown>(scope: string, key: string, value: T): Promise<T>;
   update<T = unknown>(scope: string, key: string, ops: readonly UpdateOp[]): Promise<T>;
   delete(scope: string, key: string): Promise<void>;
   list<T = unknown>(scope: string): Promise<T[]>;
+
+  /**
+   * Deterministic keyset page for bounded inventory APIs. Keys are ordered by
+   * their opaque byte/string value, never by insertion offset, so inserts do
+   * not shift an existing cursor onto a different row. `after` is exclusive.
+   */
+  listPage<T = unknown>(
+    scope: string,
+    options: { after?: string; limit: number },
+  ): Promise<StatePage<T>>;
 
   /**
    * Subscribe to mutation events. Returns an unsubscribe function. Listeners

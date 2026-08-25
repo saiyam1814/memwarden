@@ -832,6 +832,9 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       include_drifted?: boolean;
       /** Optional source-status allowlist, applied after classification. */
       trust?: unknown;
+      /** Optional exact project-relative file filters. Every requested file
+       * must be present on a result; ranking/search remains the #56 path. */
+      files?: unknown;
       /** Inventory mode used by Canon push: returns stored Memory records
        * rather than ranked observations. */
       include_memories?: boolean;
@@ -980,6 +983,28 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         : requestedMode ?? aliasMode ?? "legacy";
       const currentPolicy = inclusionMode === "current";
       const trustFilter = normalizeTrustFilter(data.trust);
+      let fileFilter: Set<string> | null = null;
+      if (data.files !== undefined) {
+        if (
+          !Array.isArray(data.files) ||
+          data.files.length === 0 ||
+          data.files.length > 32 ||
+          data.files.some(
+            (file) =>
+              typeof file !== "string" ||
+              !file.trim() ||
+              file.length > 1_024 ||
+              file.includes("\0"),
+          )
+        ) {
+          throw new Error(
+            "mem::search: files must be a non-empty array of at most 32 bounded paths",
+          );
+        }
+        fileFilter = new Set(
+          data.files.map((file) => String(file).trim().replace(/\\/g, "/")),
+        );
+      }
       const format = typeof data.format === "string" ? data.format : "full";
       if (!["full", "compact", "narrative"].includes(format)) {
         throw new Error(
@@ -1032,7 +1057,8 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         currentPolicy ||
         inclusionMode === "historical" ||
         inclusionMode === "as_of" ||
-        trustFilter !== null;
+        trustFilter !== null ||
+        fileFilter !== null;
       const fetchLimit = policyFiltering
         ? Math.min(POLICY_SCAN_CAP, Math.max(effectiveLimit * 50, 500))
         : filtering
@@ -1409,6 +1435,16 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         }
 
         const obs = source.observation;
+        if (fileFilter !== null) {
+          const rawCandidateFiles = obs.provenance?.files ?? obs.files;
+          const candidateFiles = new Set(
+            (Array.isArray(rawCandidateFiles) ? rawCandidateFiles : [])
+              .slice(0, 256)
+              .filter((file): file is string => typeof file === "string")
+              .map((file) => file.replace(/\\/g, "/")),
+          );
+          if (![...fileFilter].every((file) => candidateFiles.has(file))) continue;
+        }
         const verdict = await classifyForSearch(obs, identity);
         const sourceStatus = sourceStatusOf(verdict);
         const projection = lifecycleProjection(

@@ -16,7 +16,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { DAEMON_ENTRY } from "./ensure.js";
+import { DAEMON_ENTRY, daemonLogPath } from "./ensure.js";
 
 const LABEL = "ai.memwarden.daemon";
 
@@ -80,7 +80,7 @@ function tuningEnv(): Array<[string, string]> {
 }
 
 function macPlist(node: string, dataDir: string, secret?: string): string {
-  const log = join(dataDir, "daemon.log");
+  const log = daemonLogPath(dataDir);
   // The managed daemon resolves its auth secret from MEMWARDEN_SECRET, so it
   // must be in the service environment or a login-launched daemon would run
   // open. Only emitted when a secret was resolved.
@@ -114,6 +114,7 @@ function macPlist(node: string, dataDir: string, secret?: string): string {
 }
 
 function systemdUnit(node: string, dataDir: string, secret?: string): string {
+  const log = daemonLogPath(dataDir);
   // Same reason as the plist: the managed daemon needs MEMWARDEN_SECRET in its
   // environment to enforce auth. Only emitted when a secret was resolved.
   const secretEnv = secret
@@ -129,6 +130,9 @@ After=network.target
 [Service]
 ExecStart=${node} ${DAEMON_ENTRY}
 Environment=MEMWARDEN_DATA_DIR=${dataDir}${secretEnv}${tuning}
+StandardOutput=append:${log}
+StandardError=append:${log}
+UMask=0077
 Restart=on-failure
 RestartSec=2
 
