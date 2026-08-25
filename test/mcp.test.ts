@@ -418,6 +418,9 @@ describe("MCP durable manual memory contract", () => {
       expect(memory?.provenance?.fileHashes).toEqual({
         "src/auth.ts": expectedHash,
       });
+      expect(memory?.provenance?.fileHashesNormalized).toEqual({
+        "src/auth.ts": expectedHash,
+      });
 
       const current = await scoped.dispatch({
         jsonrpc: "2.0",
@@ -430,10 +433,28 @@ describe("MCP durable manual memory contract", () => {
       });
       expect(String(toolJson(current)["text"])).toContain("FILE_EVIDENCE_CANARY");
 
+      await writeFile(path, "export const refreshMinutes = 15;\r\n");
+      const cosmeticResponse = await scoped.dispatch({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: {
+          name: "memory_search",
+          arguments: { query: "FILE_EVIDENCE_CANARY", format: "compact" },
+        },
+      });
+      const cosmetic = toolJson(cosmeticResponse) as {
+        results: Array<{ trust: string; source_status: string }>;
+      };
+      expect(cosmetic.results[0]).toMatchObject({
+        trust: "cosmetic",
+        source_status: "source-cosmetic",
+      });
+
       await writeFile(path, "export const refreshMinutes = 60;\n");
       const stale = await scoped.dispatch({
         jsonrpc: "2.0",
-        id: 3,
+        id: 4,
         method: "tools/call",
         params: {
           name: "memory_resume",

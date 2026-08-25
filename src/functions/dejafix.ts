@@ -20,7 +20,7 @@
 import type { ISdk } from "../kernel/index.js";
 import type { StateKV } from "../state/kv.js";
 import type { Provenance } from "./types.js";
-import { classifyProvenance, hashFiles } from "./verify.js";
+import { classifyProvenance, hashFileCommitments } from "./verify.js";
 import { canonicalizePath } from "./paths.js";
 import { withKeyedLock } from "./keyed-mutex.js";
 import { generateId } from "../state/schema.js";
@@ -68,11 +68,10 @@ export interface VerifiedFix {
   sessionId?: string;
   cwd: string;
   timestamp: string;
-  /** "verified current" when all referenced files still hash-match; else
-   *  "sourced, unverified". Stale fixes are never returned at all. */
-  badge: "verified current" | "sourced, unverified";
-  /** The underlying classifier status (verified | sourced_unverified). */
-  status: "verified" | "sourced_unverified";
+  /** Exact, cosmetic-current, or sourced-only. Stale fixes are never returned. */
+  badge: "verified current" | "cosmetic current" | "sourced, unverified";
+  /** The underlying non-stale classifier status. */
+  status: "verified" | "cosmetic" | "sourced_unverified";
 }
 
 // ---------------------------------------------------------------------------
@@ -317,8 +316,13 @@ export async function recordFix(
     if (input.files && input.files.length > 0) provenance.files = input.files;
     const files = provenance.files;
     if (files && files.length > 0) {
-      const hashes = hashFiles(files, input.cwd);
-      if (Object.keys(hashes).length > 0) provenance.fileHashes = hashes;
+      const commitments = hashFileCommitments(files, input.cwd);
+      if (Object.keys(commitments.fileHashes).length > 0) {
+        provenance.fileHashes = commitments.fileHashes;
+      }
+      if (Object.keys(commitments.fileHashesNormalized).length > 0) {
+        provenance.fileHashesNormalized = commitments.fileHashesNormalized;
+      }
     }
   }
   if (!provenance.cwd) provenance.cwd = input.cwd;
@@ -384,7 +388,11 @@ export async function lookupFix(
       timestamp: c.timestamp,
       status: verdict.status,
       badge:
-        verdict.status === "verified" ? "verified current" : "sourced, unverified",
+        verdict.status === "verified"
+          ? "verified current"
+          : verdict.status === "cosmetic"
+            ? "cosmetic current"
+            : "sourced, unverified",
     };
     if (c.rootCause !== undefined) fix.rootCause = c.rootCause;
     if (c.tool !== undefined) fix.tool = c.tool;
