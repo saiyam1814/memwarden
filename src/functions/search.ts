@@ -65,7 +65,11 @@ import { recordAccessBatch } from "./access-tracker.js";
 import { loadVectorIndex, persistVectorIndex } from "./vector-persistence.js";
 import { logger } from "./logger.js";
 import { metrics } from "../observability/metrics.js";
-import type { FineGrainedAnchorStatus } from "./anchors.js";
+import {
+  fineGrainedClaimForMemory,
+  fineGrainedClaimForObservation,
+  type FineGrainedAnchorStatus,
+} from "./anchors.js";
 
 let index: SearchIndex | null = null;
 let vectorIndex: VectorIndexLike | null = null;
@@ -521,12 +525,14 @@ export type SearchVerdict =
     };
 export type TrustLabel =
   | "verified"
+  | "cosmetic"
   | "sourced"
   | "unsourced"
   | "stale"
   | "unverifiable";
 export type SourceStatusLabel =
   | "source-verified"
+  | "source-cosmetic"
   | "sourced"
   | "unsourced"
   | "source-drifted"
@@ -536,6 +542,8 @@ export function trustLabelOf(verdict: SearchVerdict): TrustLabel {
   switch (verdict.status) {
     case "verified":
       return "verified";
+    case "cosmetic":
+      return "cosmetic";
     case "sourced_unverified":
       return "sourced";
     case "stale":
@@ -551,6 +559,8 @@ export function sourceStatusOf(verdict: SearchVerdict): SourceStatusLabel {
   switch (verdict.status) {
     case "verified":
       return "source-verified";
+    case "cosmetic":
+      return "source-cosmetic";
     case "sourced_unverified":
       return "sourced";
     case "stale":
@@ -563,7 +573,7 @@ export function sourceStatusOf(verdict: SearchVerdict): SourceStatusLabel {
 }
 
 interface RecallClassificationFields {
-  /** Backward-compatible four-state label (`unverifiable` is additive). */
+  /** Trust label; `cosmetic` is current but explicitly not byte-identical. */
   trust: TrustLabel;
   /** Backward-compatible #56 source label. */
   source_status: SourceStatusLabel;
@@ -800,6 +810,8 @@ function normalizeTrustFilter(raw: unknown): Set<SourceStatusLabel> | null {
   const aliases: Record<string, SourceStatusLabel> = {
     verified: "source-verified",
     "source-verified": "source-verified",
+    cosmetic: "source-cosmetic",
+    "source-cosmetic": "source-cosmetic",
     sourced: "sourced",
     "sourced-unverified": "sourced",
     unsourced: "unsourced",
@@ -811,7 +823,7 @@ function normalizeTrustFilter(raw: unknown): Set<SourceStatusLabel> | null {
   for (const item of raw) {
     if (typeof item !== "string" || aliases[item.trim().toLowerCase()] === undefined) {
       throw new Error(
-        "mem::search: trust entries must be one of source-verified, sourced, unsourced, source-drifted, or unverifiable",
+        "mem::search: trust entries must be one of source-verified, source-cosmetic, sourced, unsourced, source-drifted, or unverifiable",
       );
     }
     normalized.add(aliases[item.trim().toLowerCase()]!);
@@ -1267,14 +1279,22 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       const classifyForSearch = async (
         obs: CompressedObservation,
         identity: ProjectIdentity,
+        memory: Memory | null,
       ): Promise<SearchVerdict> => {
         const files = obs.provenance?.files ?? [];
+        const fineGrainedClaim = memory
+          ? fineGrainedClaimForMemory(memory)
+          : fineGrainedClaimForObservation(obs);
         const needsRelativeRoot = files.some((file) => !isAbsolute(file));
 
         // File-less provenance (command/user confirmation/none) does not need a
         // checkout. The classifier can determine sourced vs unsourced directly.
         if (files.length === 0) {
-          return classifyProvenance(obs.provenance, cwdFilter ?? projectFilter ?? "/");
+          return classifyProvenance(
+            obs.provenance,
+            cwdFilter ?? projectFilter ?? "/",
+            { fineGrainedClaim },
+          );
         }
 
         const scopedFilter = cwdFilter ?? projectFilter;
@@ -1288,6 +1308,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           if (callerRoot && sameProject && mustUseCallerCheckout) {
             return classifyProvenance(obs.provenance, callerRoot, {
               verifyAgainstRoot: true,
+              fineGrainedClaim,
             });
           }
           if (!callerRoot && sameProject && mustUseCallerCheckout) {
@@ -1299,7 +1320,9 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         // checkout, never the caller's unrelated cwd.
         const provenanceRoot = usableCheckoutRoot(obs.provenance?.cwd);
         if (provenanceRoot) {
-          return classifyProvenance(obs.provenance, provenanceRoot);
+          return classifyProvenance(obs.provenance, provenanceRoot, {
+            fineGrainedClaim,
+          });
         }
 
         const directRoot =
@@ -1308,6 +1331,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         if (directRoot) {
           return classifyProvenance(obs.provenance, directRoot, {
             verifyAgainstRoot: true,
+            fineGrainedClaim,
           });
         }
 
@@ -1330,6 +1354,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           if (alternateRoot) {
             return classifyProvenance(obs.provenance, alternateRoot, {
               verifyAgainstRoot: true,
+              fineGrainedClaim,
             });
           }
         }
@@ -1344,7 +1369,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         // and can still be checked directly. Relative evidence cannot.
         return needsRelativeRoot
           ? unverifiable(obs.provenance)
-          : classifyProvenance(obs.provenance, "/");
+          : classifyProvenance(obs.provenance, "/", { fineGrainedClaim });
       };
 
       // Scope, classify, THEN apply inclusion policy while filling. Every item
@@ -1418,7 +1443,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         }
 
         const obs = source.observation;
-        const verdict = await classifyForSearch(obs, identity);
+        const verdict = await classifyForSearch(obs, identity, source.memory);
         const sourceStatus = sourceStatusOf(verdict);
         const projection = lifecycleProjection(
           source.memory,
@@ -1436,7 +1461,10 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
             verdict.status !== "unverifiable" &&
             verdict.sourceStatus !== "drifted" &&
             verdict.sourceStatus !== "missing" &&
-            (getRecallPolicy() !== "verified-only" || verdict.status === "verified");
+            (getRecallPolicy() !== "verified-only" ||
+              (verdict.evidenceTrust === "verified" &&
+                (verdict.status === "verified" ||
+                  verdict.status === "cosmetic")));
         } else if (inclusionMode === "historical") {
           included = projection.effective !== "active";
         } else if (inclusionMode === "as_of") {

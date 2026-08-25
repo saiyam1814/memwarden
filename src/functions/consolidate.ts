@@ -22,9 +22,10 @@
 //
 // Firewall safety: a memory contains exactly one evidence-equivalent claim and
 // inherits its newest supporting observation's provenance verbatim (files +
-// capture-time fileHashes). Different hashes, file sets, cwd/command/agent, or
-// mixedTrust state are different identities and can never be laundered through
-// the newest member. Adopted (hashless) observations stay hashless.
+// capture-time raw/normalized hashes). Different commitments, file sets,
+// cwd/command/agent, or mixedTrust state are different identities and can never
+// be laundered through the newest member. Adopted (hashless) observations stay
+// hashless.
 //
 // Conservative by construction: observations that are important (importance
 // above the floor), user-confirmed, or ever-accessed are NEVER folded or
@@ -64,7 +65,11 @@ import {
 import { getAccessLog, deleteAccessLog } from "./access-tracker.js";
 import { logger } from "./logger.js";
 import { withKeyedLock } from "./keyed-mutex.js";
-import { canonicalFineGrainedEvidence } from "./anchors.js";
+import {
+  bindFineGrainedEvidenceToMemory,
+  canonicalFineGrainedEvidence,
+  fineGrainedClaimForObservation,
+} from "./anchors.js";
 
 // Only these observation types are the duplicate-Read/Edit rot bucket #20
 // describes. Conversations, decisions, errors, etc. are left alone.
@@ -632,6 +637,18 @@ async function distillMembersUnlocked(
       ? { provenance: newest.provenance }
       : {}),
   };
+  if (memory.provenance?.anchors !== undefined) {
+    const rebound = bindFineGrainedEvidenceToMemory(
+      memory.provenance.anchors,
+      memory,
+      fineGrainedClaimForObservation(newest),
+    );
+    const { anchors: _observationClaimBinding, ...rest } = memory.provenance;
+    memory.provenance = {
+      ...rest,
+      ...(rebound ? { anchors: rebound } : {}),
+    };
+  }
 
   try {
     // StateKV.set is the successor installation point. It is atomic in both

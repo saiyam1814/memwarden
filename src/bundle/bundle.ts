@@ -15,6 +15,9 @@ import { DEJAFIX_SCOPE, type FixMemory } from "../functions/dejafix.js";
 import { migrateLegacyMemoryIdentity } from "../functions/memory-identity.js";
 import {
   cloneFineGrainedEvidence,
+  fineGrainedClaimForMemory,
+  fineGrainedClaimForObservation,
+  fineGrainedEvidenceMatchesClaim,
   isFineGrainedEvidence,
 } from "../functions/anchors.js";
 import type {
@@ -62,21 +65,44 @@ type AnchorCarrier = {
   provenance?: Provenance;
 };
 
-function anchorsAreValid(value: unknown): boolean {
+type AnchorCarrierKind = "memory" | "observation";
+
+function anchorsAreValid(
+  value: unknown,
+  kind: AnchorCarrierKind,
+): boolean {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return false;
   }
-  const provenance = (value as AnchorCarrier).provenance;
-  return provenance?.anchors === undefined || isFineGrainedEvidence(provenance.anchors);
+  const carrier = value as AnchorCarrier;
+  const provenance = carrier.provenance;
+  if (provenance?.anchors === undefined) return true;
+  if (
+    !isFineGrainedEvidence(provenance.anchors) ||
+    (provenance.mixedTrust === true &&
+      provenance.anchors.completeness === "complete")
+  ) {
+    return false;
+  }
+  const claim =
+    kind === "memory"
+      ? fineGrainedClaimForMemory(value as Memory)
+      : fineGrainedClaimForObservation(value as CompressedObservation);
+  return fineGrainedEvidenceMatchesClaim(provenance.anchors, claim);
 }
 
 /** Export/import keeps valid anchor commitments byte-for-byte in meaning while
- * dropping unknown status decorations. Malformed private-store anchors are
- * omitted on export so they cannot be laundered into a portable assertion. */
-function sanitizedAnchorCarrier<T extends AnchorCarrier>(value: T): T {
+ * dropping unknown status decorations. Malformed, mixed-complete, or claim-
+ * mismatched private anchors are omitted on export and rejected on import. */
+function sanitizedAnchorCarrier<T extends AnchorCarrier>(
+  value: T,
+  kind: AnchorCarrierKind,
+): T {
   const provenance = value.provenance;
   if (!provenance || provenance.anchors === undefined) return value;
-  const anchors = cloneFineGrainedEvidence(provenance.anchors);
+  const anchors = anchorsAreValid(value, kind)
+    ? cloneFineGrainedEvidence(provenance.anchors)
+    : null;
   const { anchors: _callerStatusOrMalformed, ...rest } = provenance;
   return {
     ...value,
@@ -95,6 +121,7 @@ export async function exportBundle(kv: StateKV): Promise<BrainBundle> {
     (memory) =>
       sanitizedAnchorCarrier(
         migrateLegacyMemoryIdentity(memory, sessionsById),
+        "memory",
       ),
   );
   const observations: Record<string, CompressedObservation[]> = {};
@@ -103,7 +130,7 @@ export async function exportBundle(kv: StateKV): Promise<BrainBundle> {
       await kv
         .list<CompressedObservation>(KV.observations(s.id))
         .catch(() => [])
-    ).map((observation) => sanitizedAnchorCarrier(observation));
+    ).map((observation) => sanitizedAnchorCarrier(observation, "observation"));
   }
   const quantBlob = await kv
     .get<string>(KV.quantParams, QUANT_BLOB_KEY)
@@ -145,13 +172,16 @@ export function isBrainBundle(value: unknown): value is BrainBundle {
     typeof b.observations !== "object" ||
     b.observations === null ||
     Array.isArray(b.observations) ||
-    !b.memories.every(anchorsAreValid)
+    !b.memories.every((memory) => anchorsAreValid(memory, "memory"))
   ) {
     return false;
   }
   return Object.values(b.observations).every(
     (observations) =>
-      Array.isArray(observations) && observations.every(anchorsAreValid),
+      Array.isArray(observations) &&
+      observations.every((observation) =>
+        anchorsAreValid(observation, "observation"),
+      ),
   );
 }
 
@@ -186,6 +216,7 @@ export async function importBundle(
       memory.id,
       sanitizedAnchorCarrier(
         migrateLegacyMemoryIdentity(memory, sessionsById),
+        "memory",
       ),
     );
   }
@@ -194,7 +225,7 @@ export async function importBundle(
       await kv.set(
         KV.observations(sessionId),
         o.id,
-        sanitizedAnchorCarrier(o),
+        sanitizedAnchorCarrier(o, "observation"),
       );
     }
   }

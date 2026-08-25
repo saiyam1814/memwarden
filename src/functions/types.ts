@@ -153,6 +153,41 @@ export interface FineGrainedConfigLocation extends FineGrainedTextLocation {
   keyPath: string[];
 }
 
+export interface FineGrainedContextSide {
+  /** Immediate full lines committed on this side of the captured unit. */
+  lineCount: number;
+  rawHash: string;
+  normalizedHash: string;
+  /** True only when the anchored unit itself touches this file boundary. */
+  boundary: boolean;
+}
+
+export interface FineGrainedInlineContextSide {
+  byteLength: number;
+  rawHash: string;
+  normalizedHash: string;
+}
+
+export interface FineGrainedTextContext {
+  normalization: "text-lf-trailing-whitespace-v1";
+  before: FineGrainedContextSide;
+  after: FineGrainedContextSide;
+  /** Bounded same-line bytes close the gap where a snippet moves between two
+   * expressions on one line while full-line context remains unchanged. */
+  prefix: FineGrainedInlineContextSide;
+  suffix: FineGrainedInlineContextSide;
+}
+
+export type FineGrainedClaimSchema =
+  | "synthetic-observation-v1"
+  | "memory-claim-v1"
+  | "canon-claim-v1";
+
+export interface FineGrainedClaimCommitment {
+  schema: FineGrainedClaimSchema;
+  hash: string;
+}
+
 export interface FineGrainedAnchorBase {
   path: string;
   rawHash: string;
@@ -169,11 +204,13 @@ export interface FineGrainedAnchorBase {
 export interface FineGrainedEditSpanAnchor extends FineGrainedAnchorBase {
   kind: "edit_span";
   location: FineGrainedTextLocation;
+  context: FineGrainedTextContext;
 }
 
 export interface FineGrainedLineRangeAnchor extends FineGrainedAnchorBase {
   kind: "line_range";
   location: FineGrainedTextLocation;
+  context: FineGrainedTextContext;
 }
 
 export interface FineGrainedJsonConfigAnchor extends FineGrainedAnchorBase {
@@ -188,6 +225,13 @@ export type FineGrainedAnchor =
 
 export interface FineGrainedEvidence {
   format: 1;
+  /** Commits to the exact stored claim projection. Import/read boundaries
+   * recompute it so changing caller prose cannot retain actionable anchors. */
+  claimCommitment: FineGrainedClaimCommitment;
+  /** Hash of the operation-supported claim projection. Complete claim coverage
+   * requires equality with claimCommitment; partial captures preserve the
+   * mismatch without storing either source or claim payload again. */
+  supportHash: string;
   /** `claim` says whether the generated memory claim is wholly supported by
    * these units; `sources` says whether every referenced source is represented. */
   coverage: {
@@ -203,10 +247,10 @@ export interface FineGrainedEvidence {
 export interface Provenance {
   cwd?: string;
   files?: string[]; // files the memory references / was derived from
-  fileHashes?: Record<string, string>; // file -> sha256 at capture, for drift checks
-  /** Optional formatting-normalized commitments (currently carried by Canon).
-   * These may distinguish cosmetic byte drift from semantic source drift, but
-   * never replace the raw hashes used for source verification. */
+  fileHashes?: Record<string, string>; // file -> raw-byte sha256 at capture
+  /** UTF-8 text hash after CRLF/LF and trailing-whitespace normalization.
+   * Raw hashes remain authoritative when bytes match; this commitment only
+   * distinguishes cosmetic checkout conversion from actual source drift. */
   fileHashesNormalized?: Record<string, string>;
   /** Bounded fine-grained source commitments. They are advisory unless their
    * validated capture metadata proves complete claim and source coverage. */
@@ -218,7 +262,7 @@ export interface Provenance {
   authoredBy?: "user" | "agent" | "user_or_agent";
   /** Set only by the dedicated Canon import boundary after local hash
    * verification. This records origin/attestation; it is NOT a cached trust
-   * verdict. Recall still re-hashes provenance.fileHashes every time. */
+   * verdict. Recall still re-hashes raw/normalized provenance every time. */
   canon?: CanonAttestation;
   /** The memory's CONTENT includes material its file evidence does not cover
    * (e.g. a handoff digest mixing code-backed decisions with unsourced
@@ -479,6 +523,8 @@ export interface EmbeddingProvider {
   embed(text: string): Promise<Float32Array>;
   embedBatch(texts: string[]): Promise<Float32Array[]>;
   embedImage?(src: string): Promise<Float32Array>;
+  /** Release native/model sessions before the daemon process exits. */
+  dispose?(): Promise<void> | void;
 }
 
 /** A single vector-stream hit, shared by every vector index implementation. */

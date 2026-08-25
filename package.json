@@ -42,6 +42,8 @@
     "demo:trust": "tsx demo/trust.ts",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:packed:smoke": "node test/packed-beta-contract.mjs --profile=smoke",
+    "test:packed": "node test/packed-beta-contract.mjs --profile=full",
     "typecheck": "tsc --noEmit",
     "demo:firewall": "tsx demo/firewall.ts",
     "eval": "tsx eval/firewall-eval.ts",

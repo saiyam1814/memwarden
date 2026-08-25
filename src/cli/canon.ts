@@ -36,11 +36,16 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { hashFiles, hashFilesNormalized } from "../functions/verify.js";
-import { normalizedHashFile } from "../functions/source-content.js";
 import {
+  hashFileCommitments,
+  normalizedFileHash,
+} from "../functions/verify.js";
+import {
+  bindFineGrainedEvidenceToCanon,
   canonicalFineGrainedEvidence,
   cloneFineGrainedEvidence,
+  fineGrainedClaimForCanon,
+  fineGrainedClaimForMemory,
   mapFineGrainedEvidencePaths,
   verifyFineGrainedEvidence,
   type FineGrainedAnchorStatus,
@@ -127,20 +132,9 @@ export function scanForSecrets(record: {
   return hits;
 }
 
-/**
- * Hash of the file with line endings normalized to LF and trailing whitespace
- * stripped per line.
- *
- * Raw hashes make every cosmetic change look like a lie: run Prettier, bump a
- * license header, or check out on Windows and every memory about that file goes
- * stale while remaining perfectly true. A canon that screams on formatting gets
- * its CI gate deleted within a sprint. Storing both hashes lets verify separate
- * "the code changed" from "the bytes moved", which is the distinction users
- * actually care about.
- */
-export function normalizedFileHash(absPath: string): string | null {
-  return normalizedHashFile(absPath);
-}
+/** Shared core primitive: Canon and live provenance must agree on exactly
+ * what counts as cosmetic text drift, without making core import CLI code. */
+export { normalizedFileHash };
 
 /** Bumped only for breaking record-shape changes; readers tolerate unknown
  *  extra fields so a format-compatible newer writer never breaks an older one.
@@ -406,22 +400,22 @@ export function reanchorRecord(
 ): CanonRecord | null {
   const names = Object.keys(record.fileHashes ?? {});
   if (names.length === 0) return null;
-  const fresh = hashFiles(names, root);
+  const fresh = hashFileCommitments(names, root);
   // Every listed file must still exist and be hashable. A memory whose source
   // is gone is not re-anchorable — it is dead, and should be dropped in review.
   const fileHashes: Record<string, string> = {};
   for (const f of names) {
-    const h = fresh[f];
-    if (!h) return null;
-    fileHashes[f] = h;
+    const hash = fresh.fileHashes[f];
+    if (!hash) return null;
+    fileHashes[f] = hash;
   }
-  const fileHashesNormalized: Record<string, string> = {};
-  for (const f of names) {
-    const n = normalizedFileHash(resolve(root, f));
-    if (n) fileHashesNormalized[f] = n;
-  }
+  const fileHashesNormalized = fresh.fileHashesNormalized;
   const anchorCheck = record.anchors
-    ? verifyFineGrainedEvidence(record.anchors, root)
+    ? verifyFineGrainedEvidence(
+        record.anchors,
+        root,
+        fineGrainedClaimForCanon(record),
+      )
     : undefined;
   // Preserve only byte-identical anchors. A human re-anchor of a cosmetic or
   // changed unit deliberately falls back to the freshly committed whole file;
@@ -470,24 +464,38 @@ export function verifyCanon(records: CanonRecord[], root: string): CanonCheck[] 
         drifted: unsafe.length > 0 ? unsafe : [...declared],
       };
     }
-    const actual = hashFiles(names, root);
-    const actualNormalized = hashFilesNormalized(names, root);
+    const actual = hashFileCommitments(names, root);
     const expectedNorm = record.fileHashesNormalized ?? {};
     const drifted: string[] = [];
     let cosmeticOnly = true;
-    for (const file of names) {
-      if (actual[file] === expected[file]) continue;
-      drifted.push(file);
-      // Cosmetic only when both sides carry the same explicit normalization.
-      const wantNorm = expectedNorm[file];
-      if (!wantNorm || actualNormalized[file] !== wantNorm) cosmeticOnly = false;
+    for (const f of names) {
+      const wantNorm = expectedNorm[f];
+      const gotNorm = actual.fileHashesNormalized[f];
+      if (actual.fileHashes[f] === expected[f]) {
+        // A supplied normalized fallback is trust-bearing too. It must describe
+        // the exact captured bytes, not remain dormant until a later change.
+        if (wantNorm && gotNorm !== wantNorm) {
+          drifted.push(f);
+          cosmeticOnly = false;
+        }
+        continue;
+      }
+      drifted.push(f);
+      // Cosmetic only when we have a normalized commitment AND it still
+      // matches. No normalized hash (older record, or an unreadable file) means
+      // we cannot make that claim, so it counts as real drift.
+      if (!wantNorm || gotNorm !== wantNorm) cosmeticOnly = false;
     }
     let verdict: CanonVerdict =
       drifted.length === 0 ? "verified" : cosmeticOnly ? "cosmetic" : "stale";
 
     const anchorCheck =
       record.anchors !== undefined
-        ? verifyFineGrainedEvidence(record.anchors, root)
+        ? verifyFineGrainedEvidence(
+            record.anchors,
+            root,
+            fineGrainedClaimForCanon(record),
+          )
         : undefined;
     if (anchorCheck?.actionable) {
       verdict =
@@ -519,8 +527,11 @@ export function recordFromMemory(
   memory: {
     id: string;
     title: string;
+    subtitle?: string;
     content: string;
+    facts?: string[];
     concepts?: string[];
+    imageDescription?: string;
     files?: string[];
     type?: CanonRecord["type"];
     version?: number;
@@ -549,6 +560,7 @@ export function recordFromMemory(
       cwd?: string;
       files?: string[];
       fileHashes?: Record<string, string>;
+      fileHashesNormalized?: Record<string, string>;
       anchors?: FineGrainedEvidence;
       /** `host` is accepted for old stored rows; current Provenance calls this
        * `agent`. */
@@ -588,6 +600,8 @@ export function recordFromMemory(
   const captureCwd = identity.captureCwd;
   const sameProject = projectIdentityMatchesPath(identity, root);
   const fileHashes: Record<string, string> = {};
+  const fileHashesNormalized: Record<string, string> = {};
+  const capturedNormalized = provenance.fileHashesNormalized ?? {};
   for (const file of evidenceFiles) {
     const hash = hashes[file];
     // Every referenced source needs a capture-time commitment. Silently
@@ -613,6 +627,13 @@ export function recordFromMemory(
     const prior = fileHashes[rel];
     if (prior && prior !== hash) return null;
     fileHashes[rel] = hash;
+    const normalized = capturedNormalized[file];
+    if (normalized !== undefined) {
+      if (!/^[a-f0-9]{64}$/.test(normalized)) return null;
+      const priorNormalized = fileHashesNormalized[rel];
+      if (priorNormalized && priorNormalized !== normalized) return null;
+      fileHashesNormalized[rel] = normalized;
+    }
   }
   const files = Object.keys(fileHashes);
   if (files.length === 0) return null;
@@ -639,15 +660,16 @@ export function recordFromMemory(
     portableAnchors = mapped;
   }
 
-  // A normalized commitment can only be derived now when the raw bytes still
-  // match the capture-time hash. Computing it from an already-drifted checkout
-  // would make arbitrary source changes look like harmless formatting.
-  const current = hashFiles(files, root);
-  const fileHashesNormalized: Record<string, string> = {};
+  // New live memories already carry capture-time normalized commitments. For
+  // legacy rows, derive one now ONLY when raw bytes still match capture;
+  // computing it from drifted source would launder arbitrary changes.
+  const current = hashFileCommitments(files, root);
   for (const rel of files) {
-    if (current[rel] !== fileHashes[rel]) continue;
-    const normalized = normalizedFileHash(resolve(root, rel));
-    if (normalized) fileHashesNormalized[rel] = normalized;
+    if (current.fileHashes[rel] !== fileHashes[rel]) continue;
+    const normalized = current.fileHashesNormalized[rel];
+    const captured = fileHashesNormalized[rel];
+    if (captured && captured !== normalized) return null;
+    if (!captured && normalized) fileHashesNormalized[rel] = normalized;
   }
 
   const canonOrigin = provenance.canon;
@@ -713,7 +735,6 @@ export function recordFromMemory(
     ...(Object.keys(fileHashesNormalized).length > 0
       ? { fileHashesNormalized }
       : {}),
-    ...(portableAnchors ? { anchors: portableAnchors } : {}),
     ...(capturedBy ? { capturedBy } : {}),
     promotedAt: canonOrigin?.promotedAt ?? nowIso,
     ...(canonOrigin?.reanchoredBy
@@ -723,5 +744,26 @@ export function recordFromMemory(
       ? { reanchoredAt: canonOrigin.reanchoredAt }
       : {}),
   };
+  if (portableAnchors) {
+    const sourceClaim = fineGrainedClaimForMemory({
+      type: memory.type ?? "fact",
+      title: memory.title,
+      ...(memory.subtitle !== undefined ? { subtitle: memory.subtitle } : {}),
+      content: memory.content,
+      ...(memory.facts !== undefined ? { facts: memory.facts } : {}),
+      concepts: memory.concepts ?? [],
+      files: memory.files ?? [],
+      ...(memory.imageDescription !== undefined
+        ? { imageDescription: memory.imageDescription }
+        : {}),
+    });
+    const bound = bindFineGrainedEvidenceToCanon(
+      portableAnchors,
+      record,
+      sourceClaim,
+    );
+    if (!bound) return null;
+    record.anchors = bound;
+  }
   return isCanonRecord(record) ? record : null;
 }

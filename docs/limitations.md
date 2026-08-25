@@ -13,10 +13,12 @@ This file exists so the README does not have to pretend otherwise.
   recall.
 - **Fine-grained anchors are a bounded first slice.** Memwarden can revalidate a unique successful
   edit replacement, an explicit bounded read range, or an explicit unambiguous top-level JSON
-  key/value without invalidating it for unrelated changes elsewhere in the file. The capture must
-  prove complete claim and source coverage; partial, duplicate, malformed, oversized, or ambiguous
-  anchors remain advisory and whole-file drift still blocks current recall. Anchor records contain
-  hashes and locations, not retained source payloads.
+  key/value without invalidating it for unrelated changes elsewhere in the file. The capture binds
+  the exact stored synthetic claim to an operation-supported claim hash and commits bounded adjacent
+  structural context; relocation requires that context to match. Partial, mixed/capped, duplicate,
+  malformed, oversized, claim-mismatched, or context-ambiguous anchors remain advisory and whole-file
+  drift still blocks current recall. Anchor records contain hashes and locations, not retained source
+  or claim payloads.
 - **No heuristic symbol or rename recovery exists yet.** AST/function/class/export anchors, parser
   versioning, deterministic git rename relocation, nested JSON paths, YAML/TOML/INI/manifest
   adapters, and structural hashes are future work. Memwarden does not guess them with regexes.

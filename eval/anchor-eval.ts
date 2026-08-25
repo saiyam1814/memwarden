@@ -5,19 +5,24 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { captureFineGrainedEvidence } from "../src/functions/anchors.js";
+import {
+  captureFineGrainedEvidence,
+  fineGrainedClaimForObservation,
+} from "../src/functions/anchors.js";
 import {
   classifyProvenance,
-  hashFiles,
-  hashFilesNormalized,
+  hashFileCommitments,
 } from "../src/functions/verify.js";
-import type { Provenance } from "../src/functions/types.js";
+import { buildSyntheticCompression } from "../src/functions/compress-synthetic.js";
+import type { Provenance, RawObservation } from "../src/functions/types.js";
 
 interface CorpusCase {
   id: string;
   captureContent: string;
   mutationContent: string;
   expectedCurrent: boolean;
+  expectedCompleteness?: "complete" | "partial";
+  toolOutput?: string;
 }
 
 function corpus(): CorpusCase[] {
@@ -33,7 +38,13 @@ function corpus(): CorpusCase[] {
         typeof (item as CorpusCase).id === "string" &&
         typeof (item as CorpusCase).captureContent === "string" &&
         typeof (item as CorpusCase).mutationContent === "string" &&
-        typeof (item as CorpusCase).expectedCurrent === "boolean",
+        typeof (item as CorpusCase).expectedCurrent === "boolean" &&
+        ((item as CorpusCase).toolOutput === undefined ||
+          typeof (item as CorpusCase).toolOutput === "string") &&
+        ((item as CorpusCase).expectedCompleteness === undefined ||
+          ["complete", "partial"].includes(
+            String((item as CorpusCase).expectedCompleteness),
+          )),
     )
   ) {
     throw new Error("invalid anchor evaluation corpus");
@@ -46,40 +57,60 @@ const path = "policy.ts";
 try {
   const results = corpus().map((entry) => {
     writeFileSync(join(root, path), entry.captureContent, "utf8");
+    const toolInput = {
+      file_path: path,
+      old_string: "export const TTL = 3600;",
+      new_string: "export const TTL = 900;",
+    };
+    const raw: RawObservation = {
+      id: `obs_${entry.id}`,
+      sessionId: "anchor-eval",
+      timestamp: "2026-01-01T00:00:00.000Z",
+      hookType: "post_tool_use",
+      toolName: "Edit",
+      toolInput,
+      toolOutput: entry.toolOutput ?? "ok",
+      raw: {},
+    };
+    const observation = buildSyntheticCompression(raw);
+    const { toolOutput: _hostOutput, ...operationOnlyRaw } = raw;
     const anchors = captureFineGrainedEvidence({
       hookType: "post_tool_use",
       toolName: "Edit",
-      toolInput: {
-        file_path: path,
-        old_string: "export const TTL = 3600;",
-        new_string: "export const TTL = 900;",
-      },
-      toolOutput: "ok",
+      toolInput,
+      toolOutput: entry.toolOutput ?? "ok",
       cwd: root,
       referencedFiles: [path],
-      observationType: "file_edit",
+      observation,
+      operationOnlyObservation: buildSyntheticCompression(operationOnlyRaw),
     });
-    if (!anchors || anchors.completeness !== "complete") {
-      throw new Error(`corpus case did not capture a complete anchor: ${entry.id}`);
+    if (!anchors) {
+      throw new Error(`corpus case did not capture an anchor: ${entry.id}`);
     }
+    const commitments = hashFileCommitments([path], root);
     const provenance: Provenance = {
       cwd: root,
       files: [path],
-      fileHashes: hashFiles([path], root),
-      fileHashesNormalized: hashFilesNormalized([path], root),
+      fileHashes: commitments.fileHashes,
+      fileHashesNormalized: commitments.fileHashesNormalized,
       anchors,
     };
     const capturedWholeHash = provenance.fileHashes![path]!;
     writeFileSync(join(root, path), entry.mutationContent, "utf8");
-    const wholeFileWouldBlock = hashFiles([path], root)[path] !== capturedWholeHash;
-    const verdict = classifyProvenance(provenance, root);
+    const wholeFileWouldBlock =
+      hashFileCommitments([path], root).fileHashes[path] !== capturedWholeHash;
+    const verdict = classifyProvenance(provenance, root, {
+      fineGrainedClaim: fineGrainedClaimForObservation(observation),
+    });
     const fineGrainedCurrent =
-      verdict.sourceStatus === "matched" && verdict.status !== "stale";
+      verdict.status === "verified" || verdict.status === "cosmetic";
     return {
       id: entry.id,
       expectedCurrent: entry.expectedCurrent,
+      expectedCompleteness: entry.expectedCompleteness ?? "complete",
       wholeFileWouldBlock,
       fineGrainedCurrent,
+      captureCompleteness: anchors.completeness,
       anchorStatus: verdict.fineGrained?.status ?? "missing",
     };
   });
@@ -93,10 +124,17 @@ try {
     wholeFileFalseBlocks: valid.filter((entry) => entry.wholeFileWouldBlock).length,
     fineGrainedFalseBlocks: valid.filter((entry) => !entry.fineGrainedCurrent).length,
     missedInvalidations: invalid.filter((entry) => entry.fineGrainedCurrent).length,
+    completenessMismatches: results.filter(
+      (entry) => entry.captureCompleteness !== entry.expectedCompleteness,
+    ).length,
     results,
   };
   console.log(JSON.stringify(report, null, 2));
-  if (report.fineGrainedFalseBlocks !== 0 || report.missedInvalidations !== 0) {
+  if (
+    report.fineGrainedFalseBlocks !== 0 ||
+    report.missedInvalidations !== 0 ||
+    report.completenessMismatches !== 0
+  ) {
     process.exitCode = 1;
   }
 } finally {

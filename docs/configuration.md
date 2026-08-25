@@ -18,7 +18,7 @@ these at boot and the CLI bakes `MEMWARDEN_*` tuning into the service unit).
 | `MEMWARDEN_CONSOLIDATE_IMPORTANCE_FLOOR` | `5` | observations above this importance are protected from proactive consolidation |
 | `MEMWARDEN_SECRET` | unset | bearer token for the REST API and the proxy (clients send it as their API key) |
 | `MEMWARDEN_INJECT` | on | `off` disables ALL auto-injection (SessionStart, Déjà Fix, proxy); the recall prompt and MCP tools still work |
-| `MEMWARDEN_RECALL_POLICY` | `balanced` | current/automatic inclusion floor: `verified-only` includes ONLY hash-verified-current memory (strict ASI06 stance); `balanced` blocks source-drifted/unverifiable memory and keeps verified, sourced, and unsourced results labeled. Classification always runs. |
+| `MEMWARDEN_RECALL_POLICY` | `balanced` | current/automatic inclusion floor: `verified-only` includes raw-verified and normalized-content-current (`source-cosmetic`) memory; `balanced` also keeps sourced and unsourced results labeled while blocking source-drifted/unverifiable memory. Classification always runs. |
 | `MEMWARDEN_CAPTURE` | on | `off` disables ALL auto-capture (PostToolUse hook, proxy tee) |
 | `MEMWARDEN_UPSTREAM_URL` | unset | upstream OpenAI-compatible base URL; enables the proxy |
 | `MEMWARDEN_UPSTREAM_KEY` | unset | API key forwarded to the upstream (omit for local models) |
@@ -30,8 +30,8 @@ Code-backed knowledge is distilled, never dropped. Consolidation uses the primar
 candidate bucket; it folds observations only when a deterministic identity establishes that their
 claim payload and trust-relevant evidence are equivalent. Claim comparison normalizes Unicode,
 whitespace, and fact/concept ordering, but does not ignore case, punctuation, code symbols, or
-numbers. Evidence comparison includes the file set and hashes, cwd, command, agent, and
-`mixedTrust`/confirmation state. Capture time may differ when all of that evidence is otherwise the
+numbers. Evidence comparison includes the file set, raw and normalized hashes, cwd, command, agent,
+and `mixedTrust`/confirmation state. Capture time may differ when all of that evidence is otherwise the
 same. Each resulting Memory keeps the structured facts, concepts, source-observation ids, and one
 verbatim provenance record for that evidence-equivalent claim.
 
@@ -56,6 +56,10 @@ is durable.
 
 `memory_search` always classifies every returned item and labels all three output shapes (`full`,
 `compact`, and `narrative`) with `trust`, `source_status`, `captured_at`, and an evidence summary.
+Ordinary text-file capture stores both a raw-byte hash and a normalized-content commitment. Exact raw
+matches remain `source-verified`; a normalized-only match (for example LF capture recalled from a
+CRLF checkout) is current but honestly labeled `source-cosmetic`. Binary/invalid UTF-8 files keep raw
+hashes only. Mixed-trust or partially hashed evidence can never be upgraded by one normalized match.
 The mode changes inclusion only:
 
 - `current` (the MCP default) excludes source-drifted, superseded, and cross-project unverifiable

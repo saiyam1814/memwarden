@@ -6,7 +6,7 @@
     "expectedCurrent": true
   },
   {
-    "id": "line-shift-before-anchor",
+    "id": "line-shift-stable-context",
     "captureContent": "// policy\nexport const TTL = 900;\n",
     "mutationContent": "// generated heading\n// policy\nexport const TTL = 900;\n",
     "expectedCurrent": true
@@ -27,6 +27,20 @@
     "id": "anchored-unit-removed",
     "captureContent": "export const TTL = 900;\nexport const RETRIES = 3;\n",
     "mutationContent": "export const RETRIES = 3;\n",
+    "expectedCurrent": false
+  },
+  {
+    "id": "unsupported-security-claim",
+    "captureContent": "export const TTL = 900;\nexport const SECURITY_CHECKS = true;\n",
+    "mutationContent": "export const TTL = 900;\nexport const SECURITY_CHECKS = false;\n",
+    "toolOutput": "Security checks are disabled for every request",
+    "expectedCompleteness": "partial",
+    "expectedCurrent": false
+  },
+  {
+    "id": "same-snippet-different-context",
+    "captureContent": "function authPolicy() {\n  export const TTL = 900;\n}\nfunction decoy() {\n}\n",
+    "mutationContent": "function authPolicy() {\n}\nfunction decoy() {\n  export const TTL = 900;\n}\n",
     "expectedCurrent": false
   }
 ]
