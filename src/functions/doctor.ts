@@ -19,14 +19,8 @@ import type { StateKV } from "../state/kv.js";
 import type { CompressedObservation, Memory, Session } from "./types.js";
 import { KV } from "../state/schema.js";
 import { classifyProvenance } from "./verify.js";
+import { gitProjectKey } from "./git-identity.js";
 import { memoryToObservation } from "./memory-utils.js";
-import {
-  hasProjectIdentity,
-  projectIdentityMatchesPath,
-  resolveMemoryIdentity,
-  sessionProjectIdentity,
-  type ProjectIdentity,
-} from "./memory-identity.js";
 import { canonicalizePath } from "./paths.js";
 import { getDataDir } from "./config.js";
 import { logger } from "./logger.js";
@@ -103,21 +97,13 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
       };
       const conflictCandidates: CompressedObservation[] = [];
 
-      // Resolve sessions once: distilled Memory rows live outside session
-      // scopes, but their source session is the compatibility bridge for rows
-      // written before projectPath/projectKey existed.
-      const sessions = await kv.list<Session>(KV.sessions).catch(() => []);
-      const sessionsById = new Map(sessions.map((session) => [session.id, session]));
-      const inScope = (identity: ProjectIdentity): boolean =>
-        !projectFilter ||
-        (hasProjectIdentity(identity) &&
-          projectIdentityMatchesPath(identity, projectFilter));
-      const audit = (obs: CompressedObservation, identity: ProjectIdentity) => {
+      // Same-project memories from another worktree/moved checkout must be
+      // verified against THIS checkout's files (see classifyProvenance opts).
+      const rootKey = gitProjectKey(root);
+      const audit = (obs: CompressedObservation, sessionKey?: string) => {
         report.total++;
-        // A stable-key match may widen which memory is audited, but the value
-        // passed to the verifier is always `root`, the caller's real checkout.
         const verdict = classifyProvenance(obs.provenance, root, {
-          verifyAgainstRoot: projectIdentityMatchesPath(identity, root),
+          verifyAgainstRoot: sessionKey !== undefined && sessionKey === rootKey,
         });
         const entry: DoctorEntry = { id: obs.id, title: obs.title, reason: verdict.reason };
         switch (verdict.status) {
@@ -139,14 +125,18 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
         }
       };
 
-      // Memories (distilled / imported scope).
+      // Memories (mem::remember scope).
       try {
         const memories = await kv.list<Memory>(KV.memories);
-        for (const memory of memories) {
-          if (memory.isLatest === false) continue;
-          const identity = resolveMemoryIdentity(memory, sessionsById);
-          if (!inScope(identity)) continue;
-          audit(memoryToObservation(memory, identity), identity);
+        for (const m of memories) {
+          if (m.isLatest === false) continue;
+          if (
+            projectFilter &&
+            m.project &&
+            canonicalizePath(m.project) !== projectFilter
+          )
+            continue;
+          audit(memoryToObservation(m));
         }
       } catch (err) {
         logger.warn("doctor: failed to load memories", {
@@ -154,15 +144,19 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
         });
       }
 
-      // Per-session observations, optionally scoped by project/cwd with the
-      // exact same path-or-stable-key predicate as distilled memories.
-      for (const session of sessions) {
-        const identity = sessionProjectIdentity(session);
-        if (!inScope(identity)) continue;
+      // Per-session observations, optionally scoped by project/cwd.
+      const sessions = await kv.list<Session>(KV.sessions).catch(() => []);
+      for (const s of sessions) {
+        if (
+          projectFilter &&
+          s.project &&
+          canonicalizePath(s.project) !== projectFilter
+        )
+          continue;
         const obs = await kv
-          .list<CompressedObservation>(KV.observations(session.id))
+          .list<CompressedObservation>(KV.observations(s.id))
           .catch(() => []);
-        for (const observation of obs) audit(observation, identity);
+        for (const o of obs) audit(o, s.projectKey);
       }
 
       report.conflicts = detectConflicts(conflictCandidates);

@@ -168,16 +168,6 @@ export interface Memory {
   imageRef?: string;
   imageData?: string;
   agentId?: string;
-  /** Capture-time project filesystem path. Kept separate from projectKey so
-   * verification always has a real checkout path to read. */
-  projectPath?: string;
-  /** Stable git-derived identity (or canonical path fallback) used only to
-   * widen same-project scope across worktrees/moved clones. */
-  projectKey?: string;
-  /** Capture-time working directory for relative provenance paths. */
-  captureCwd?: string;
-  /** @deprecated Legacy overloaded path/key field. Readers migrate/fallback
-   * through resolveMemoryIdentity; new writers must not populate it. */
   project?: string;
   provenance?: Provenance; // evidence trail for Verified Recall
 }

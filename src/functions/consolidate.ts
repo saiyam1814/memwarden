@@ -45,11 +45,6 @@ import {
   vectorIndexAddGuarded,
 } from "./search.js";
 import { memoryToObservation } from "./memory-utils.js";
-import {
-  resolveMemoryIdentity,
-  sessionProjectIdentity,
-  type ProjectIdentity,
-} from "./memory-identity.js";
 import { getAccessLog, deleteAccessLog } from "./access-tracker.js";
 import { logger } from "./logger.js";
 
@@ -101,14 +96,12 @@ function unique(values: Iterable<string>): string[] {
 
 interface Grouped {
   key: string;
-  /** Stable key when available, otherwise the legacy project path. Used only
-   * for grouping/id generation — never as a filesystem verification root. */
-  identityKey: string;
+  project: string;
   primaryFile: string;
-  members: DistillMember[];
+  members: Array<{ sessionId: string; obs: CompressedObservation }>;
 }
 
-export interface DistillMember extends ProjectIdentity {
+export interface DistillMember {
   sessionId: string;
   obs: CompressedObservation;
 }
@@ -132,29 +125,24 @@ export interface DistillMember extends ProjectIdentity {
 export async function distillMembers(
   kv: StateKV,
   args: {
-    projectIdentity: string;
+    project: string;
     primaryFile: string;
     members: DistillMember[];
     now: number;
   },
 ): Promise<{ memId: string; folded: number } | null> {
-  const { projectIdentity, primaryFile, members, now } = args;
+  const { project, primaryFile, members, now } = args;
   if (members.length === 0) return null;
   const nowIso = new Date(now).toISOString();
   const idx = getSearchIndex();
 
   const groupObs = members.map((m) => m.obs);
   const newest = newestOf(groupObs);
-  const newestMember = members.find((member) => member.obs === newest) ?? members[0]!;
-  // Same (identity, file) key the group map uses, so a promotion and a later
+  // Same (project, file) key the group map uses, so a promotion and a later
   // consolidation of the same file converge on ONE memory id rather than
-  // creating a second copy. identity may be stable, but it is NEVER passed to
-  // the verifier as though it were a path.
-  const memId = fingerprintId("mem", `${projectIdentity}\n${primaryFile}`);
+  // creating a second copy.
+  const memId = fingerprintId("mem", `${project}\n${primaryFile}`);
   const existing = await kv.get<Memory>(KV.memories, memId).catch(() => null);
-  const existingIdentity = existing
-    ? resolveMemoryIdentity(existing)
-    : undefined;
 
   const concepts = unique(groupObs.flatMap((o) => o.concepts ?? [])).slice(0, 24);
   const files = unique([
@@ -177,15 +165,6 @@ export async function distillMembers(
     10,
     5 + Math.floor(Math.log2(Math.max(2, sourceObservationIds.length))),
   );
-  // Identity follows the observation whose provenance/content won. The
-  // capture path stays a path even when the grouping identity is a git key.
-  const projectPath =
-    newestMember.projectPath ?? existingIdentity?.projectPath;
-  const projectKey = newestMember.projectKey ?? existingIdentity?.projectKey;
-  const captureCwd =
-    newest.provenance?.cwd ??
-    newestMember.captureCwd ??
-    existingIdentity?.captureCwd;
 
   const memory: Memory = {
     id: memId,
@@ -202,9 +181,7 @@ export async function distillMembers(
     supersedes: sourceObservationIds,
     sourceObservationIds,
     isLatest: true,
-    ...(projectPath ? { projectPath } : {}),
-    ...(projectKey ? { projectKey } : {}),
-    ...(captureCwd ? { captureCwd } : {}),
+    ...(project !== "_" ? { project } : {}),
     // Carry the newest observation's provenance forward VERBATIM so the memory
     // verifies against the live file exactly as that observation would. No
     // synthetic hashes are ever invented.
@@ -301,29 +278,21 @@ export function registerConsolidateFunction(sdk: ISdk, kv: StateKV): void {
         } catch {
           continue;
         }
-        const identity = sessionProjectIdentity(session);
-        // Stable key first, including one derived now for a legacy Session
-        // that predates projectKey. It is an identity token only; the split
-        // path/key fields travel on each member for storage and verification.
-        const identityKey =
-          identity.projectKey ||
-          identity.projectPath ||
-          identity.captureCwd ||
-          "_";
+        const project = session.projectKey || session.project || "_";
         for (const obs of observations) {
           if (!CONSOLIDATABLE_TYPES.has(obs.type)) continue;
           const files = obs.provenance?.files ?? obs.files;
           const primaryFile = files?.find((f) => f && f.trim());
           if (!primaryFile) continue;
           // Newline delimiter: cannot appear in a project key or a file path,
-          // so (identity, file) can never ambiguously collide.
-          const key = `${identityKey}\n${primaryFile}`;
+          // so (project, file) can never ambiguously collide.
+          const key = `${project}\n${primaryFile}`;
           let g = groups.get(key);
           if (!g) {
-            g = { key, identityKey, primaryFile, members: [] };
+            g = { key, project, primaryFile, members: [] };
             groups.set(key, g);
           }
-          g.members.push({ sessionId: session.id, obs, ...identity });
+          g.members.push({ sessionId: session.id, obs });
         }
       }
 
@@ -358,7 +327,7 @@ export function registerConsolidateFunction(sdk: ISdk, kv: StateKV): void {
         if (foldable.length < threshold) continue; // not worth collapsing
 
         const r = await distillMembers(kv, {
-          projectIdentity: g.identityKey,
+          project: g.project,
           primaryFile: g.primaryFile,
           members: foldable,
           now,

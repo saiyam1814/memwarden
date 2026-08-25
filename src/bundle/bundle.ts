@@ -12,7 +12,6 @@
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { DEJAFIX_SCOPE, type FixMemory } from "../functions/dejafix.js";
-import { migrateLegacyMemoryIdentity } from "../functions/memory-identity.js";
 import type {
   CompressedObservation,
   Memory,
@@ -56,10 +55,7 @@ function countObservations(map: Record<string, CompressedObservation[]>): number
 /** Gather the durable store into a portable bundle. */
 export async function exportBundle(kv: StateKV): Promise<BrainBundle> {
   const sessions = await kv.list<Session>(KV.sessions).catch(() => []);
-  const sessionsById = new Map(sessions.map((session) => [session.id, session]));
-  const memories = (await kv.list<Memory>(KV.memories).catch(() => [])).map(
-    (memory) => migrateLegacyMemoryIdentity(memory, sessionsById),
-  );
+  const memories = await kv.list<Memory>(KV.memories).catch(() => []);
   const observations: Record<string, CompressedObservation[]> = {};
   for (const s of sessions) {
     observations[s.id] = await kv
@@ -122,20 +118,11 @@ export async function importBundle(
       `unsupported brain bundle version ${bundle.version} (expected ${BRAIN_BUNDLE_VERSION})`,
     );
   }
-  const sessionsById = new Map(
-    bundle.sessions.map((session) => [session.id, session]),
-  );
-  for (const session of bundle.sessions) {
-    await kv.set(KV.sessions, session.id, session);
+  for (const s of bundle.sessions) {
+    await kv.set(KV.sessions, s.id, s);
   }
-  for (const memory of bundle.memories) {
-    // Explicit one-way migration for portable legacy rows. The deprecated
-    // `project` alias is retained, but split fields become authoritative.
-    await kv.set(
-      KV.memories,
-      memory.id,
-      migrateLegacyMemoryIdentity(memory, sessionsById),
-    );
+  for (const m of bundle.memories) {
+    await kv.set(KV.memories, m.id, m);
   }
   for (const sessionId of Object.keys(bundle.observations)) {
     for (const o of bundle.observations[sessionId] ?? []) {

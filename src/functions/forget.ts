@@ -45,7 +45,6 @@ import { KV } from "../state/schema.js";
 import { getSearchIndex, vectorIndexRemove } from "./search.js";
 import { getAccessLog, deleteAccessLog } from "./access-tracker.js";
 import { distillMembers } from "./consolidate.js";
-import { sessionProjectIdentity } from "./memory-identity.js";
 import { logger } from "./logger.js";
 
 function ttlMs(): number {
@@ -127,16 +126,11 @@ export function registerForgetFunction(sdk: ISdk, kv: StateKV): void {
           const provFiles = obs.provenance?.files ?? obs.files;
           const primaryFile = provFiles?.find((f) => f && f.trim());
           if (promote && primaryFile) {
-            const identity = sessionProjectIdentity(session);
-            const projectIdentity =
-              identity.projectKey ||
-              identity.projectPath ||
-              identity.captureCwd ||
-              "_";
+            const project = session.projectKey || session.project || "_";
             const r = await distillMembers(kv, {
-              projectIdentity,
+              project,
               primaryFile,
-              members: [{ sessionId: session.id, obs, ...identity }],
+              members: [{ sessionId: session.id, obs }],
               now,
             });
             if (r) promoted++;
