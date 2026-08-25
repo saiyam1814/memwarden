@@ -178,6 +178,28 @@ verifiable-erasure model - is in **[docs/architecture.md](docs/architecture.md)*
 | `memwarden export / import` | move your brain between machines |
 | `npm run demo:firewall` | the full firewall arc against a real daemon, byte-scan-proven erasure |
 
+## Beta release gate
+
+`npm run test:packed` builds the exact `npm pack` artifact, installs it into a clean project, and
+runs the public CLI, MCP stdio adapter, real daemon, authenticated HTTP API, and on-disk store with a
+temporary `HOME`, data directory, ports, git repository/worktree, and fixture agent configs. It proves:
+
+- install/status plus clean custom-port daemon start, restart, recovery, and shutdown;
+- hook capture, claim-lossless consolidation, MCP recall, current refusal, and labeled history;
+- durable manual saves across a real retention sweep and audit-to-adopt stale quarantine behavior;
+- Canon push, secret blocking, commit/worktree portability, fresh-brain pull, and fail-closed drift;
+- forged delimiter containment and erase/compact byte-scan cleanup.
+
+`npm run test:packed:smoke` is the fast PR subset on Linux, macOS, and Windows. The full release gate
+runs on Linux and macOS before publish; Linux additionally side-loads and exercises the TypeScript
+vector runtime, then the native backend when `@memwarden/turbovec` is available for that runner.
+Daemon and command logs are printed and archived on failure. Windows is intentionally the supported
+smoke subset, not a claim that service-manager or every full-release journey is implemented there.
+
+The gate proves today's conservative source-validity contract. Versioned claim supersession,
+fine-grained revalidation anchors, and richer daily memory management remain follow-up work in
+issues #61, #62, and #63 rather than hidden beta claims.
+
 ## 📚 Docs
 
 - **[Architecture](docs/architecture.md)** - data flow, the pipeline, tamper-evidence + erasure in full, source layout
