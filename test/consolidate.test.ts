@@ -1,8 +1,8 @@
 //
 // mem::consolidate-pipeline — folds only deterministically equivalent claims.
 // Verifies distinct same-file claims, true duplicates, mixed trust, repeated
-// snapshots, lockstep pruning, write failure, retention compaction, protection,
-// project isolation, and idempotent reinforcement (#57).
+// snapshots, legacy/imported rows, lockstep pruning, write failure, retention
+// compaction, protection, project isolation, and idempotent reinforcement (#57).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -12,12 +12,17 @@ import {
 } from "../src/kernel/index.js";
 import { StoreMemory } from "../src/state/store-memory.js";
 import { StateKV } from "../src/state/kv.js";
-import { KV } from "../src/state/schema.js";
+import { KV, fingerprintId } from "../src/state/schema.js";
 import {
   registerCoreFunctions,
   getSearchIndex,
 } from "../src/functions/index.js";
 import { recordAccess } from "../src/functions/access-tracker.js";
+import {
+  BRAIN_BUNDLE_KIND,
+  BRAIN_BUNDLE_VERSION,
+  importBundle,
+} from "../src/bundle/bundle.js";
 import type { CompressedObservation, Memory } from "../src/functions/types.js";
 
 let sdk: Kernel;
@@ -66,6 +71,16 @@ async function session(id: string, project = "proj-a"): Promise<void> {
 async function seed(o: CompressedObservation): Promise<void> {
   await kv.set(KV.observations(o.sessionId), o.id, o);
   getSearchIndex().add(o);
+}
+
+async function importMemory(memory: Memory): Promise<void> {
+  await importBundle(kv, {
+    kind: BRAIN_BUNDLE_KIND,
+    version: BRAIN_BUNDLE_VERSION,
+    sessions: [],
+    memories: [memory],
+    observations: {},
+  });
 }
 
 function consolidate(now = Date.now()) {
@@ -309,6 +324,182 @@ describe("mem::consolidate-pipeline", () => {
     expect(afterSecond[0]!.version).toBe(2);
     expect(afterSecond[0]!.sourceObservationIds).toHaveLength(6);
     expect(afterSecond[0]!.content).toContain("the file was read");
+  });
+
+  it("keeps a legacy short per-file Memory beside the new claim-specific id", async () => {
+    await session("s1");
+    const legacyId = fingerprintId("mem", "proj-a\nsrc/auth.ts");
+    const legacy: Memory = {
+      id: legacyId,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      type: "fact",
+      title: "Imported legacy auth note",
+      content: "Legacy content must remain byte-for-byte intact.",
+      concepts: ["legacy"],
+      files: ["src/auth.ts"],
+      sessionIds: ["legacy-session"],
+      strength: 5,
+      version: 7,
+      sourceObservationIds: ["legacy-source"],
+      isLatest: true,
+      project: "proj-a",
+      provenance: { files: ["src/auth.ts"], command: "legacy-import" },
+    };
+    await importMemory(legacy);
+    for (let i = 0; i < 3; i++) await seed(obs({ id: `new-${i}` }));
+
+    const r = await consolidate();
+    expect(r.folded).toBe(3);
+    expect(await kv.get<Memory>(KV.memories, legacyId)).toEqual(legacy);
+    const memories = await kv.list<Memory>(KV.memories);
+    expect(memories).toHaveLength(2);
+    const claim = memories.find((memory) => memory.id !== legacyId)!;
+    // Legacy fingerprintId rows are mem_ + 16 hex; claim ids use all 64.
+    expect(legacyId).toHaveLength(20);
+    expect(claim.id).toHaveLength(68);
+    expect(claim.sourceObservationIds).toHaveLength(3);
+  });
+
+  it("migrates an imported fingerprint-less row only when its identity reconstructs exactly", async () => {
+    await session("s1");
+    for (let i = 0; i < 3; i++) await seed(obs({ id: `prior-${i}` }));
+    await consolidate();
+    const [canonical] = await kv.list<Memory>(KV.memories);
+    expect(canonical).toBeDefined();
+
+    const imported: Memory = {
+      ...canonical!,
+      strength: 9,
+      parentId: "import-parent",
+      relatedIds: ["related-memory"],
+      forgetAfter: "2030-01-01T00:00:00.000Z",
+      supersedes: [...(canonical!.supersedes ?? []), "legacy-superseded"],
+    };
+    delete imported.claimFingerprint;
+    delete imported.evidenceFingerprint;
+    await importMemory(imported);
+    for (let i = 0; i < 3; i++) await seed(obs({ id: `later-${i}` }));
+
+    const r = await consolidate();
+    expect(r.folded).toBe(3);
+    const [migrated] = await kv.list<Memory>(KV.memories);
+    expect(migrated!.id).toBe(canonical!.id);
+    expect(migrated!.version).toBe(2);
+    expect(migrated!.claimFingerprint).toBeDefined();
+    expect(migrated!.evidenceFingerprint).toBeDefined();
+    expect(migrated!.sourceObservationIds).toHaveLength(6);
+    expect(migrated!.supersedes).toContain("legacy-superseded");
+    expect(migrated!.strength).toBe(9);
+    expect(migrated!.parentId).toBe("import-parent");
+    expect(migrated!.relatedIds).toEqual(["related-memory"]);
+    expect(migrated!.forgetAfter).toBe("2030-01-01T00:00:00.000Z");
+  });
+
+  it("does not guess whether a fingerprint-less architecture row came from write or edit", async () => {
+    await session("s1");
+    const editObservation = (id: string): CompressedObservation =>
+      obs({
+        id,
+        type: "file_edit",
+        title: "Edited auth policy",
+        narrative: "Refresh rotation changed to 15 minutes.",
+        facts: ["rotation is 15 minutes"],
+        concepts: ["auth", "rotation"],
+      });
+    for (let i = 0; i < 3; i++) await seed(editObservation(`prior-${i}`));
+    await consolidate();
+    const [canonical] = await kv.list<Memory>(KV.memories);
+    expect(canonical?.type).toBe("architecture");
+
+    const imported: Memory = { ...canonical! };
+    delete imported.claimFingerprint;
+    delete imported.evidenceFingerprint;
+    await importMemory(imported);
+    for (let i = 0; i < 3; i++) await seed(editObservation(`later-${i}`));
+
+    const r = await consolidate();
+    expect(r.folded).toBe(3);
+    expect(await kv.get<Memory>(KV.memories, imported.id)).toEqual(imported);
+    const memories = await kv.list<Memory>(KV.memories);
+    expect(memories).toHaveLength(2);
+    expect(memories.some((memory) => memory.id.startsWith("mem_claim_"))).toBe(true);
+  });
+
+  it("preserves an incompatible imported occupant and retains the claim in a fallback Memory", async () => {
+    await session("s1");
+    for (let i = 0; i < 3; i++) await seed(obs({ id: `prior-${i}` }));
+    await consolidate();
+    const [canonical] = await kv.list<Memory>(KV.memories);
+    expect(canonical).toBeDefined();
+
+    const imported: Memory = {
+      ...canonical!,
+      title: "Unrelated imported decision",
+      content: "This content must never be overwritten.",
+      facts: ["unrelated imported claim"],
+      concepts: ["imported"],
+      sourceObservationIds: ["imported-source"],
+      sessionIds: ["imported-session"],
+      version: 41,
+    };
+    delete imported.claimFingerprint;
+    delete imported.evidenceFingerprint;
+    await importMemory(imported);
+    for (let i = 0; i < 3; i++) await seed(obs({ id: `new-${i}` }));
+
+    const r = await consolidate();
+    expect(r.consolidated).toBe(1);
+    expect(r.folded).toBe(3);
+    expect(await kv.get<Memory>(KV.memories, imported.id)).toEqual(imported);
+
+    const memories = await kv.list<Memory>(KV.memories);
+    expect(memories).toHaveLength(2);
+    const retained = memories.find((memory) => memory.id !== imported.id)!;
+    expect(retained.id).toMatch(/^mem_claim_[a-f0-9]{64}$/);
+    expect(retained.content).toContain("the file was read");
+    expect(retained.sourceObservationIds).toHaveLength(3);
+    for (let i = 0; i < 3; i++) {
+      expect(await kv.get(KV.observations("s1"), `new-${i}`)).toBeNull();
+    }
+  });
+
+  it("refuses two incompatible imported occupants and leaves every source intact", async () => {
+    await session("s1");
+    for (let i = 0; i < 3; i++) await seed(obs({ id: `prior-${i}` }));
+    await consolidate();
+    const [canonical] = await kv.list<Memory>(KV.memories);
+    expect(canonical).toBeDefined();
+
+    const digest = canonical!.id.slice("mem_".length);
+    const occupied = (id: string, label: string): Memory => {
+      const memory: Memory = {
+        ...canonical!,
+        id,
+        title: `${label} imported memory`,
+        content: `${label} must survive`,
+        facts: [`${label} unrelated claim`],
+        sourceObservationIds: [`${label}-source`],
+        version: 9,
+      };
+      delete memory.claimFingerprint;
+      delete memory.evidenceFingerprint;
+      return memory;
+    };
+    const primary = occupied(canonical!.id, "primary");
+    const fallback = occupied(`mem_claim_${digest}`, "fallback");
+    await importMemory(primary);
+    await importMemory(fallback);
+    for (let i = 0; i < 3; i++) await seed(obs({ id: `blocked-${i}` }));
+
+    const r = await consolidate();
+    expect(r.consolidated).toBe(0);
+    expect(r.folded).toBe(0);
+    expect(await kv.get<Memory>(KV.memories, primary.id)).toEqual(primary);
+    expect(await kv.get<Memory>(KV.memories, fallback.id)).toEqual(fallback);
+    for (let i = 0; i < 3; i++) {
+      expect(await kv.get(KV.observations("s1"), `blocked-${i}`)).not.toBeNull();
+    }
   });
 
   it("preserves repeated file versions as separate claim/evidence memories", async () => {

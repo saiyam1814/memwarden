@@ -35,6 +35,12 @@ numbers. Evidence comparison includes the file set and hashes, cwd, command, age
 same. Each resulting Memory keeps the structured facts, concepts, source-observation ids, and one
 verbatim provenance record for that evidence-equivalent claim.
 
+Legacy per-file Memory ids used 16 hex characters while claim-specific ids use the full 64-character
+digest, so the two formats cannot collide. An imported fingerprint-less row that explicitly uses a
+claim id is migrated only when all reconstructible claim and evidence fields match. Otherwise the
+imported row remains untouched and the new claim uses a deterministic fallback id; if that fallback
+is also occupied, the source observations remain intact for inspection and retry.
+
 Consequently, repeated copies of the same claim against the same file snapshot collapse to one
 active Memory row and bound duplicate-row growth. Distinct claims about one file, changed file
 hashes, and mixed-trust or hashless evidence remain separate and independently searchable. At the
