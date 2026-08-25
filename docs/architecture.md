@@ -20,8 +20,8 @@ flowchart TB
   subgraph Recall
     A1 -->|recall request| R1[Project scoping by canonical path]
     R1 --> R2[Hybrid BM25 + vector search, RRF]
-    R2 --> R3[Provenance classifier: verified / sourced / stale / unsourced]
-    R3 --> R4[Recall policy: balanced blocks stale / verified-only blocks all-but-verified]
+    R2 --> R3[Always-on provenance classifier: verified / sourced / source-drifted / unsourced / unverifiable]
+    R3 --> R4[Inclusion policy: current / historical / all; verified-only raises the current floor]
     R4 --> R5[Untrusted-data framing]
     R5 --> A1
   end
@@ -40,9 +40,11 @@ flowchart TB
 3. **Store and chain.** Every write lands in the SHA-256 hash-chained oplog, so the store is
    tamper-evident and `memory_verify` can confirm the chain is intact.
 4. **Verified recall.** Hybrid BM25 + vector search (RRF), scoped to your project by canonical
-   path (symlinks and path spellings resolved, so recall never silently misses), firewalled so
-   stale memory never reaches the model, packed under a token budget. Contradictions are surfaced
-   by `doctor` as advisories - recall never silently drops a true memory.
+   path (symlinks and path spellings resolved, so recall never silently misses), classifies every
+   hit before applying current/historical/all inclusion. Current recall refuses source drift;
+   deliberate history remains labeled and temporally framed. Results are packed under a token
+   budget. Contradictions are surfaced by `doctor` as advisories - recall never silently drops a
+   true memory on a fuzzy heuristic.
 
 ## Tamper-evidence and erasure, in full
 
