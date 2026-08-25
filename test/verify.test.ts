@@ -22,7 +22,11 @@ import {
 import { StoreLibsql } from "../src/state/store-libsql.js";
 import { StateKV } from "../src/state/kv.js";
 import { registerCoreFunctions, getSearchIndex } from "../src/functions/index.js";
-import { classifyProvenance, hashFiles } from "../src/functions/verify.js";
+import {
+  classifyProvenance,
+  hashFileCommitments,
+  hashFiles,
+} from "../src/functions/verify.js";
 import { extractProvenance } from "../src/functions/provenance.js";
 import type { Provenance } from "../src/functions/types.js";
 
@@ -81,6 +85,85 @@ describe("classifyProvenance", () => {
       classifyProvenance(prov, b, { verifyAgainstRoot: true }).status,
     ).toBe("stale");
     expect(classifyProvenance(prov, b).status).toBe("verified");
+  });
+
+  it("treats LF capture and CRLF recall as cosmetic/current without losing the raw commitment", () => {
+    const capture = repo();
+    const checkout = repo();
+    writeFileSync(join(capture, "policy.ts"), "export const TTL = 15;\n");
+    writeFileSync(join(checkout, "policy.ts"), "export const TTL = 15;\r\n");
+    const commitments = hashFileCommitments(["policy.ts"], capture);
+    const prov: Provenance = {
+      cwd: capture,
+      files: ["policy.ts"],
+      ...commitments,
+    };
+
+    expect(commitments.fileHashes["policy.ts"]).toBeDefined();
+    expect(commitments.fileHashesNormalized["policy.ts"]).toBeDefined();
+    expect(hashFiles(["policy.ts"], checkout)["policy.ts"]).not.toBe(
+      commitments.fileHashes["policy.ts"],
+    );
+    expect(classifyProvenance(prov, capture).status).toBe("verified");
+    const cosmetic = classifyProvenance(prov, checkout, {
+      verifyAgainstRoot: true,
+    });
+    expect(cosmetic.status).toBe("cosmetic");
+    expect(cosmetic.reason).toMatch(/line endings|trailing whitespace/);
+
+    writeFileSync(join(checkout, "policy.ts"), "export const TTL = 60;\r\n");
+    expect(
+      classifyProvenance(prov, checkout, { verifyAgainstRoot: true }).status,
+    ).toBe("stale");
+  });
+
+  it("never lets normalized subset evidence certify mixed or incomplete content", () => {
+    const capture = repo();
+    const checkout = repo();
+    for (const root of [capture, checkout]) {
+      writeFileSync(
+        join(root, "policy.ts"),
+        root === capture ? "policy\n" : "policy\r\n",
+      );
+      writeFileSync(join(root, "unchecked.ts"), "unchecked\n");
+    }
+    const commitments = hashFileCommitments(["policy.ts"], capture);
+    const mixed: Provenance = {
+      cwd: capture,
+      files: ["policy.ts"],
+      ...commitments,
+      mixedTrust: true,
+    };
+    expect(
+      classifyProvenance(mixed, checkout, { verifyAgainstRoot: true }).status,
+    ).toBe("sourced_unverified");
+
+    const incomplete: Provenance = {
+      cwd: capture,
+      files: ["policy.ts", "unchecked.ts"],
+      ...commitments,
+    };
+    expect(
+      classifyProvenance(incomplete, checkout, { verifyAgainstRoot: true })
+        .status,
+    ).toBe("sourced_unverified");
+  });
+
+  it("does not create normalized commitments for binary evidence", () => {
+    const capture = repo();
+    const checkout = repo();
+    writeFileSync(join(capture, "blob.bin"), Buffer.from([0, 1, 2, 3]));
+    writeFileSync(join(checkout, "blob.bin"), Buffer.from([0, 1, 2, 4]));
+    const commitments = hashFileCommitments(["blob.bin"], capture);
+    expect(commitments.fileHashes["blob.bin"]).toBeDefined();
+    expect(commitments.fileHashesNormalized).toEqual({});
+    expect(
+      classifyProvenance(
+        { cwd: capture, files: ["blob.bin"], ...commitments },
+        checkout,
+        { verifyAgainstRoot: true },
+      ).status,
+    ).toBe("stale");
   });
 
   it("verifyAgainstRoot re-roots ABSOLUTE files captured under the capture cwd (worktree false-verified)", () => {
@@ -274,6 +357,40 @@ describe("Verified Recall firewall (safe_only)", () => {
       expect(await search(root, true)).toBe(1);
       // Explicit unfiltered lookups are never policy-filtered.
       expect(await search(root, false)).toBeGreaterThanOrEqual(2);
+    } finally {
+      delete process.env.MEMWARDEN_RECALL_POLICY;
+    }
+  });
+
+  it("keeps normalized-content-current memory under verified-only with cosmetic labels", async () => {
+    const root = repo();
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "src", "auth.ts"), "// bearer auth tokens\n");
+    await observe(root, "src/auth.ts", "auth uses bearer auth tokens");
+    writeFileSync(join(root, "src", "auth.ts"), "// bearer auth tokens\r\n");
+
+    process.env.MEMWARDEN_RECALL_POLICY = "verified-only";
+    try {
+      const result = (await sdk.trigger({
+        function_id: "mem::search",
+        payload: {
+          query: "bearer auth tokens",
+          cwd: root,
+          project: root,
+          limit: 10,
+          safe_only: true,
+          format: "compact",
+        },
+      })) as {
+        results: Array<{ trust: string; source_status: string; historical: boolean }>;
+      };
+      expect(result.results).toEqual([
+        expect.objectContaining({
+          trust: "cosmetic",
+          source_status: "source-cosmetic",
+          historical: false,
+        }),
+      ]);
     } finally {
       delete process.env.MEMWARDEN_RECALL_POLICY;
     }

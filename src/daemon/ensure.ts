@@ -7,7 +7,7 @@
 // the loop.
 
 import { spawn } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { chmodSync, closeSync, mkdirSync, openSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -52,12 +52,28 @@ export async function ensureDaemon(
   if (await daemonAlive(url)) return "already";
   // libSQL won't create the data directory; make it so the daemon can open
   // its db instead of crashing on boot.
-  mkdirSync(dataDir, { recursive: true });
-  const child = spawn(process.execPath, [DAEMON_ENTRY], {
-    detached: true,
-    stdio: "ignore",
-    env: { ...process.env, MEMWARDEN_DATA_DIR: dataDir },
-  });
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  // Detached fallbacks need the same diagnosability as managed services. Keep
+  // stdout/stderr in the isolated brain so release gates can archive it and a
+  // user can inspect startup/shutdown failures instead of losing them to
+  // stdio="ignore".
+  const logPath = join(dataDir, "daemon.log");
+  const logFd = openSync(logPath, "a", 0o600);
+  try {
+    chmodSync(logPath, 0o600);
+  } catch {
+    // Best-effort on filesystems that do not implement POSIX permissions.
+  }
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(process.execPath, [DAEMON_ENTRY], {
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+      env: { ...process.env, MEMWARDEN_DATA_DIR: dataDir },
+    });
+  } finally {
+    closeSync(logFd);
+  }
   child.unref();
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {

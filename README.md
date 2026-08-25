@@ -19,7 +19,7 @@ npx memwarden audit <your-memory-store>     # zero-install: audit the memory you
 npm install -g memwarden && memwarden up    # persistent: wire every agent, one command
 ```
 
-[Quick start](#-quick-start) · [Why](#-why-memwarden) · [Trust states](#-the-four-trust-states) · [Compatibility](#-compatibility) · [How it works](#-how-it-works) · [Docs](#-docs)
+[Quick start](#-quick-start) · [Why](#-why-memwarden) · [Trust states](#-the-five-trust-states) · [Compatibility](#-compatibility) · [How it works](#-how-it-works) · [Docs](#-docs)
 
 </div>
 
@@ -79,13 +79,14 @@ memwarden flips the default: **memory is untrusted until its source still checks
 | 📌 **Portable proof** | `canon push` commits verified memory to your repo; **any clone re-verifies it locally** - no server, no account. A CI gate fails the PR when a memory references code the PR changed. |
 | 🔒 **Self-custodied** | Lives at `~/.memwarden`, on-device, two runtime deps, no cloud, no API key. `export`/`import` to move it. |
 
-## 🚦 The four trust states
+## 🚦 The five trust states
 
 Every search hit is classified against its source before an inclusion policy decides whether it can reach a model:
 
 | State | Meaning | Firewall |
 | --- | --- | --- |
-| 🟢 `verified` | a captured source-file hash still matches the file on disk - code-backed and current | **injected** (only content-hash-confirmed memory earns this) |
+| 🟢 `verified` | captured raw bytes still match exactly - code-backed and current | **injected** (only byte-identical memory earns this label) |
+| `cosmetic` / `source-cosmetic` | captured normalized text still matches; only CRLF/LF or trailing whitespace differs | **current and injected**, but never mislabeled byte-verified |
 | 🔵 `sourced` | has a source (command, or files present but not hashable), no content hash to re-check | injected, **labeled** |
 | 🟠 `stale` / `source-drifted` | a referenced file was deleted or its content changed since capture | **blocked from current recall**; explicit history only |
 | ⚪ `unsourced` | no provenance at all | included by balanced recall, always **labeled** (unverified ≠ dangerous) |
@@ -93,9 +94,9 @@ Every search hit is classified against its source before an inclusion policy dec
 Classification always runs; policy controls **inclusion**, not whether a result gets a verdict. Every
 `full`, `compact`, and `narrative` search result carries `trust`, `source_status`, capture time, and an
 evidence summary. **`balanced`** (default) current recall blocks source-drifted/unverifiable records and
-keeps verified, sourced, and unsourced records labeled - "not detected stale" is not "proven safe."
-**`verified-only`** raises the current/automatic recall floor so only hash-verified memory is included
-(for hostile-repo threat models).
+keeps verified, cosmetic-current, sourced, and unsourced records labeled - "not detected stale" is not
+"proven safe." **`verified-only`** raises the current/automatic recall floor to raw-verified or
+normalized-content-current memory (for hostile-repo threat models); the label still distinguishes them.
 
 MCP `memory_search` is project-scoped with `mode: "current"` by default. `mode: "historical"` deliberately
 returns only source-drifted or superseded records, framed with capture time and evidence;
@@ -150,14 +151,14 @@ flowchart TB
   C --> S[("libSQL · hash-chained oplog · BM25 + vector index")]
   A -->|recall| P[Project scoping by canonical path]
   P --> H[Hybrid BM25 + vector search · RRF]
-  H --> V["Provenance classifier: verified / sourced / stale / unsourced"]
+  H --> V["Provenance classifier: verified / cosmetic / sourced / stale / unsourced"]
   V --> R[Recall policy + untrusted-data framing]
   R --> A
 ```
 
-Capture compresses raw tool output (no LLM), redacts secrets, and hashes referenced files. Recall runs
-hybrid BM25 + vector search scoped by canonical path, classifies each hit against the live repo, applies
-the policy, and frames what passes as untrusted data. Full detail - including the tamper-evidence and
+Capture compresses raw tool output (no LLM), redacts secrets, and stores raw plus normalized text
+commitments for referenced files. Recall runs hybrid BM25 + vector search scoped by canonical path,
+classifies each hit against the live repo, applies the policy, and frames what passes as untrusted data. Full detail - including the tamper-evidence and
 verifiable-erasure model - is in **[docs/architecture.md](docs/architecture.md)**.
 
 ## ⌨️ Command cheat sheet
@@ -177,6 +178,28 @@ verifiable-erasure model - is in **[docs/architecture.md](docs/architecture.md)*
 | `memwarden compact --prune-history` | reclaim disk by dropping superseded payload copies; the hash chain still verifies |
 | `memwarden export / import` | move your brain between machines |
 | `npm run demo:firewall` | the full firewall arc against a real daemon, byte-scan-proven erasure |
+
+## Beta release gate
+
+`npm run test:packed` builds the exact `npm pack` artifact, installs it into a clean project, and
+runs the public CLI, MCP stdio adapter, real daemon, authenticated HTTP API, and on-disk store with a
+temporary `HOME`, data directory, ports, git repository/worktree, and fixture agent configs. It proves:
+
+- install/status plus clean custom-port daemon start, restart, recovery, and shutdown;
+- hook capture, claim-lossless consolidation, MCP recall, current refusal, and labeled history;
+- durable manual saves across a real retention sweep and audit-to-adopt stale quarantine behavior;
+- Canon push, secret blocking, commit/worktree portability, fresh-brain pull, and fail-closed drift;
+- forged delimiter containment and erase/compact byte-scan cleanup.
+
+`npm run test:packed:smoke` is the fast PR subset on Linux, macOS, and Windows. The full release gate
+runs on Linux and macOS before publish; Linux additionally side-loads and exercises the TypeScript
+vector runtime, then the native backend when `@memwarden/turbovec` is available for that runner.
+Daemon and command logs are printed and archived on failure. Windows is intentionally the supported
+smoke subset, not a claim that service-manager or every full-release journey is implemented there.
+
+The gate proves today's conservative source-validity contract. Versioned claim supersession,
+fine-grained revalidation anchors, and richer daily memory management remain follow-up work in
+issues #61, #62, and #63 rather than hidden beta claims.
 
 ## 📚 Docs
 

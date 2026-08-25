@@ -34,7 +34,8 @@ import {
 } from "./memory-identity.js";
 import {
   classifyProvenance,
-  hashFiles,
+  hashFileCommitments,
+  type FileHashCommitments,
   type LiveSourceStatus,
 } from "./verify.js";
 import { isMemoryRecallable, memoryToObservation } from "./memory-utils.js";
@@ -234,14 +235,25 @@ function revalidatedSuccessor(args: {
   reason: string;
   actor?: string;
   files: string[];
-  hashes: Record<string, string>;
+  commitments: FileHashCommitments;
 }): Memory {
-  const { memory, root, at, reason, actor, files, hashes } = args;
-  const sortedHashes = Object.entries(hashes).sort(([a], [b]) =>
+  const { memory, root, at, reason, actor, files, commitments } = args;
+  const sortedRaw = Object.entries(commitments.fileHashes).sort(([a], [b]) =>
     a < b ? -1 : a > b ? 1 : 0,
   );
+  const sortedNormalized = Object.entries(
+    commitments.fileHashesNormalized,
+  ).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   const digest = createHash("sha256")
-    .update(JSON.stringify(["revalidation", memory.id, at, sortedHashes]))
+    .update(
+      JSON.stringify([
+        "revalidation",
+        memory.id,
+        at,
+        sortedRaw,
+        sortedNormalized,
+      ]),
+    )
     .digest("hex");
   const id = `mem_revalidation_${digest}`;
   const base = stripVersionLifecycle(memory);
@@ -266,7 +278,14 @@ function revalidatedSuccessor(args: {
     ...priorProvenance,
     cwd: root,
     files: [...files],
-    fileHashes: { ...hashes },
+    fileHashes: { ...commitments.fileHashes },
+    ...(Object.keys(commitments.fileHashesNormalized).length > 0
+      ? {
+          fileHashesNormalized: {
+            ...commitments.fileHashesNormalized,
+          },
+        }
+      : {}),
     capturedAt: at,
     userConfirmed: true,
   };
@@ -344,8 +363,8 @@ async function revalidateMemory(
     );
   }
   const filesAtRoot = reRootEvidenceFiles(memory);
-  const hashes = hashFiles(filesAtRoot, root);
-  if (filesAtRoot.some((file) => !hashes[file])) {
+  const commitments = hashFileCommitments(filesAtRoot, root);
+  if (filesAtRoot.some((file) => !commitments.fileHashes[file])) {
     return transitionFailure(
       "source_unavailable",
       "every referenced source file must exist and be hashable before revalidation",
@@ -353,13 +372,12 @@ async function revalidateMemory(
     );
   }
 
-  const priorHashes = provenance?.fileHashes ?? {};
-  const unchanged =
-    Object.keys(priorHashes).length === files.length &&
-    files.every(
-      (file, index) => priorHashes[file] === hashes[filesAtRoot[index]!],
-    );
-  if (unchanged && persistedLifecycleOf(memory) === "needs_revalidation") {
+  const existingCommitmentsStillCurrent =
+    verdict.status === "verified" || verdict.status === "cosmetic";
+  if (
+    existingCommitmentsStillCurrent &&
+    persistedLifecycleOf(memory) === "needs_revalidation"
+  ) {
     let restored: Memory;
     try {
       restored = applyMemoryLifecycleTransition(memory, {
@@ -405,7 +423,7 @@ async function revalidateMemory(
     reason: input.reason,
     ...(input.actor ? { actor: input.actor } : {}),
     files: filesAtRoot,
-    hashes,
+    commitments,
   });
   let superseded: Memory;
   try {

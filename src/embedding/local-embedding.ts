@@ -26,10 +26,17 @@ const KNOWN_DIMS: Record<string, number> = {
 };
 
 // Minimal shape of the transformers.js pipeline we rely on.
-type FeatureExtractor = (
+type FeatureOutput = {
+  tolist: () => number[][];
+  dispose?: () => void;
+};
+
+type FeatureExtractor = ((
   input: string | string[],
   opts: { pooling: "mean"; normalize: boolean },
-) => Promise<{ tolist: () => number[][] }>;
+) => Promise<FeatureOutput>) & {
+  dispose?: () => Promise<void>;
+};
 
 export class LocalEmbeddingProvider implements EmbeddingProvider {
   readonly name: string;
@@ -37,6 +44,7 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
   private model: string;
   private extractor: FeatureExtractor | null = null;
   private loading: Promise<FeatureExtractor> | null = null;
+  private disposing = false;
 
   constructor(model: string = DEFAULT_MODEL) {
     this.model = model;
@@ -48,6 +56,7 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
   // variable specifier on purpose: it keeps tsc from resolving the optional
   // package at build time and isolates the heavy load to first use.
   private async ensure(): Promise<FeatureExtractor> {
+    if (this.disposing) throw new Error("embedding provider is shutting down");
     if (this.extractor) return this.extractor;
     if (!this.loading) {
       this.loading = (async () => {
@@ -107,15 +116,34 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
   async embed(text: string): Promise<Float32Array> {
     const extractor = await this.ensure();
     const out = await extractor(text, { pooling: "mean", normalize: true });
-    const row = out.tolist()[0];
-    if (!row) throw new Error("embedding extraction returned no rows");
-    return Float32Array.from(row);
+    try {
+      const row = out.tolist()[0];
+      if (!row) throw new Error("embedding extraction returned no rows");
+      return Float32Array.from(row);
+    } finally {
+      out.dispose?.();
+    }
   }
 
   async embedBatch(texts: string[]): Promise<Float32Array[]> {
     if (texts.length === 0) return [];
     const extractor = await this.ensure();
     const out = await extractor(texts, { pooling: "mean", normalize: true });
-    return out.tolist().map((row) => Float32Array.from(row));
+    try {
+      return out.tolist().map((row) => Float32Array.from(row));
+    } finally {
+      out.dispose?.();
+    }
+  }
+
+  /** Dispose ONNX sessions before Node tears down native runtime mutexes. */
+  async dispose(): Promise<void> {
+    if (this.disposing) return;
+    this.disposing = true;
+    const extractor =
+      this.extractor ?? (this.loading ? await this.loading.catch(() => null) : null);
+    this.extractor = null;
+    this.loading = null;
+    if (extractor?.dispose) await extractor.dispose();
   }
 }

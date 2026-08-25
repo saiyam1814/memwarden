@@ -3,8 +3,9 @@
 // This is what makes "verified" literal — not just "does the file exist" but
 // "is the file still what it was when we learned this".
 //
-//   verified           a referenced file exists and still matches its
-//                      capture-time content hash (code-backed and current)
+//   verified           every referenced file is byte-identical to capture
+//   cosmetic           normalized text matches capture; only line endings or
+//                      trailing whitespace differ (current, not byte-identical)
 //   sourced_unverified sourced (command/confirmation, or files present but
 //                      none hashable), so allowed, but NOT content-verified
 //   stale              a referenced file was deleted, or its content changed
@@ -18,6 +19,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { TextDecoder } from "node:util";
 import type { Provenance } from "./types.js";
 import { isUnsourced } from "./provenance.js";
 
@@ -25,27 +27,43 @@ import { isUnsourced } from "./provenance.js";
 const MAX_HASH_BYTES = 2_000_000;
 const SHA256_RE = /^[a-f0-9]{64}$/;
 
-function hashFile(abs: string): string | null {
+const UTF8 = new TextDecoder("utf-8", { fatal: true });
+
+interface FileCommitment {
+  raw: string;
+  normalized?: string;
+}
+
+/** Canonical text form shared by live provenance and Canon. Invalid UTF-8 and
+ * NUL-bearing/binary files deliberately get no normalized commitment: only an
+ * exact raw-byte match can verify those safely. */
+function normalizedTextHash(bytes: Buffer): string | null {
+  if (bytes.includes(0)) return null;
+  let text: string;
   try {
-    const st = statSync(abs);
-    if (!st.isFile() || st.size > MAX_HASH_BYTES) return null;
-    return createHash("sha256").update(readFileSync(abs)).digest("hex");
+    text = UTF8.decode(bytes);
   } catch {
     return null;
   }
+  const normalized = text
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+$/, ""))
+    .join("\n")
+    .replace(/\n+$/, "\n");
+  return createHash("sha256").update(normalized).digest("hex");
 }
 
-function normalizedHashFile(abs: string): string | null {
+function hashFile(abs: string): FileCommitment | null {
   try {
     const st = statSync(abs);
     if (!st.isFile() || st.size > MAX_HASH_BYTES) return null;
-    const normalized = readFileSync(abs, "utf8")
-      .replace(/\r\n/g, "\n")
-      .split("\n")
-      .map((line) => line.replace(/[ \t]+$/, ""))
-      .join("\n")
-      .replace(/\n+$/, "\n");
-    return createHash("sha256").update(normalized).digest("hex");
+    const bytes = readFileSync(abs);
+    const normalized = normalizedTextHash(bytes);
+    return {
+      raw: createHash("sha256").update(bytes).digest("hex"),
+      ...(normalized ? { normalized } : {}),
+    };
   } catch {
     return null;
   }
@@ -55,26 +73,46 @@ function resolveUnder(root: string, file: string): string {
   return isAbsolute(file) ? file : resolve(root, file);
 }
 
-/**
- * Hash the referenced files under `root` at capture time (best-effort). Files
- * that don't exist or are too large are simply omitted; the result is stored
- * in provenance so later recall can detect content drift.
- */
+export interface FileHashCommitments {
+  fileHashes: Record<string, string>;
+  fileHashesNormalized: Record<string, string>;
+}
+
+/** Hash raw bytes and normalized UTF-8 content from the SAME file read, so the
+ * two commitments can never describe different snapshots of a racing file. */
+export function hashFileCommitments(
+  files: string[] | undefined,
+  root: string,
+): FileHashCommitments {
+  const fileHashes: Record<string, string> = {};
+  const fileHashesNormalized: Record<string, string> = {};
+  for (const file of files ?? []) {
+    const commitment = hashFile(resolveUnder(root, file));
+    if (!commitment) continue;
+    fileHashes[file] = commitment.raw;
+    if (commitment.normalized) {
+      fileHashesNormalized[file] = commitment.normalized;
+    }
+  }
+  return { fileHashes, fileHashesNormalized };
+}
+
+/** Backward-compatible raw-byte helper. */
 export function hashFiles(
   files: string[] | undefined,
   root: string,
 ): Record<string, string> {
-  const out: Record<string, string> = {};
-  if (!files) return out;
-  for (const f of files) {
-    const h = hashFile(resolveUnder(root, f));
-    if (h) out[f] = h;
-  }
-  return out;
+  return hashFileCommitments(files, root).fileHashes;
+}
+
+/** Shared Canon/live-provenance normalized commitment for one text file. */
+export function normalizedFileHash(absPath: string): string | null {
+  return hashFile(absPath)?.normalized ?? null;
 }
 
 export type VerifyStatus =
   | "verified"
+  | "cosmetic"
   | "sourced_unverified"
   | "stale"
   | "unsourced";
@@ -90,7 +128,7 @@ export type LiveSourceStatus =
   | "unknown";
 
 export interface Verdict {
-  /** Compatibility four-state verdict retained for existing clients. */
+  /** Compatibility verdict retained for existing clients; cosmetic is additive. */
   status: VerifyStatus;
   /** Compatibility summary reason retained for existing clients. */
   reason: string;
@@ -161,8 +199,8 @@ export function classifyProvenance(
   const captureCwd = prov?.cwd && isAbsolute(prov.cwd) ? prov.cwd : undefined;
   const deleted: string[] = [];
   const changed: string[] = [];
-  const cosmetic: string[] = [];
-  let hashMatched = 0; // existing files whose captured hash still matches
+  let exactMatched = 0; // existing files whose raw bytes still match
+  let normalizedMatched = 0; // text-equivalent files whose bytes differ
   let unchecked = 0; // existing files we could not content-check
   for (const f of files) {
     let abs = resolveUnder(base, f);
@@ -183,43 +221,45 @@ export function classifyProvenance(
       deleted.push(f);
       continue;
     }
-    const recorded = hashes[f];
-    if (!recorded) {
-      unchecked++; // no hash captured (e.g. too large at capture)
+    const recordedRaw = hashes[f];
+    const recordedNormalized = normalizedHashes[f];
+    if (!recordedRaw && !recordedNormalized) {
+      unchecked++; // no commitment captured (e.g. too large at capture)
       continue;
     }
     const current = hashFile(abs);
-    if (current && current !== recorded) {
-      const expectedNormalized = normalizedHashes[f];
-      const actualNormalized = expectedNormalized ? normalizedHashFile(abs) : null;
-      if (expectedNormalized && actualNormalized === expectedNormalized) cosmetic.push(f);
-      else changed.push(f);
-    } else if (current && current === recorded) hashMatched++;
-    else unchecked++; // can't hash now (e.g. grew past the cap) -> unverified
+    if (!current) {
+      unchecked++; // can't hash now (e.g. grew past the cap) -> unverified
+    } else if (recordedRaw && current.raw === recordedRaw) {
+      if (recordedNormalized && current.normalized !== recordedNormalized) {
+        changed.push(f); // inconsistent trust-bearing commitments fail closed
+      } else {
+        exactMatched++;
+      }
+    } else if (
+      recordedNormalized &&
+      current.normalized &&
+      current.normalized === recordedNormalized
+    ) {
+      normalizedMatched++;
+    } else {
+      changed.push(f);
+    }
   }
-  if (deleted.length > 0 || changed.length > 0 || cosmetic.length > 0) {
+  if (deleted.length > 0 || changed.length > 0) {
     const parts: string[] = [];
     if (deleted.length > 0) parts.push(`deleted: ${deleted.slice(0, 2).join(", ")}`);
     if (changed.length > 0) parts.push(`changed: ${changed.slice(0, 2).join(", ")}`);
-    if (cosmetic.length > 0) {
-      parts.push(`cosmetic: ${cosmetic.slice(0, 2).join(", ")}`);
-    }
     const reason = `references files that no longer match (${parts.join("; ")})`;
-    const sourceStatus: LiveSourceStatus =
-      deleted.length > 0
-        ? "missing"
-        : changed.length > 0
-          ? "drifted"
-          : "cosmetic_drift";
     return {
       status: "stale",
       reason,
       evidenceTrust,
       evidenceReason:
         evidenceTrust === "verified"
-          ? "all declared source files carry capture-time content commitments"
+          ? "all declared source files carry capture-time raw-byte commitments"
           : "the memory is sourced, but its evidence is incomplete or not fully hash-backed",
-      sourceStatus,
+      sourceStatus: deleted.length > 0 ? "missing" : "drifted",
       sourceReason: reason,
     };
   }
@@ -230,38 +270,61 @@ export function classifyProvenance(
   // matching hashes only ever earn "sourced".
   if (prov?.mixedTrust === true) {
     const reason =
-      "the memory's evidence is incomplete (mixed or capped at capture); file hashes cannot vouch for all of it";
+      "the memory's evidence is incomplete (mixed or capped at capture); file commitments cannot vouch for all of it";
+    const allCapturedSourcesChecked =
+      files.length > 0 &&
+      unchecked === 0 &&
+      exactMatched + normalizedMatched === files.length;
+    const sourceStatus: LiveSourceStatus = allCapturedSourcesChecked
+      ? normalizedMatched > 0
+        ? "cosmetic_drift"
+        : "matched"
+      : "unknown";
     return {
       status: "sourced_unverified",
       reason,
       evidenceTrust: "sourced",
       evidenceReason: reason,
-      sourceStatus:
-        files.length > 0 && hashMatched === files.length ? "matched" : "unknown",
-      sourceReason:
-        files.length > 0 && hashMatched === files.length
-          ? "all captured source commitments match, but they do not cover the whole memory"
-          : "the captured source subset cannot establish complete live freshness",
+      sourceStatus,
+      sourceReason: allCapturedSourcesChecked
+        ? normalizedMatched > 0
+          ? "all captured source commitments match normalized content, but they do not cover the whole memory"
+          : "all captured raw source commitments match, but they do not cover the whole memory"
+        : "the captured source subset cannot establish complete live freshness",
     };
   }
-  // Verified only when EVERY existing referenced file was content-checked.
-  // A single unchecked file (unhashed, or too large) leaves the compatibility
-  // verdict sourced-but-not-verified, even though evidence quality is reported
-  // independently.
-  if (hashMatched > 0 && unchecked === 0) {
-    const reason = "all referenced files exist and match their captured hashes";
+  // Current only when EVERY existing referenced file was content-checked. A
+  // single unchecked file still caps the whole memory below content-verified.
+  if (unchecked === 0 && normalizedMatched > 0) {
+    const reason =
+      "all referenced files match their captured normalized content; only line endings or trailing whitespace differ";
+    return {
+      status: "cosmetic",
+      reason,
+      evidenceTrust,
+      evidenceReason:
+        evidenceTrust === "verified"
+          ? "all declared source files carry capture-time raw-byte and normalized-text commitments"
+          : "normalized source commitments match, but capture evidence is not fully raw-hash-backed",
+      sourceStatus: "cosmetic_drift",
+      sourceReason: reason,
+    };
+  }
+  if (unchecked === 0 && exactMatched > 0) {
+    const reason =
+      "all referenced files exist and match their captured hashes exactly (raw bytes)";
     return {
       status: "verified",
       reason,
-      evidenceTrust: "verified",
+      evidenceTrust,
       evidenceReason:
-        "all declared source files carry capture-time content commitments",
+        "all declared source files carry capture-time raw-byte commitments",
       sourceStatus: "matched",
       sourceReason: reason,
     };
   }
   const reason =
-    hashMatched > 0
+    exactMatched + normalizedMatched > 0
       ? "some referenced files verified, but others could not be content-checked"
       : files.length > 0
         ? "referenced files exist but were not hashed at capture (existence only)"
