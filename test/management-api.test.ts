@@ -23,6 +23,7 @@ import {
 import {
   getSearchIndex,
   initializeMemoryLifecycle,
+  ManagementError,
   registerCoreFunctions,
   rememberMemory,
 } from "../src/functions/index.js";
@@ -31,6 +32,7 @@ import { projectKey } from "../src/functions/git-identity.js";
 import type { Memory } from "../src/functions/types.js";
 import { StateKV } from "../src/state/kv.js";
 import { KV } from "../src/state/schema.js";
+import { StoreLibsql } from "../src/state/store-libsql.js";
 import { StoreMemory } from "../src/state/store-memory.js";
 import { registerApiTriggers } from "../src/triggers/api.js";
 
@@ -73,6 +75,7 @@ function makeRepos(): void {
     writeFileSync(join(root, "src", "policy.ts"), "export const policy = 'v1';\n");
     writeFileSync(join(root, "src", "other.ts"), "export const other = true;\n");
     writeFileSync(join(root, "src", "stale.ts"), "export const stale = 'v1';\n");
+    writeFileSync(join(root, "src", "cosmetic.ts"), "line one\nline two\n");
   }
 }
 
@@ -199,6 +202,13 @@ describe("bounded list/filter/cursor API", () => {
       at: T1,
     });
     writeFileSync(join(main, "src", "stale.ts"), "export const stale = 'v2';\n");
+    const cosmetic = await remember({
+      text: "cosmetic management canary",
+      title: "cosmetic title",
+      files: ["src/cosmetic.ts"],
+      at: T1,
+    });
+    writeFileSync(join(main, "src", "cosmetic.ts"), "line one  \r\nline two\r\n");
     const unsourced = fixture("mem_unsourced", main);
     delete unsourced.provenance;
     await kv.set(KV.memories, unsourced.id, unsourced);
@@ -254,6 +264,24 @@ describe("bounded list/filter/cursor API", () => {
       await post("/memories/list", { project: main, status: ["stale"] })
     ).json()) as { items: Array<{ id: string }> };
     expect(staleOnly.items.map((item) => item.id)).toContain(stale.id);
+    const cosmeticOnly = (await (
+      await post("/memories/list", { project: main, status: ["cosmetic"] })
+    ).json()) as {
+      items: Array<{
+        id: string;
+        status: string;
+        lifecycle: { effective: string };
+        source: { status: string };
+      }>;
+    };
+    expect(
+      cosmeticOnly.items.find((item) => item.id === cosmetic.id),
+    ).toMatchObject({
+      id: cosmetic.id,
+      status: "cosmetic",
+      lifecycle: { effective: "active" },
+      source: { status: "cosmetic_drift" },
+    });
     const unsourcedOnly = (await (
       await post("/memories/list", { project: main, status: ["unsourced"] })
     ).json()) as { items: Array<{ id: string }> };
@@ -337,6 +365,69 @@ describe("bounded list/filter/cursor API", () => {
     expect(await rebound.json()).toMatchObject({ code: "invalid_cursor" });
     expect((await post("/memories/list", { project: main, limit: 201 })).status).toBe(400);
     expect((await post("/projects", { limit: 501 })).status).toBe(400);
+  });
+
+  it("reloads the persisted cursor key across a daemon-style kernel restart", async () => {
+    await http.close();
+    await sdk.shutdown();
+    __resetKernelSingleton();
+
+    const dbUrl = `file:${join(temp, "cursor-restart.db")}`;
+    const boot = async (): Promise<void> => {
+      sdk = registerWorker("in-process", { workerName: "management-cursor-restart" }, {
+        store: new StoreLibsql({ url: dbUrl }),
+      });
+      kv = new StateKV(sdk);
+      registerCoreFunctions(sdk, kv);
+      registerApiTriggers(sdk, SECRET);
+      http = startHttpServer(sdk, { port: 0 });
+      await once(http.server, "listening");
+      base = `http://127.0.0.1:${(http.server.address() as AddressInfo).port}/memwarden`;
+    };
+
+    await boot();
+    const ids: string[] = [];
+    for (let index = 0; index < 3; index++) {
+      ids.push(
+        (
+          await remember({
+            text: `restart cursor ${index}`,
+            title: `restart page ${index}`,
+            at: `2025-01-0${index + 1}T00:00:00.000Z`,
+          })
+        ).id,
+      );
+    }
+    ids.sort();
+    const first = (await (
+      await post("/memories/list", { project: main, limit: 1 })
+    ).json()) as { items: Array<{ id: string }>; nextCursor: string };
+    expect(first.items.map((item) => item.id)).toEqual(ids.slice(0, 1));
+    const persistedKey = await kv.get<string>(
+      KV.config,
+      "management-cursor-hmac-v1",
+    );
+    expect(persistedKey).toMatch(/^[A-Za-z0-9_-]{43}$/);
+
+    await http.close();
+    await sdk.shutdown();
+    __resetKernelSingleton();
+    await boot();
+    expect(
+      await kv.get<string>(KV.config, "management-cursor-hmac-v1"),
+    ).toBe(persistedKey);
+    const secondResponse = await post("/memories/list", {
+      project: main,
+      limit: 1,
+      cursor: first.nextCursor,
+    });
+    expect(secondResponse.status).toBe(200);
+    const second = (await secondResponse.json()) as {
+      items: Array<{ id: string }>;
+      nextCursor: string;
+    };
+    expect(second.items.map((item) => item.id)).toEqual(ids.slice(1, 2));
+    expect(second.nextCursor).toBeTruthy();
   });
 
   it("fails closed across unrelated projects, widens across worktrees, and handles legacy rows", async () => {
@@ -454,6 +545,198 @@ describe("show/edit/lifecycle/history", () => {
     expect(shown.content.framed.match(/<\/memwarden-untrusted-memory>/g)).toHaveLength(1);
     expect(shown.content.framed).toContain("&lt;/memwarden-untrusted-memory&gt;");
     expect(shown.content.framed).not.toContain("\u001b");
+  });
+
+  it("rejects malformed edit fields at the HTTP boundary with stable 400 contracts", async () => {
+    const predecessor = await remember({
+      text: "HTTP edit validation predecessor",
+      title: "HTTP validation",
+    });
+    const valid = {
+      memory_id: predecessor.id,
+      project: main,
+      title: "validated successor",
+      text: "validated successor content",
+      authored_by: "user",
+      no_file_evidence: true,
+    };
+    const cases: Array<{
+      name: string;
+      body: Record<string, unknown>;
+      error: string;
+    }> = [
+      {
+        name: "missing id",
+        body: { ...valid, memory_id: undefined },
+        error: "memory_id is required and must be a non-empty string of at most 512 characters",
+      },
+      {
+        name: "wrong id type",
+        body: { ...valid, memory_id: 42 },
+        error: "memory_id is required and must be a non-empty string of at most 512 characters",
+      },
+      {
+        name: "oversized id",
+        body: { ...valid, memory_id: "x".repeat(513) },
+        error: "memory_id is required and must be a non-empty string of at most 512 characters",
+      },
+      {
+        name: "conflicting id aliases",
+        body: { ...valid, id: "other" },
+        error: "id and memory_id must match when both are provided",
+      },
+      {
+        name: "missing project",
+        body: { ...valid, project: undefined },
+        error: "project is required and must be a non-empty string of at most 4096 characters",
+      },
+      {
+        name: "wrong project type",
+        body: { ...valid, project: 42 },
+        error: "project is required and must be a non-empty string of at most 4096 characters",
+      },
+      {
+        name: "oversized project",
+        body: { ...valid, project: `/${"x".repeat(4096)}` },
+        error: "project is required and must be a non-empty string of at most 4096 characters",
+      },
+      {
+        name: "nonexistent project",
+        body: { ...valid, project: join(temp, "missing-project") },
+        error: "project must be an existing absolute directory",
+      },
+      {
+        name: "missing title",
+        body: { ...valid, title: undefined },
+        error: "title is required and must be a non-empty string of at most 160 characters",
+      },
+      {
+        name: "wrong title type",
+        body: { ...valid, title: 42 },
+        error: "title is required and must be a non-empty string of at most 160 characters",
+      },
+      {
+        name: "empty title",
+        body: { ...valid, title: "   " },
+        error: "title is required and must be a non-empty string of at most 160 characters",
+      },
+      {
+        name: "oversized title",
+        body: { ...valid, title: "t".repeat(161) },
+        error: "title is required and must be a non-empty string of at most 160 characters",
+      },
+      {
+        name: "missing text",
+        body: { ...valid, text: undefined },
+        error: "text is required and must be a non-empty string of at most 200000 characters",
+      },
+      {
+        name: "wrong text type",
+        body: { ...valid, text: 42 },
+        error: "text is required and must be a non-empty string of at most 200000 characters",
+      },
+      {
+        name: "empty text",
+        body: { ...valid, text: "   " },
+        error: "text is required and must be a non-empty string of at most 200000 characters",
+      },
+      {
+        name: "oversized text",
+        body: { ...valid, text: "t".repeat(200_001) },
+        error: "text is required and must be a non-empty string of at most 200000 characters",
+      },
+      {
+        name: "missing authorship",
+        body: { ...valid, authored_by: undefined },
+        error: "authored_by is required and must be user or agent",
+      },
+      {
+        name: "ambiguous authorship",
+        body: { ...valid, authored_by: "user_or_agent" },
+        error: "authored_by is required and must be user or agent",
+      },
+      {
+        name: "agent authorship without agent",
+        body: { ...valid, authored_by: "agent" },
+        error: "agent is required when authored_by is agent",
+      },
+      {
+        name: "wrong agent type",
+        body: { ...valid, agent: 42 },
+        error: "agent must be a non-empty string of at most 256 characters when provided",
+      },
+      {
+        name: "oversized agent",
+        body: { ...valid, agent: "a".repeat(257) },
+        error: "agent must be a non-empty string of at most 256 characters when provided",
+      },
+      {
+        name: "wrong files type",
+        body: { ...valid, files: "src/policy.ts" },
+        error: "files must contain 1 to 128 non-empty paths of at most 1024 characters",
+      },
+      {
+        name: "empty files",
+        body: { ...valid, files: [] },
+        error: "files must contain 1 to 128 non-empty paths of at most 1024 characters",
+      },
+      {
+        name: "too many files",
+        body: { ...valid, files: Array.from({ length: 129 }, (_, index) => `f-${index}`) },
+        error: "files must contain 1 to 128 non-empty paths of at most 1024 characters",
+      },
+      {
+        name: "wrong file entry type",
+        body: { ...valid, files: [42] },
+        error: "files must contain 1 to 128 non-empty paths of at most 1024 characters",
+      },
+      {
+        name: "oversized file entry",
+        body: { ...valid, files: ["f".repeat(1_025)] },
+        error: "files must contain 1 to 128 non-empty paths of at most 1024 characters",
+      },
+      {
+        name: "wrong no-file evidence type",
+        body: { ...valid, no_file_evidence: "true" },
+        error: "no_file_evidence must be a boolean",
+      },
+      {
+        name: "missing evidence mode",
+        body: { ...valid, no_file_evidence: undefined },
+        error: "choose exactly one evidence mode: files or no_file_evidence=true",
+      },
+      {
+        name: "conflicting evidence modes",
+        body: { ...valid, files: ["src/policy.ts"] },
+        error: "choose exactly one evidence mode: files or no_file_evidence=true",
+      },
+      {
+        name: "invalid kind",
+        body: { ...valid, kind: "note" },
+        error: "kind must be one of: pattern, preference, architecture, bug, workflow, fact",
+      },
+      {
+        name: "expiry override",
+        body: { ...valid, expires_at: T2 },
+        error: "edit preserves predecessor retention; expiry and retention overrides are not supported",
+      },
+      {
+        name: "retention override",
+        body: { ...valid, retention: "expires" },
+        error: "edit preserves predecessor retention; expiry and retention overrides are not supported",
+      },
+    ];
+
+    for (const testCase of cases) {
+      const response = await post("/memories/edit", testCase.body);
+      expect(response.status, testCase.name).toBe(400);
+      expect(await response.json(), testCase.name).toEqual({
+        ok: false,
+        code: "invalid_input",
+        error: testCase.error,
+      });
+    }
+    expect(await kv.get(KV.memories, predecessor.id)).toEqual(predecessor);
   });
 
   it("edit requires explicit authorship/evidence and creates a durable successor without mutating history", async () => {
@@ -592,6 +875,120 @@ describe("show/edit/lifecycle/history", () => {
       lifecycle: "active",
       provenance: { fileHashes: { "src/policy.ts": sha("export const policy = 'v2';\n") } },
     });
+  });
+
+  it("detects a self-loop without revisiting or expanding it", async () => {
+    await kv.set(
+      KV.memories,
+      "self-loop",
+      fixture("self-loop", main, {
+        parentId: "self-loop",
+        supersededBy: "self-loop",
+      }),
+    );
+    const history = (await (
+      await post("/memories/history", {
+        memory_id: "self-loop",
+        project: main,
+        limit: 10,
+      })
+    ).json()) as {
+      items: Array<{ id: string }>;
+      cycleDetected: boolean;
+      truncated: boolean;
+    };
+    expect(history.items.map((item) => item.id)).toEqual(["self-loop"]);
+    expect(history.cycleDetected).toBe(true);
+    expect(history.truncated).toBe(false);
+  });
+
+  it("detects a three-node directed lineage cycle exactly once per node", async () => {
+    for (const [id, successor, version] of [
+      ["tri-a", "tri-b", 1],
+      ["tri-b", "tri-c", 2],
+      ["tri-c", "tri-a", 3],
+    ] as const) {
+      await kv.set(
+        KV.memories,
+        id,
+        fixture(id, main, { version, supersededBy: successor }),
+      );
+    }
+    const history = (await (
+      await post("/memories/history", {
+        memory_id: "tri-a",
+        project: main,
+        limit: 10,
+      })
+    ).json()) as {
+      items: Array<{ id: string }>;
+      cycleDetected: boolean;
+      truncated: boolean;
+    };
+    expect(history.items.map((item) => item.id)).toEqual([
+      "tri-a",
+      "tri-b",
+      "tri-c",
+    ]);
+    expect(history.cycleDetected).toBe(true);
+    expect(history.truncated).toBe(false);
+  });
+
+  it("does not leak a disconnected cycle and reports a cap before unseen lineage", async () => {
+    await kv.set(KV.memories, "isolated-root", fixture("isolated-root", main));
+    await kv.set(
+      KV.memories,
+      "disconnected-a",
+      fixture("disconnected-a", main, { supersededBy: "disconnected-b" }),
+    );
+    await kv.set(
+      KV.memories,
+      "disconnected-b",
+      fixture("disconnected-b", main, { supersededBy: "disconnected-a" }),
+    );
+    const isolated = (await (
+      await post("/memories/history", {
+        memory_id: "isolated-root",
+        project: main,
+        limit: 10,
+      })
+    ).json()) as {
+      items: Array<{ id: string }>;
+      cycleDetected: boolean;
+      truncated: boolean;
+    };
+    expect(isolated.items.map((item) => item.id)).toEqual(["isolated-root"]);
+    expect(isolated.cycleDetected).toBe(false);
+    expect(isolated.truncated).toBe(false);
+
+    for (let index = 0; index < 4; index++) {
+      await kv.set(
+        KV.memories,
+        `capped-cycle-${index}`,
+        fixture(`capped-cycle-${index}`, main, {
+          version: index + 1,
+          supersededBy:
+            index === 3 ? "capped-cycle-2" : `capped-cycle-${index + 1}`,
+        }),
+      );
+    }
+    const capped = (await (
+      await post("/memories/history", {
+        memory_id: "capped-cycle-0",
+        project: main,
+        limit: 2,
+      })
+    ).json()) as {
+      items: Array<{ id: string }>;
+      cycleDetected: boolean;
+      truncated: boolean;
+    };
+    expect(capped.items.map((item) => item.id)).toEqual([
+      "capped-cycle-0",
+      "capped-cycle-1",
+    ]);
+    expect(capped.cycleDetected).toBe(false);
+    expect(capped.truncated).toBe(true);
   });
 
   it("traverses malformed cycles safely and enforces the lineage cap", async () => {
@@ -790,6 +1187,21 @@ describe("search, projects aggregation, and auth", () => {
     expect(secondPage.projects).toHaveLength(1);
     expect(firstPage.projects[0]?.key).not.toBe(secondPage.projects[0]?.key);
     expect(secondPage.nextCursor).toBeNull();
+  });
+
+  it("surfaces project scan caps as an explicit fail-closed scan_limit error", async () => {
+    sdk.registerFunction("mem::projects", async () => {
+      throw new ManagementError(
+        "scan_limit",
+        "project aggregation exceeds the bounded 20000-memory scan cap",
+      );
+    });
+    const response = await post("/projects", {});
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({
+      code: "scan_limit",
+      error: "project aggregation exceeds the bounded 20000-memory scan cap",
+    });
   });
 
   it("requires explicit scope and keeps every management route behind bearer auth", async () => {

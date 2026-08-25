@@ -95,6 +95,23 @@ function managementFailure(error: unknown): Response {
   };
 }
 
+function invalidManagementInput(error: string): Response {
+  return {
+    status_code: 400,
+    body: { ok: false, code: "invalid_input", error },
+  };
+}
+
+const MEMORY_EDIT_LIMITS = {
+  id: 512,
+  project: 4_096,
+  title: 160,
+  text: 200_000,
+  agent: 256,
+  files: 128,
+  file: 1_024,
+} as const;
+
 function lifecycleSummary(
   memory: Extract<TransitionMemoryLifecycleResult, { ok: true }>["memory"],
 ): Record<string, unknown> {
@@ -636,20 +653,146 @@ export function registerApiTriggers(
   sdk.registerFunction(
     "api::memory-edit",
     async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
-      const body = (req.body ?? {}) as Record<string, unknown>;
-      const payload = {
-        id: body["id"] ?? body["memory_id"],
-        project: body["project"],
-        title: body["title"],
-        text: body["text"],
-        ...(body["kind"] !== undefined ? { kind: body["kind"] } : {}),
-        ...(body["files"] !== undefined ? { files: body["files"] } : {}),
-        ...(body["no_file_evidence"] !== undefined
-          ? { noFileEvidence: body["no_file_evidence"] }
+      if (!isRecord(req.body)) {
+        return invalidManagementInput("body must be a JSON object");
+      }
+      const body = req.body;
+      if (
+        body["id"] !== undefined &&
+        body["memory_id"] !== undefined &&
+        body["id"] !== body["memory_id"]
+      ) {
+        return invalidManagementInput("id and memory_id must match when both are provided");
+      }
+      const idValue = body["id"] ?? body["memory_id"];
+      if (
+        typeof idValue !== "string" ||
+        !idValue.trim() ||
+        idValue.length > MEMORY_EDIT_LIMITS.id ||
+        idValue.includes("\0")
+      ) {
+        return invalidManagementInput(
+          `memory_id is required and must be a non-empty string of at most ${MEMORY_EDIT_LIMITS.id} characters`,
+        );
+      }
+      const projectValue = body["project"];
+      if (
+        typeof projectValue !== "string" ||
+        !projectValue.trim() ||
+        projectValue.length > MEMORY_EDIT_LIMITS.project ||
+        projectValue.includes("\0")
+      ) {
+        return invalidManagementInput(
+          `project is required and must be a non-empty string of at most ${MEMORY_EDIT_LIMITS.project} characters`,
+        );
+      }
+      let project: string;
+      try {
+        project = managementProjectRoot(projectValue);
+      } catch {
+        return invalidManagementInput("project must be an existing absolute directory");
+      }
+      const title = body["title"];
+      if (
+        typeof title !== "string" ||
+        !title.trim() ||
+        title.length > MEMORY_EDIT_LIMITS.title
+      ) {
+        return invalidManagementInput(
+          `title is required and must be a non-empty string of at most ${MEMORY_EDIT_LIMITS.title} characters`,
+        );
+      }
+      const text = body["text"];
+      if (
+        typeof text !== "string" ||
+        !text.trim() ||
+        text.length > MEMORY_EDIT_LIMITS.text
+      ) {
+        return invalidManagementInput(
+          `text is required and must be a non-empty string of at most ${MEMORY_EDIT_LIMITS.text} characters`,
+        );
+      }
+      const authoredBy = body["authored_by"];
+      if (authoredBy !== "user" && authoredBy !== "agent") {
+        return invalidManagementInput("authored_by is required and must be user or agent");
+      }
+      const agentValue = body["agent"];
+      if (
+        agentValue !== undefined &&
+        (typeof agentValue !== "string" ||
+          !agentValue.trim() ||
+          agentValue.length > MEMORY_EDIT_LIMITS.agent ||
+          agentValue.includes("\0"))
+      ) {
+        return invalidManagementInput(
+          `agent must be a non-empty string of at most ${MEMORY_EDIT_LIMITS.agent} characters when provided`,
+        );
+      }
+      if (authoredBy === "agent" && agentValue === undefined) {
+        return invalidManagementInput("agent is required when authored_by is agent");
+      }
+      const kindValue = body["kind"];
+      if (
+        kindValue !== undefined &&
+        (typeof kindValue !== "string" ||
+          !(MANUAL_MEMORY_KINDS as readonly string[]).includes(kindValue))
+      ) {
+        return invalidManagementInput(
+          `kind must be one of: ${MANUAL_MEMORY_KINDS.join(", ")}`,
+        );
+      }
+      for (const field of ["expires_at", "expiresAt", "expiry", "retention"] as const) {
+        if (body[field] !== undefined) {
+          return invalidManagementInput(
+            "edit preserves predecessor retention; expiry and retention overrides are not supported",
+          );
+        }
+      }
+      const hasFiles = Object.prototype.hasOwnProperty.call(body, "files");
+      const filesValue = body["files"];
+      if (
+        hasFiles &&
+        (!Array.isArray(filesValue) ||
+          filesValue.length === 0 ||
+          filesValue.length > MEMORY_EDIT_LIMITS.files ||
+          filesValue.some(
+            (file) =>
+              typeof file !== "string" ||
+              !file.trim() ||
+              file.length > MEMORY_EDIT_LIMITS.file ||
+              file.includes("\0"),
+          ))
+      ) {
+        return invalidManagementInput(
+          `files must contain 1 to ${MEMORY_EDIT_LIMITS.files} non-empty paths of at most ${MEMORY_EDIT_LIMITS.file} characters`,
+        );
+      }
+      const noFileEvidence = body["no_file_evidence"];
+      if (
+        noFileEvidence !== undefined &&
+        typeof noFileEvidence !== "boolean"
+      ) {
+        return invalidManagementInput("no_file_evidence must be a boolean");
+      }
+      if ((hasFiles && noFileEvidence === true) || (!hasFiles && noFileEvidence !== true)) {
+        return invalidManagementInput(
+          "choose exactly one evidence mode: files or no_file_evidence=true",
+        );
+      }
+      const payload: EditManagedMemoryInput = {
+        id: idValue.trim(),
+        project,
+        title: title.trim(),
+        text,
+        authoredBy,
+        ...(kindValue !== undefined
+          ? { kind: kindValue as NonNullable<EditManagedMemoryInput["kind"]> }
           : {}),
-        authoredBy: body["authored_by"],
-        ...(body["agent"] !== undefined ? { agent: body["agent"] } : {}),
-      } as unknown as EditManagedMemoryInput;
+        ...(Array.isArray(filesValue)
+          ? { files: filesValue.map((file) => String(file)) }
+          : { noFileEvidence: true }),
+        ...(typeof agentValue === "string" ? { agent: agentValue.trim() } : {}),
+      };
       try {
         const result = await sdk.trigger<EditManagedMemoryInput, EditManagedMemoryResult>({
           function_id: "mem::memory-edit",
