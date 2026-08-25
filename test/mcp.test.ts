@@ -5,6 +5,10 @@
 // including the memwarden-only memory_verify and memory_stats. No external
 // host, no MCP SDK — pure offline.
 
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   registerWorker,
@@ -15,12 +19,15 @@ import {
 } from "../src/kernel/index.js";
 import { StoreLibsql } from "../src/state/store-libsql.js";
 import { StateKV } from "../src/state/kv.js";
+import { KV } from "../src/state/schema.js";
 import { registerCoreFunctions, getSearchIndex } from "../src/functions/index.js";
+import type { Memory } from "../src/functions/types.js";
 import { registerApiTriggers } from "../src/triggers/api.js";
 import { createMcpServer } from "../src/mcp/server.js";
 
 let sdk: Kernel;
 let store: StoreLibsql;
+let kv: StateKV;
 let http: RunningHttpServer;
 let server: ReturnType<typeof createMcpServer>;
 
@@ -29,7 +36,7 @@ beforeEach(async () => {
   getSearchIndex().clear();
   store = new StoreLibsql({ url: ":memory:" });
   sdk = registerWorker("in-process", { workerName: "memwarden-mcp" }, { store });
-  const kv = new StateKV(sdk);
+  kv = new StateKV(sdk);
   registerCoreFunctions(sdk, kv);
   registerApiTriggers(sdk);
   http = startHttpServer(sdk, { port: 0 });
@@ -50,6 +57,19 @@ afterEach(async () => {
 
 function call(method: string, params?: unknown, id: number | null = 1) {
   return server.dispatch({ jsonrpc: "2.0", id, method, params });
+}
+
+function baseUrl(): string {
+  const addr = http.server.address();
+  const port = typeof addr === "object" && addr ? addr.port : 0;
+  return `http://127.0.0.1:${port}`;
+}
+
+function toolJson(response: Awaited<ReturnType<typeof call>>): Record<string, unknown> {
+  const text = (
+    response!.result as { content: Array<{ text: string }> }
+  ).content[0]!.text;
+  return JSON.parse(text) as Record<string, unknown>;
 }
 
 describe("MCP handshake and tool listing", () => {
@@ -81,6 +101,30 @@ describe("MCP handshake and tool listing", () => {
         "memory_context",
         "memory_verify",
         "memory_stats",
+      ]),
+    );
+  });
+
+  it("memory_remember advertises durable evidence and lifecycle metadata", async () => {
+    const res = await call("tools/list");
+    const remember = (
+      res!.result as {
+        tools: Array<{
+          name: string;
+          description: string;
+          inputSchema: { properties: Record<string, unknown> };
+        }>;
+      }
+    ).tools.find((tool) => tool.name === "memory_remember");
+    expect(remember?.description.toLowerCase()).toContain("durable");
+    expect(Object.keys(remember!.inputSchema.properties)).toEqual(
+      expect.arrayContaining([
+        "text",
+        "title",
+        "kind",
+        "files",
+        "expires_at",
+        "supersedes",
       ]),
     );
   });
@@ -158,11 +202,9 @@ describe("MCP tool round-trips against the live daemon", () => {
     expect(text.toLowerCase()).toContain("conformance");
   });
 
-  it("default-sessionId remembers from two projects land in sessions scoped to each project", async () => {
-    // Regression (F2): remember({text}) with no sessionId used the literal
-    // "mcp" session. A session's project metadata is fixed at creation, so a
-    // "mcp" session created under project A made every later default
-    // remember from project B searchable under A and invisible to B.
+  it("default remembers from two projects remain scoped to each project", async () => {
+    // Regression (F2): remember({text}) with no sessionId used one literal
+    // "mcp" scope, allowing saves from one project to leak into another.
     const addr = http.server.address();
     const port = typeof addr === "object" && addr ? addr.port : 0;
     const base = `http://127.0.0.1:${port}`;
@@ -221,7 +263,7 @@ describe("MCP tool round-trips against the live daemon", () => {
   });
 
   it("memory_resume recalls a prior session scoped to its working directory", async () => {
-    // Simulate "Claude" capturing work in project alpha via the observe path.
+    // Simulate an agent explicitly saving work in project alpha.
     const cwdAlpha = "/work/alpha";
     await call("tools/call", {
       name: "memory_remember",
@@ -250,6 +292,271 @@ describe("MCP tool round-trips against the live daemon", () => {
     ).content[0]!.text;
     expect(text.toLowerCase()).toContain("alpha");
     expect(text.toLowerCase()).toContain("auth");
+  });
+});
+
+describe("MCP durable manual memory contract", () => {
+  it("stores file-less saves as human, explicitly confirmed, source-unverified memories", async () => {
+    const response = await call("tools/call", {
+      name: "memory_remember",
+      arguments: {
+        text: "Refresh tokens rotate every 15 minutes",
+        title: "Refresh-token rotation policy",
+        kind: "fact",
+      },
+    });
+    const saved = toolJson(response);
+    const id = saved["memoryId"] as string;
+    const memory = await kv.get<Memory>(KV.memories, id);
+
+    expect(memory).toMatchObject({
+      id,
+      title: "Refresh-token rotation policy",
+      content: "Refresh tokens rotate every 15 minutes",
+      type: "fact",
+      files: [],
+      origin: "manual",
+      isLatest: true,
+      retention: "durable",
+    });
+    expect(memory?.provenance).toMatchObject({
+      userConfirmed: true,
+      authoredBy: "user_or_agent",
+      agent: "mcp",
+    });
+    expect(memory?.provenance?.command).toBeUndefined();
+    expect(memory?.provenance?.fileHashes).toBeUndefined();
+
+    const why = await sdk.trigger<
+      { observationId: string; root: string },
+      { verdict?: { status: string } }
+    >({
+      function_id: "mem::why",
+      payload: { observationId: id, root: process.cwd() },
+    });
+    expect(why.verdict?.status).toBe("sourced_unverified");
+  });
+
+  it("hashes supplied project files and safe recall rejects the memory after drift", async () => {
+    const root = await mkdtemp(join(tmpdir(), "memwarden-remember-"));
+    try {
+      await mkdir(join(root, "src"));
+      const path = join(root, "src", "auth.ts");
+      const original = "export const refreshMinutes = 15;\n";
+      await writeFile(path, original);
+      const scoped = createMcpServer({ baseUrl: baseUrl(), cwd: root });
+      const savedResponse = await scoped.dispatch({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "memory_remember",
+          arguments: {
+            text: "FILE_EVIDENCE_CANARY refresh tokens rotate every 15 minutes",
+            title: "File-backed refresh policy",
+            files: ["src/auth.ts"],
+          },
+        },
+      });
+      const saved = toolJson(savedResponse);
+      const id = saved["memoryId"] as string;
+      const memory = await kv.get<Memory>(KV.memories, id);
+      const expectedHash = createHash("sha256").update(original).digest("hex");
+
+      expect(memory?.files).toEqual(["src/auth.ts"]);
+      expect(memory?.provenance?.fileHashes).toEqual({
+        "src/auth.ts": expectedHash,
+      });
+
+      const current = await scoped.dispatch({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "memory_resume",
+          arguments: { query: "FILE_EVIDENCE_CANARY" },
+        },
+      });
+      expect(String(toolJson(current)["text"])).toContain("FILE_EVIDENCE_CANARY");
+
+      await writeFile(path, "export const refreshMinutes = 60;\n");
+      const stale = await scoped.dispatch({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: {
+          name: "memory_resume",
+          arguments: { query: "FILE_EVIDENCE_CANARY" },
+        },
+      });
+      expect(String(toolJson(stale)["text"])).not.toContain("FILE_EVIDENCE_CANARY");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("deduplicates identical saves deterministically within a project", async () => {
+    const args = {
+      text: "DEDUP_CANARY releases require the conformance suite",
+      title: "Release gate",
+      kind: "workflow",
+    };
+    const first = toolJson(
+      await call("tools/call", {
+        name: "memory_remember",
+        arguments: { ...args, sessionId: "first-session" },
+      }),
+    );
+    const second = toolJson(
+      await call("tools/call", {
+        name: "memory_remember",
+        arguments: { ...args, sessionId: "second-session" },
+      }),
+    );
+
+    expect(second["memoryId"]).toBe(first["memoryId"]);
+    expect(second["deduplicated"]).toBe(true);
+    expect(await kv.list<Memory>(KV.memories)).toHaveLength(1);
+
+    const otherProject = createMcpServer({
+      baseUrl: baseUrl(),
+      cwd: "/work/dedup-other-project",
+    });
+    const third = toolJson(
+      await otherProject.dispatch({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "memory_remember", arguments: args },
+      }),
+    );
+    expect(third["memoryId"]).not.toBe(first["memoryId"]);
+    expect(await kv.list<Memory>(KV.memories)).toHaveLength(2);
+  });
+
+  it("archives the memory named by supersedes", async () => {
+    const first = toolJson(
+      await call("tools/call", {
+        name: "memory_remember",
+        arguments: {
+          text: "SUPERSEDED_POLICY_CANARY refresh tokens last one hour",
+          title: "Legacy refresh policy",
+        },
+      }),
+    );
+    const oldId = first["memoryId"] as string;
+    const second = toolJson(
+      await call("tools/call", {
+        name: "memory_remember",
+        arguments: {
+          text: "Refresh tokens rotate every 15 minutes",
+          title: "Current refresh policy",
+          supersedes: oldId,
+        },
+      }),
+    );
+    const newId = second["memoryId"] as string;
+
+    expect(await kv.get<Memory>(KV.memories, oldId)).toMatchObject({
+      isLatest: false,
+      supersededBy: newId,
+    });
+    expect(await kv.get<Memory>(KV.memories, newId)).toMatchObject({
+      isLatest: true,
+      supersedes: [oldId],
+    });
+    const search = toolJson(
+      await call("tools/call", {
+        name: "memory_search",
+        arguments: { query: "SUPERSEDED_POLICY_CANARY" },
+      }),
+    );
+    expect(JSON.stringify(search)).not.toContain("SUPERSEDED_POLICY_CANARY");
+  });
+
+  it("expires only when its explicit lifecycle deadline is swept", async () => {
+    const now = Date.now();
+    const expiresAt = new Date(now + 2 * 24 * 60 * 60 * 1000).toISOString();
+    const saved = toolJson(
+      await call("tools/call", {
+        name: "memory_remember",
+        arguments: {
+          text: "EXPIRY_CANARY temporary migration note",
+          title: "Temporary migration note",
+          expires_at: expiresAt,
+        },
+      }),
+    );
+    const id = saved["memoryId"] as string;
+    expect(await kv.get<Memory>(KV.memories, id)).toMatchObject({
+      forgetAfter: expiresAt,
+      retention: "expires",
+    });
+
+    const result = await sdk.trigger<{ now: number }, { expired: number }>({
+      function_id: "mem::auto-forget",
+      payload: { now: now + 3 * 24 * 60 * 60 * 1000 },
+    });
+    expect(result.expired).toBe(1);
+    expect(await kv.get(KV.memories, id)).toBeNull();
+    expect(getSearchIndex().search("EXPIRY_CANARY", 5)).toHaveLength(0);
+  });
+
+  it("can be explicitly deleted through the normal forget contract", async () => {
+    const saved = toolJson(
+      await call("tools/call", {
+        name: "memory_remember",
+        arguments: {
+          text: "DELETE_MANUAL_CANARY remove this explicit memory",
+          title: "Disposable manual memory",
+        },
+      }),
+    );
+    const id = saved["memoryId"] as string;
+    const forgotten = await sdk.trigger<
+      { observationId: string },
+      { deleted: boolean; receipt?: { obsId: string; chainIntact: boolean } }
+    >({
+      function_id: "mem::forget",
+      payload: { observationId: id },
+    });
+
+    expect(forgotten).toMatchObject({
+      deleted: true,
+      receipt: { obsId: id, chainIntact: true },
+    });
+    expect(await kv.get(KV.memories, id)).toBeNull();
+    expect(getSearchIndex().search("DELETE_MANUAL_CANARY", 5)).toHaveLength(0);
+  });
+
+  it("survives beyond the ordinary TTL without ever being accessed", async () => {
+    const saved = toolJson(
+      await call("tools/call", {
+        name: "memory_remember",
+        arguments: {
+          text: "POST_TTL_CANARY production deploys require two approvals",
+          title: "Production approval policy",
+        },
+      }),
+    );
+    const id = saved["memoryId"] as string;
+    const result = await sdk.trigger<
+      { now: number },
+      { forgotten: number; expired: number }
+    >({
+      function_id: "mem::auto-forget",
+      payload: { now: Date.now() + 90 * 24 * 60 * 60 * 1000 },
+    });
+
+    expect(result.expired).toBe(0);
+    expect(await kv.get<Memory>(KV.memories, id)).toBeTruthy();
+    const recalled = toolJson(
+      await call("tools/call", {
+        name: "memory_search",
+        arguments: { query: "POST_TTL_CANARY" },
+      }),
+    );
+    expect(JSON.stringify(recalled)).toContain("POST_TTL_CANARY");
   });
 });
 

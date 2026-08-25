@@ -9,7 +9,12 @@
 import type { ApiRequest, ISdk } from "../kernel/index.js";
 import type { HookPayload } from "../functions/types.js";
 import { getSecret, getQuantBits } from "../functions/config.js";
-import { getVectorIndex, getEmbeddingProvider } from "../functions/index.js";
+import {
+  getVectorIndex,
+  getEmbeddingProvider,
+  MANUAL_MEMORY_KINDS,
+} from "../functions/index.js";
+import type { RememberMemoryInput, RememberMemoryResult } from "../functions/index.js";
 import { listActiveAgents } from "../functions/fleet.js";
 import { summarizeFirewall } from "../functions/firewall-stats.js";
 import { QuantizedVectorIndex } from "../functions/quantized-vector-index.js";
@@ -184,6 +189,112 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
     function_id: "api::observe",
     config: {
       api_path: "/memwarden/observe",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  // --- POST /memwarden/remember -----------------------------------
+  sdk.registerFunction(
+    "api::remember",
+    async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const text = body["text"];
+      const project = asNonEmptyString(body["project"]);
+      if (typeof text !== "string" || !text.trim() || !project) {
+        return {
+          status_code: 400,
+          body: { error: "text and project are required strings" },
+        };
+      }
+      if (
+        body["title"] !== undefined &&
+        (typeof body["title"] !== "string" || !body["title"].trim())
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "title must be a non-empty string" },
+        };
+      }
+      if (
+        body["kind"] !== undefined &&
+        (typeof body["kind"] !== "string" ||
+          !(MANUAL_MEMORY_KINDS as readonly string[]).includes(body["kind"]))
+      ) {
+        return {
+          status_code: 400,
+          body: { error: `kind must be one of: ${MANUAL_MEMORY_KINDS.join(", ")}` },
+        };
+      }
+      if (
+        body["files"] !== undefined &&
+        (!Array.isArray(body["files"]) ||
+          body["files"].some((file) => typeof file !== "string"))
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "files must be an array of project-relative paths" },
+        };
+      }
+      const expiry =
+        body["expires_at"] !== undefined
+          ? body["expires_at"]
+          : body["expiry"] !== undefined
+            ? body["expiry"]
+            : body["expiresAt"];
+      if (
+        expiry !== undefined &&
+        expiry !== null &&
+        (typeof expiry !== "string" ||
+          !expiry.trim() ||
+          Number.isNaN(new Date(expiry).getTime()))
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "expires_at must be null or a valid date-time string" },
+        };
+      }
+      for (const field of ["sessionId", "supersedes", "agent"] as const) {
+        if (
+          body[field] !== undefined &&
+          (typeof body[field] !== "string" || !body[field].trim())
+        ) {
+          return {
+            status_code: 400,
+            body: { error: `${field} must be a non-empty string` },
+          };
+        }
+      }
+
+      const payload: RememberMemoryInput = { text, project };
+      if (typeof body["title"] === "string") payload.title = body["title"];
+      if (typeof body["kind"] === "string") {
+        payload.kind = body["kind"] as NonNullable<RememberMemoryInput["kind"]>;
+      }
+      if (Array.isArray(body["files"])) payload.files = body["files"] as string[];
+      if (expiry === null || typeof expiry === "string") payload.expiresAt = expiry;
+      if (typeof body["supersedes"] === "string") {
+        payload.supersedes = body["supersedes"];
+      }
+      if (typeof body["sessionId"] === "string") payload.sessionId = body["sessionId"];
+      if (typeof body["agent"] === "string") payload.agent = body["agent"];
+
+      await recordHostHeartbeat(payload.agent);
+      const result = await sdk.trigger<RememberMemoryInput, RememberMemoryResult>({
+        function_id: "mem::remember",
+        payload,
+      });
+      return {
+        status_code: result.success ? 201 : 400,
+        body: result.success ? result : { error: result.reason ?? "memory was not saved" },
+      };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::remember",
+    config: {
+      api_path: "/memwarden/remember",
       http_method: "POST",
       middleware_function_ids: ["middleware::api-auth"],
     },

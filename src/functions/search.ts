@@ -29,7 +29,7 @@ import {
   getRecallPolicy,
   isScopedVectorSearchEnabled,
 } from "./config.js";
-import { memoryToObservation } from "./memory-utils.js";
+import { isMemoryRecallable, memoryToObservation } from "./memory-utils.js";
 import { canonicalizePath } from "./paths.js";
 import { gitProjectKey } from "./git-identity.js";
 import { classifyProvenance, type Verdict } from "./verify.js";
@@ -284,14 +284,15 @@ export async function rebuildIndex(
   try {
     const memories = await kv.list<Memory>(KV.memories);
     for (const memory of memories) {
-      if (memory.isLatest === false) continue;
+      if (!isMemoryRecallable(memory)) continue;
       if (!memory.title || !memory.content) continue;
-      idx.add(memoryToObservation(memory));
+      const observation = memoryToObservation(memory);
+      idx.add(observation);
       liveIds?.add(memory.id);
       if (!preserveVectors || !vectorIndex?.has(memory.id)) {
         pending.push({
           id: memory.id,
-          sessionId: memory.sessionIds?.[0] ?? "memory",
+          sessionId: observation.sessionId,
           text: memory.title + " " + memory.content,
           context: { kind: "memory", logId: memory.id },
         });
@@ -747,7 +748,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           .catch(() => null);
         if (!obs) {
           const mem = await kv.get<Memory>(KV.memories, r.obsId).catch(() => null);
-          obs = mem ? memoryToObservation(mem) : null;
+          obs = mem && isMemoryRecallable(mem) ? memoryToObservation(mem) : null;
         }
         obsCache.set(r.obsId, obs);
         return obs;
@@ -798,19 +799,24 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
               canonicalizePath(s.cwd) !== cwdFilter
             )
               continue;
-          } else if (projectFilter) {
+          } else if (projectFilter || cwdFilter) {
             // Synthetic/memory entry: a null memProject means "unknown" and is
-            // let through for backward-compatibility; cwd filter doesn't apply.
+            // let through for backward-compatibility. A direct manual memory's
+            // project is also its capture cwd, so either active scope applies.
             const memProject = await loadMemoryProject(r.obsId);
-            if (
-              memProject !== null &&
-              canonicalizePath(memProject) !== projectFilter
-            )
-              continue;
+            if (memProject !== null) {
+              const canonicalMemoryProject = canonicalizePath(memProject);
+              if (
+                (projectFilter && canonicalMemoryProject !== projectFilter) ||
+                (cwdFilter && canonicalMemoryProject !== cwdFilter)
+              )
+                continue;
+            }
           }
         }
+        const obs = await loadObsOrMemory(r);
+        if (!obs) continue;
         if (safeOnly && cwdFilter) {
-          const obs = await loadObsOrMemory(r);
           // Fail closed for stale/missing candidates. Sourced-unverified memory
           // is allowed by design, but stale memory never gets injected.
           // When the memory's stable projectKey matches the caller's, verify
