@@ -23,6 +23,7 @@ import { createHash } from "node:crypto";
 import {
   CANON_FORMAT,
   canonPath,
+  mergeCanonRecords,
   parseCanon,
   readCanon,
   recordFromMemory,
@@ -255,6 +256,60 @@ describe("canon: portable verified memory", () => {
     expect(readme).toContain("CODEOWNERS");
     // The honesty boundary must survive into the artifact itself, not just docs.
     expect(readme).toContain("unchanged since capture");
+  });
+
+  it("merges by default so Canon-only team records survive; replace is explicit", () => {
+    writeRepoFile("a.ts", "1\n");
+    const now = new Date().toISOString();
+    const team = recordFromMemory(memoryFor("a.ts", "team-only", "mem_team"), repo, now)!;
+    const local = recordFromMemory(memoryFor("a.ts", "local", "mem_local"), repo, now)!;
+
+    expect(mergeCanonRecords([team], [local]).map((r) => r.id).sort()).toEqual([
+      "mem_local",
+      "mem_team",
+    ]);
+    expect(mergeCanonRecords([team], [local], "replace").map((r) => r.id)).toEqual([
+      "mem_local",
+    ]);
+  });
+
+  it("never derives a normalized capture commitment from already-stale bytes", () => {
+    writeRepoFile("src/policy.ts", "export const POLICY = 'old';\n");
+    const memory = memoryFor("src/policy.ts", "policy is old");
+    writeRepoFile("src/policy.ts", "export const POLICY = 'new';\n");
+
+    const record = recordFromMemory(memory, repo, new Date().toISOString())!;
+    expect(record.fileHashesNormalized).toBeUndefined();
+    expect(verifyCanon([record], repo)[0]!.verdict).toBe("stale");
+  });
+
+  it("refuses mixed/incomplete evidence instead of promoting a verified subset", () => {
+    writeRepoFile("src/a.ts", "a\n");
+    const memory = memoryFor("src/a.ts", "claim spans more than its evidence");
+    expect(
+      recordFromMemory(
+        { ...memory, provenance: { ...memory.provenance, mixedTrust: true } },
+        repo,
+        new Date().toISOString(),
+      ),
+    ).toBeNull();
+  });
+
+  it("skips a traversal-bearing record before verification can read outside the repo", () => {
+    const malicious = {
+      format: CANON_FORMAT,
+      id: "mem_escape",
+      type: "fact",
+      title: "escape",
+      content: "x",
+      concepts: [],
+      files: ["../outside.txt"],
+      fileHashes: { "../outside.txt": "a".repeat(64) },
+      promotedAt: new Date().toISOString(),
+    };
+    const parsed = parseCanon(JSON.stringify(malicious));
+    expect(parsed.records).toEqual([]);
+    expect(parsed.skipped).toBe(1);
   });
 });
 

@@ -191,13 +191,15 @@ export function getQuantRescoreDepth(): number {
 }
 
 /**
- * Recall policy for the safe_only firewall:
- *   balanced      (default) drop detected-stale, keep verified / sourced /
- *                 unsourced — labeled, never laundered.
- *   verified-only auto-inject ONLY hash-verified-current memory. The strict
- *                 stance against memory poisoning (OWASP ASI06): content that
- *                 cannot prove itself never reaches a model automatically.
- * Explicit lookups (plain memory_search) are never policy-filtered.
+ * Recall policy for current/automatic recall (safe_only is its compatibility
+ * alias). Classification always runs independently of this inclusion floor:
+ *   balanced      (default) drop source-drifted/unverifiable, keep verified /
+ *                 sourced / unsourced — labeled, never laundered.
+ *   verified-only include ONLY hash-verified-current memory. The strict stance
+ *                 against memory poisoning (OWASP ASI06): content that cannot
+ *                 prove itself never reaches a model as current context.
+ * Deliberate memory_search mode=historical/all bypasses the current-recall
+ * floor but never the classifier or source labels.
  */
 export function getRecallPolicy(): "balanced" | "verified-only" {
   const raw = (env("MEMWARDEN_RECALL_POLICY") ?? "").trim().toLowerCase();
