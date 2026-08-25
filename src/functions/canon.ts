@@ -4,8 +4,9 @@
 // Canon export is deliberately NOT semantic search: it pages over real stored
 // Memory rows and applies one exact project-identity predicate. Canon import is
 // deliberately NOT observe: it validates the committed record shape, re-hashes
-// every referenced file in this checkout, and only then writes a Memory with
-// the original title/content/evidence and Canon attestation intact.
+// every referenced file in this checkout, requires a raw or normalized content
+// match, and only then writes a Memory with the original evidence and an honest
+// verified/cosmetic Canon attestation intact.
 //
 
 import { statSync } from "node:fs";
@@ -21,7 +22,10 @@ import {
   resolveMemoryIdentity,
 } from "./memory-identity.js";
 import { isMemoryRecallable, memoryToObservation } from "./memory-utils.js";
-import { classifyProvenance, hashFiles } from "./verify.js";
+import {
+  classifyProvenance,
+  hashFileCommitments,
+} from "./verify.js";
 import {
   getSearchIndex,
   vectorIndexAddGuarded,
@@ -275,7 +279,7 @@ export type CanonImportResult =
       imported: true;
       id: string;
       projectKey: string;
-      verdict: "verified";
+      verdict: "verified" | "cosmetic";
     }
   | {
       ok: false;
@@ -320,12 +324,22 @@ export async function importCanonRecord(
     };
   }
 
-  // Exact raw capture hashes are the trust boundary. A normalized/cosmetic
-  // match is useful for `canon verify`, but it cannot become a stored
-  // `verified` Memory because classifyProvenance verifies raw hashes.
-  const actual = hashFiles(record.files, identity.root);
+  // Raw bytes win whenever they match. A normalized-only match is accepted as
+  // explicitly `cosmetic` (never mislabeled `verified`) so LF/CRLF checkout
+  // conversion remains portable without accepting a semantic source change.
+  const actual = hashFileCommitments(record.files, identity.root);
   for (const file of record.files) {
-    if (actual[file] !== record.fileHashes[file]) {
+    const rawMatches = actual.fileHashes[file] === record.fileHashes[file];
+    const expectedNormalized = record.fileHashesNormalized?.[file];
+    const normalizedMatches =
+      expectedNormalized !== undefined &&
+      actual.fileHashesNormalized[file] === expectedNormalized;
+    // When raw bytes match, any supplied normalized commitment must describe
+    // those same bytes; otherwise a dormant forged fallback could become
+    // "cosmetic" after a later source change.
+    const inconsistentNormalized =
+      rawMatches && expectedNormalized !== undefined && !normalizedMatches;
+    if (inconsistentNormalized || (!rawMatches && !normalizedMatches)) {
       return {
         ok: false,
         code: "hash_mismatch",
@@ -350,6 +364,9 @@ export async function importCanonRecord(
     cwd: identity.root,
     files: [...record.files],
     fileHashes: { ...record.fileHashes },
+    ...(record.fileHashesNormalized
+      ? { fileHashesNormalized: { ...record.fileHashesNormalized } }
+      : {}),
     command: "canon pull",
     userConfirmed: false,
     ...(record.capturedBy?.host ? { agent: record.capturedBy.host } : {}),
@@ -366,13 +383,13 @@ export async function importCanonRecord(
     },
   };
 
-  // Defense in depth and a second, immediately-pre-write hash check. This also
-  // proves the stored Provenance shape itself classifies as verified; caller
-  // prose or attestation metadata cannot influence the result.
+  // Defense in depth and a second, immediately-pre-write classification of the
+  // exact Provenance shape that will be stored. Only raw-verified or honestly
+  // cosmetic-current evidence can pass.
   const verdict = classifyProvenance(provenance, identity.root, {
     verifyAgainstRoot: true,
   });
-  if (verdict.status !== "verified") {
+  if (verdict.status !== "verified" && verdict.status !== "cosmetic") {
     return {
       ok: false,
       code: "hash_mismatch",
@@ -422,7 +439,7 @@ export async function importCanonRecord(
     imported: true,
     id: memory.id,
     projectKey: canonProjectKey,
-    verdict: "verified",
+    verdict: verdict.status,
   };
 }
 

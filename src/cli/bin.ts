@@ -303,6 +303,7 @@ async function doctor(rest: string[]): Promise<void> {
     total: number;
     safe: number;
     verified: number;
+    cosmetic?: number;
     sourcedUnverified: number;
     stale: Array<{ id: string; title: string; reason: string }>;
     unsourced: Array<{ id: string; title: string; reason: string }>;
@@ -317,7 +318,10 @@ async function doctor(rest: string[]): Promise<void> {
   console.log(
     `\nmemwarden doctor — ${root}${allProjects ? " (all projects)" : " (this project)"}\n`,
   );
-  console.log(`  VERIFIED:        ${r.verified} memories (code-backed, current)`);
+  console.log(`  VERIFIED:        ${r.verified} memories (byte-identical to capture)`);
+  console.log(
+    `  COSMETIC:        ${r.cosmetic ?? 0} memories (normalized content current; bytes differ)`,
+  );
   console.log(`  SOURCED:         ${r.sourcedUnverified} memories (sourced, not content-verified)`);
   console.log(`  STALE:           ${r.stale.length} memories reference files that changed/deleted`);
   console.log(`  UNSOURCED:       ${r.unsourced.length} memories have no evidence`);
@@ -1865,16 +1869,19 @@ async function canonPull(rest: string[]): Promise<void> {
   // The durable answer is CODEOWNERS on .memwarden/ plus review (documented in
   // the generated .memwarden/README.md); signing is the eventual fix.
   const checked = verifyCanon(records, root);
-  // Only exact raw capture-hash matches can enter the brain as source-verified.
-  // Cosmetic matches remain useful information in `canon verify`, but importing
-  // one with its old raw hash would immediately classify stale at recall.
-  const loadable = checked.filter((c) => c.verdict === "verified");
+  // Exact raw matches enter as verified; normalized-only matches enter as
+  // explicitly cosmetic/current. Both commitments are stored, so recall keeps
+  // the distinction instead of laundering CRLF conversion into "verified".
+  const loadable = checked.filter(
+    (candidate) =>
+      candidate.verdict === "verified" || candidate.verdict === "cosmetic",
+  );
   const yes = rest.includes("--yes");
   if (!yes && !asJson) {
     console.log(
       `\nmemwarden canon pull — ${root}\n\n` +
-        `  ${loadable.length} of ${checked.length} record(s) exactly match their capture hashes and would\n` +
-        `  be loaded into this machine's memory:\n`,
+        `  ${loadable.length} of ${checked.length} record(s) match raw or normalized capture commitments and would\n` +
+        `  be loaded into this machine's memory with honest trust labels:\n`,
     );
     for (const c of loadable.slice(0, 15)) {
       console.log(`    ${c.record.title}`);
@@ -1883,7 +1890,7 @@ async function canonPull(rest: string[]): Promise<void> {
     const rejected = checked.length - loadable.length;
     if (rejected > 0) {
       console.log(
-        `\n  ${rejected} refused (drifted, cosmetic-only, or unverifiable) — they will not be loaded.`,
+        `\n  ${rejected} refused (source-drifted or unverifiable) — they will not be loaded.`,
       );
     }
     console.log(
@@ -1898,11 +1905,13 @@ async function canonPull(rest: string[]): Promise<void> {
   for (const candidate of loadable) {
     const record = candidate.record;
     // Re-run local verification immediately before each import, after any
-    // confirmation delay. The daemon repeats the same raw-hash check at its
-    // core boundary immediately before writing, closing both stale previews and
-    // direct-API attempts to attach trusted status to caller prose.
+    // confirmation delay. The daemon repeats the raw/normalized check at its
+    // core boundary immediately before writing.
     const fresh = verifyCanon([record], root)[0];
-    if (!fresh || fresh.verdict !== "verified") {
+    if (
+      !fresh ||
+      (fresh.verdict !== "verified" && fresh.verdict !== "cosmetic")
+    ) {
       refused++;
       continue;
     }
@@ -1921,11 +1930,11 @@ async function canonPull(rest: string[]): Promise<void> {
   }
   console.log(
     `\nmemwarden canon pull — ${root}\n\n` +
-      `  loaded    ${loaded} verified memories into this machine's brain\n` +
+      `  loaded    ${loaded} verified/cosmetic-current memories into this machine's brain\n` +
       (refused > 0
-        ? `  refused   ${refused} without an exact local capture-hash match\n`
+        ? `  refused   ${refused} without a local raw or normalized commitment match\n`
         : "") +
-      `\n  Your agents now start with the team's verified canon instead of nothing.\n`,
+      `\n  Your agents now start with the team's source-current canon instead of nothing.\n`,
   );
 }
 

@@ -275,13 +275,15 @@ export function createMcpServer(opts: McpServerOptions) {
               type: "string",
               enum: [
                 "source-verified",
+                "source-cosmetic",
                 "sourced",
                 "unsourced",
                 "source-drifted",
                 "unverifiable",
               ],
             },
-            description: "Optional source-status allowlist applied after classification.",
+            description:
+              "Optional source-status allowlist, including source-cosmetic for normalized-only current matches.",
           },
           format: {
             type: "string",

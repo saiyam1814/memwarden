@@ -584,6 +584,17 @@ async function setupGitProject() {
   await runProcess("git", ["worktree", "add", "-b", "packed-alt", paths.worktree], {
     cwd: paths.repo,
   });
+  // Deterministic Windows regression on every host: capture from the LF main
+  // checkout, recall from a CRLF linked worktree. Never configure autocrlf away;
+  // this is a real cross-platform product contract.
+  writeFileSync(
+    join(paths.worktree, "src", "policy.ts"),
+    "export const PACKED_POLICY_VERSION = 1;\r\n",
+  );
+  writeFileSync(
+    join(paths.worktree, "src", "secret.ts"),
+    "export const credentialLocation = 'vault';\r\n",
+  );
 
   // Project-local fixture agent configs: connect must merge, never clobber.
   writeFileSync(
@@ -763,6 +774,14 @@ async function main() {
       assert.equal(recalled.mode, "current");
       assertLabeled(recalled.results, `current/${format}`);
       assert(recalled.results.every((item) => item.historical === false));
+      assert(
+        recalled.results.some(
+          (item) =>
+            item.trust === "cosmetic" &&
+            item.source_status === "source-cosmetic",
+        ),
+        `current/${format}: LF capture -> CRLF worktree was not labeled cosmetic/current`,
+      );
     }
     if (profile === "full") {
       const distinct = await mcpTool(paths.worktree, "memory_search", {
@@ -794,6 +813,10 @@ async function main() {
       format: "narrative",
     });
     assert(resultText(recalled).includes("PACKED_CURRENT_ALPHA"));
+    assert(
+      recalled.results.some((item) => item.source_status === "source-cosmetic"),
+      "normalized commitment did not survive restart",
+    );
     return `${after.stats.memories} memories recovered`;
   });
 
@@ -991,6 +1014,10 @@ async function main() {
         mode: "current",
       });
       assert(resultText(recalled).includes("PACKED_CURRENT_ALPHA"));
+      assert(
+        recalled.results.some((item) => item.source_status === "source-cosmetic"),
+        "Canon pull did not preserve the cosmetic/current label",
+      );
       assert(!resultText(recalled).includes("PACKED_SECRET_GATE"));
       return `${pulled.loaded} records loaded into fresh brain`;
     });

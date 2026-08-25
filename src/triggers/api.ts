@@ -500,6 +500,8 @@ export function registerApiTriggers(
       const allowedTrust = new Set([
         "verified",
         "source-verified",
+        "cosmetic",
+        "source-cosmetic",
         "sourced",
         "sourced-unverified",
         "unsourced",
@@ -521,7 +523,7 @@ export function registerApiTriggers(
           status_code: 400,
           body: {
             error:
-              "trust must be a non-empty array of source-verified, sourced, unsourced, source-drifted, or unverifiable",
+              "trust must be a non-empty array of source-verified, source-cosmetic, sourced, unsourced, source-drifted, or unverifiable",
           },
         };
       }
@@ -680,9 +682,10 @@ export function registerApiTriggers(
   });
 
   // --- POST /memwarden/canon/import -------------------------------
-  // The core handler repeats local hash verification immediately before the
-  // write. The route validates shape for a useful 400, but API validation is
-  // never the trust boundary (in-process callers cannot bypass the core gate).
+  // The core handler repeats local raw/normalized commitment verification
+  // immediately before the write. The route validates shape for a useful 400,
+  // but API validation is never the trust boundary (in-process callers cannot
+  // bypass the core gate).
   sdk.registerFunction(
     "api::canon-import",
     async (
@@ -1035,11 +1038,9 @@ export function registerApiTriggers(
   });
 
   // --- POST /memwarden/dejafix/lookup -----------------------------
-  // Déjà Fix: surface verified fixes for an error any agent already solved.
-  // Returns only fixes whose referenced files still hash-match (Verified
-  // Recall) — a stale fix is never returned. cwd is required: it is both the
-  // project firewall (a fix learned in repo A never leaks to repo B) and the
-  // working tree the fix is verified against.
+  // Déjà Fix: surface source-current fixes for an error any agent already
+  // solved. Raw-verified and cosmetic-current fixes pass; stale fixes never do.
+  // cwd is both the project firewall and the checkout used for classification.
   sdk.registerFunction(
     "api::dejafix-lookup",
     async (
