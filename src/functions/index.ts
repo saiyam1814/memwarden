@@ -1,8 +1,8 @@
 //
-// Barrel + single registration entrypoint for the core functions
-// (mem::observe, mem::context, mem::search). The boot path (src/index.ts)
-// constructs the StateKV over the kernel and calls registerCoreFunctions to
-// wire all three against the kernel's function registry in one step.
+// Barrel + single registration entrypoint for the core functions. The boot
+// path (src/index.ts) constructs the StateKV over the kernel and calls
+// registerCoreFunctions so observe/context/search and bounded auxiliary
+// boundaries such as Canon share one persistence chokepoint.
 
 import type { ISdk } from "../kernel/index.js";
 import { StateKV } from "../state/kv.js";
@@ -15,6 +15,8 @@ import { registerDoctorFunction } from "./doctor.js";
 import { registerDejaFixFunctions } from "./dejafix.js";
 import { registerReceiptFunction } from "./receipt.js";
 import { registerWhyFunction } from "./why.js";
+import { registerRememberFunction } from "./remember.js";
+import { registerCanonFunctions } from "./canon.js";
 import { DedupMap } from "./dedup.js";
 import { getTokenBudget, getMaxObservationsPerSession } from "./config.js";
 
@@ -46,6 +48,33 @@ export { registerReceiptFunction } from "./receipt.js";
 export type { DeleteReceipt, ForgetResult } from "./receipt.js";
 export { registerWhyFunction } from "./why.js";
 export type { WhyResult } from "./why.js";
+export {
+  registerRememberFunction,
+  rememberMemory,
+  normalizeManualFiles,
+  MANUAL_MEMORY_KINDS,
+} from "./remember.js";
+export type {
+  RememberMemoryInput,
+  RememberMemoryResult,
+} from "./remember.js";
+export {
+  CANON_FORMAT,
+  CANON_EXPORT_DEFAULT_PAGE,
+  CANON_EXPORT_MAX_PAGE,
+  canonProjectIdentity,
+  importCanonRecord,
+  isCanonRecord,
+  isPortableCanonPath,
+  listCanonMemories,
+  memoryMatchesCanonProject,
+  registerCanonFunctions,
+} from "./canon.js";
+export type {
+  CanonExportPage,
+  CanonImportResult,
+  CanonProjectIdentity,
+} from "./canon.js";
 export {
   registerDejaFixFunctions,
   recordFix,
@@ -93,9 +122,9 @@ export interface RegisterCoreOptions {
 }
 
 /**
- * Register the three core functions against the kernel. The kernel
- * routes the five state::* ids to its StateStore, so StateKV — constructed
- * over the kernel here — is the persistence chokepoint all three share.
+ * Register the core functions against the kernel. The kernel routes the five
+ * state::* ids to its StateStore, so StateKV — constructed over the kernel
+ * here — is the persistence chokepoint every registered boundary shares.
  */
 export function registerCoreFunctions(
   sdk: ISdk,
@@ -116,6 +145,8 @@ export function registerCoreFunctions(
   registerDejaFixFunctions(sdk, kv);
   registerReceiptFunction(sdk, kv);
   registerWhyFunction(sdk, kv);
+  registerRememberFunction(sdk, kv);
+  registerCanonFunctions(sdk, kv);
 
   return kv;
 }

@@ -92,6 +92,7 @@ export function registerWhyFunction(sdk: ISdk, kv: StateKV): void {
         typeof data?.root === "string" && data.root.trim()
           ? data.root.trim()
           : process.cwd();
+
       const sessions = await kv.list<Session>(KV.sessions);
       const sessionsById = new Map(sessions.map((session) => [session.id, session]));
       for (const s of sessions) {
