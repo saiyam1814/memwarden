@@ -38,7 +38,12 @@
 import { createHash } from "node:crypto";
 import type { ISdk } from "../kernel/index.js";
 import type { StateKV } from "../state/kv.js";
-import type { CompressedObservation, Memory, Session } from "./types.js";
+import type {
+  CompressedObservation,
+  Memory,
+  Provenance,
+  Session,
+} from "./types.js";
 import { KV } from "../state/schema.js";
 import {
   getSearchIndex,
@@ -138,6 +143,34 @@ interface ObservationIdentity {
   evidenceFingerprint: string;
 }
 
+function evidenceFingerprintFor(args: {
+  files: readonly string[] | undefined;
+  agentId: string | undefined;
+  provenance: Provenance | undefined;
+}): string {
+  const { provenance } = args;
+  return sha256({
+    v: 1,
+    observationFiles: canonicalExactStrings(args.files),
+    agentId: args.agentId ?? null,
+    provenance:
+      provenance === undefined
+        ? null
+        : {
+            cwd: provenance.cwd ?? null,
+            files:
+              provenance.files === undefined
+                ? null
+                : canonicalExactStrings(provenance.files),
+            fileHashes: canonicalFileHashes(provenance.fileHashes),
+            command: provenance.command ?? null,
+            agent: provenance.agent ?? null,
+            userConfirmed: provenance.userConfirmed ?? null,
+            mixedTrust: provenance.mixedTrust ?? null,
+          },
+  });
+}
+
 /**
  * Exact, explainable equivalence for folding. `capturedAt` is the sole omitted
  * provenance field: two captures of the same claim against the same hashes and
@@ -164,26 +197,10 @@ function observationIdentity(obs: CompressedObservation): ObservationIdentity {
         : normalizeClaimText(obs.imageDescription),
     modality: obs.modality ?? null,
   });
-  const provenance = obs.provenance;
-  const evidenceFingerprint = sha256({
-    v: 1,
-    observationFiles: canonicalExactStrings(obs.files),
-    agentId: obs.agentId ?? null,
-    provenance:
-      provenance === undefined
-        ? null
-        : {
-            cwd: provenance.cwd ?? null,
-            files:
-              provenance.files === undefined
-                ? null
-                : canonicalExactStrings(provenance.files),
-            fileHashes: canonicalFileHashes(provenance.fileHashes),
-            command: provenance.command ?? null,
-            agent: provenance.agent ?? null,
-            userConfirmed: provenance.userConfirmed ?? null,
-            mixedTrust: provenance.mixedTrust ?? null,
-          },
+  const evidenceFingerprint = evidenceFingerprintFor({
+    files: obs.files,
+    agentId: obs.agentId,
+    provenance: obs.provenance,
   });
   return {
     key: `${claimFingerprint}\n${evidenceFingerprint}`,
@@ -199,6 +216,99 @@ function contentFor(obs: CompressedObservation, fallbackTitle: string): string {
       .filter(Boolean),
   );
   return parts.join("\n") || fallbackTitle;
+}
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
+}
+
+function optionalClaimText(value: string | undefined): string | null {
+  return value === undefined ? null : normalizeClaimText(value);
+}
+
+/**
+ * Fingerprint-less rows are never accepted merely because their id happens to
+ * occupy a claim slot. Compatibility is reconstructible only when every field
+ * that contributes to the incoming claim/evidence projects to the stored row.
+ * Older file-write/edit memories cannot prove their original observation type,
+ * and rows that flattened non-empty facts cannot prove those facts survived, so
+ * both fail closed and are preserved under their existing id.
+ */
+function fingerprintlessMemoryMatchesIdentity(args: {
+  memory: Memory;
+  obs: CompressedObservation;
+  identity: ObservationIdentity;
+  project: string;
+  primaryFile: string;
+}): boolean {
+  const { memory, obs, identity, project, primaryFile } = args;
+  if (
+    (memory.claimFingerprint !== undefined &&
+      memory.claimFingerprint !== identity.claimFingerprint) ||
+    (memory.evidenceFingerprint !== undefined &&
+      memory.evidenceFingerprint !== identity.evidenceFingerprint)
+  ) {
+    return false;
+  }
+  // `architecture` loses whether the source was file_write or file_edit. Never
+  // guess when the fingerprint that disambiguates them is absent.
+  if (obs.type !== "file_read" || memory.type !== "fact") return false;
+  if (memory.isLatest !== true) return false;
+
+  const title =
+    normalizeClaimText(obs.title) || `Knowledge about ${primaryFile}`;
+  const facts = canonicalClaimStrings(obs.facts);
+  const concepts = canonicalClaimStrings(obs.concepts);
+  const files = canonicalExactStrings([
+    primaryFile,
+    ...(obs.files ?? []),
+    ...(obs.provenance?.files ?? []),
+  ]);
+  const expectedProject = project !== "_" ? project : undefined;
+
+  if (normalizeClaimText(memory.title) !== title) return false;
+  if (
+    normalizeClaimText(memory.content) !==
+    normalizeClaimText(contentFor(obs, title))
+  ) {
+    return false;
+  }
+  // A legacy row with no structured facts can prove compatibility only when
+  // the incoming claim has no independent facts to preserve.
+  if (memory.facts === undefined && facts.length > 0) return false;
+  if (!sameStrings(canonicalClaimStrings(memory.facts), facts)) return false;
+  if (!sameStrings(canonicalClaimStrings(memory.concepts), concepts)) {
+    return false;
+  }
+  if (!sameStrings(canonicalExactStrings(memory.files), files)) return false;
+  if (memory.project !== expectedProject) return false;
+  if (optionalClaimText(memory.subtitle) !== optionalClaimText(obs.subtitle)) {
+    return false;
+  }
+  if (obs.confidence !== undefined && !Number.isFinite(obs.confidence)) {
+    return false;
+  }
+  if (memory.confidence !== obs.confidence) return false;
+  if (memory.imageRef !== obs.imageRef) return false;
+  if (memory.imageData !== obs.imageData) return false;
+  if (
+    optionalClaimText(memory.imageDescription) !==
+    optionalClaimText(obs.imageDescription)
+  ) {
+    return false;
+  }
+  if (memory.modality !== obs.modality) return false;
+  if (memory.agentId !== obs.agentId) return false;
+
+  const reconstructedEvidence = evidenceFingerprintFor({
+    files: memory.files,
+    agentId: memory.agentId,
+    provenance: memory.provenance,
+  });
+  return reconstructedEvidence === identity.evidenceFingerprint;
 }
 
 interface Grouped {
@@ -220,6 +330,102 @@ interface DistillArgs {
 }
 
 type DistillResult = { memId: string; folded: number } | null;
+
+interface MemorySlot {
+  memId: string;
+  existing: Memory | null;
+}
+
+function claimMemoryDigest(args: {
+  project: string;
+  primaryFile: string;
+  identity: ObservationIdentity;
+}): string {
+  return sha256({
+    v: 2,
+    project: args.project,
+    primaryFile: args.primaryFile,
+    claimFingerprint: args.identity.claimFingerprint,
+    evidenceFingerprint: args.identity.evidenceFingerprint,
+  });
+}
+
+async function resolveMemorySlot(args: {
+  kv: StateKV;
+  project: string;
+  primaryFile: string;
+  obs: CompressedObservation;
+  identity: ObservationIdentity;
+}): Promise<MemorySlot | null> {
+  const { kv, project, primaryFile, obs, identity } = args;
+  const digest = claimMemoryDigest({ project, primaryFile, identity });
+  // v0.0.9 and earlier used fingerprintId(...): `mem_` + 16 hex chars (20
+  // total). Claim ids use the full digest (`mem_` + 64 hex, 68 total), so a
+  // genuine old per-file id cannot collide. The fallback protects arbitrary ids
+  // restored through Brain Bundle import or manually seeded stores.
+  const candidates = [`mem_${digest}`, `mem_claim_${digest}`] as const;
+
+  for (let index = 0; index < candidates.length; index++) {
+    const memId = candidates[index]!;
+    let existing: Memory | null;
+    try {
+      existing = await kv.get<Memory>(KV.memories, memId);
+    } catch (err) {
+      // Treat an unavailable predecessor as a hard stop, never as a miss:
+      // writing a partial replacement could erase accumulated lineage.
+      logger.warn("distill: failed to read existing memory", {
+        memId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+    if (!existing) return { memId, existing: null };
+
+    if (
+      existing.claimFingerprint === identity.claimFingerprint &&
+      existing.evidenceFingerprint === identity.evidenceFingerprint
+    ) {
+      return { memId, existing };
+    }
+
+    const hasMissingFingerprint =
+      existing.claimFingerprint === undefined ||
+      existing.evidenceFingerprint === undefined;
+    if (
+      hasMissingFingerprint &&
+      fingerprintlessMemoryMatchesIdentity({
+        memory: existing,
+        obs,
+        identity,
+        project,
+        primaryFile,
+      })
+    ) {
+      logger.info("distill: migrating compatible fingerprint-less memory", {
+        memId,
+      });
+      return { memId, existing };
+    }
+
+    if (index === 0) {
+      // Never overwrite an imported/corrupt occupant. A separate deterministic
+      // slot lets the new claim become durable while the occupant survives.
+      logger.warn("distill: preserving incompatible memory identity", {
+        memId,
+        fallback: candidates[1],
+      });
+      continue;
+    }
+
+    // Both deterministic slots are occupied by incompatible content. Preserve
+    // them and leave all source observations for retry/manual inspection.
+    logger.warn("distill: claim fallback also occupied; sources retained", {
+      memId,
+    });
+    return null;
+  }
+  return null;
+}
 
 /**
  * Distill one evidence-equivalent claim into a canonical Memory, then prune its
@@ -270,37 +476,15 @@ async function distillMembersUnlocked(
   }
 
   const newest = newestOf(groupObs);
-  // Full-digest identity: different claims or trust evidence get different KV
-  // keys even when they concern the same file. Promotion and consolidation of
-  // a true duplicate still converge on exactly one row.
-  const memId = `mem_${sha256({
-    v: 2,
+  const slot = await resolveMemorySlot({
+    kv,
     project,
     primaryFile,
-    claimFingerprint: identity.claimFingerprint,
-    evidenceFingerprint: identity.evidenceFingerprint,
-  })}`;
-  let existing: Memory | null;
-  try {
-    existing = await kv.get<Memory>(KV.memories, memId);
-  } catch (err) {
-    // Treat an unavailable predecessor as a hard stop, never as a miss: writing
-    // a partial replacement would erase its accumulated lineage.
-    logger.warn("distill: failed to read existing memory", {
-      memId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return null;
-  }
-  if (
-    existing &&
-    (existing.claimFingerprint !== identity.claimFingerprint ||
-      existing.evidenceFingerprint !== identity.evidenceFingerprint)
-  ) {
-    // A malformed legacy row or digest collision must never be overwritten.
-    logger.warn("distill: refused incompatible memory identity", { memId });
-    return null;
-  }
+    obs: newest,
+    identity,
+  });
+  if (!slot) return null;
+  const { memId, existing } = slot;
 
   const title =
     normalizeClaimText(newest.title) || `Knowledge about ${primaryFile}`;
@@ -313,18 +497,26 @@ async function distillMembersUnlocked(
     ...groupObs.flatMap((obs) => obs.provenance?.files ?? []),
   ]);
   const sourceObservationIds = unique([
-    ...(existing?.sourceObservationIds ?? []),
+    ...(existing?.sourceObservationIds ?? existing?.supersedes ?? []),
     ...groupObs.map((obs) => obs.id),
+  ]).sort();
+  const supersedes = unique([
+    ...(existing?.supersedes ?? []),
+    ...sourceObservationIds,
   ]).sort();
   const sessionIds = unique([
     ...(existing?.sessionIds ?? []),
     ...members.map((member) => member.sessionId),
   ]).sort();
-  // Strength climbs with reinforcement, not with unrelated claims that happen
-  // to share a file, and is capped at the existing 1-10 scale.
-  const strength = Math.min(
-    10,
-    5 + Math.floor(Math.log2(Math.max(2, sourceObservationIds.length))),
+  // Strength climbs with reinforcement, not with unrelated same-file claims.
+  // Never lower an imported row's standing; calculated reinforcement is capped
+  // at the existing 1-10 scale.
+  const strength = Math.max(
+    existing?.strength ?? 0,
+    Math.min(
+      10,
+      5 + Math.floor(Math.log2(Math.max(2, sourceObservationIds.length))),
+    ),
   );
 
   const memory: Memory = {
@@ -340,7 +532,7 @@ async function distillMembersUnlocked(
     sessionIds,
     strength,
     version: (existing?.version ?? 0) + 1,
-    supersedes: sourceObservationIds,
+    supersedes,
     sourceObservationIds,
     claimFingerprint: identity.claimFingerprint,
     evidenceFingerprint: identity.evidenceFingerprint,
@@ -358,6 +550,13 @@ async function distillMembersUnlocked(
       : {}),
     ...(newest.modality !== undefined ? { modality: newest.modality } : {}),
     ...(newest.agentId !== undefined ? { agentId: newest.agentId } : {}),
+    ...(existing?.parentId !== undefined ? { parentId: existing.parentId } : {}),
+    ...(existing?.relatedIds !== undefined
+      ? { relatedIds: existing.relatedIds }
+      : {}),
+    ...(existing?.forgetAfter !== undefined
+      ? { forgetAfter: existing.forgetAfter }
+      : {}),
     ...(project !== "_" ? { project } : {}),
     // Equivalent members have identical trust-relevant provenance. Carry the
     // newest one verbatim so capturedAt remains useful without synthesizing or
