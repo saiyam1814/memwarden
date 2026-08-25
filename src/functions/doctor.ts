@@ -2,7 +2,8 @@
 // mem::doctor — the memory doctor / firewall. Audits stored memories for
 // trustworthiness against the live repo, not just integrity:
 //
-//   VERIFIED   code-backed memory still matches its capture-time hashes
+//   VERIFIED   code-backed memory is byte-identical to capture
+//   COSMETIC   normalized content matches; line endings/whitespace differ
 //   SOURCED    sourced, but not content-verified
 //   STALE      references files that no longer exist or changed under root
 //   UNSOURCED  no evidence (no files, no command, not confirmed)
@@ -97,9 +98,10 @@ export interface DoctorFootprint {
 }
 export interface DoctorReport {
   total: number;
-  safe: number; // compatibility: current verified + sourced_unverified
-  verified: number; // compatibility: legacy verified verdict
-  sourcedUnverified: number; // compatibility: legacy sourced verdict
+  safe: number; // compatibility: current verified + cosmetic + sourced_unverified
+  verified: number; // byte-identical code-backed memory
+  cosmetic: number; // normalized content current; bytes differ cosmetically
+  sourcedUnverified: number; // sourced but not content-verified
   stale: DoctorEntry[];
   unsourced: DoctorEntry[];
   entries: DoctorEntry[];
@@ -128,6 +130,7 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
         total: 0,
         safe: 0,
         verified: 0,
+        cosmetic: 0,
         sourcedUnverified: 0,
         stale: [],
         unsourced: [],
@@ -223,6 +226,13 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
         switch (verdict.status) {
           case "verified":
             report.verified++;
+            if (projection.effective === "active") {
+              report.safe++;
+              conflictCandidates.push(obs);
+            }
+            break;
+          case "cosmetic":
+            report.cosmetic++;
             if (projection.effective === "active") {
               report.safe++;
               conflictCandidates.push(obs);

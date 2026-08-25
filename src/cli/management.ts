@@ -508,7 +508,7 @@ export async function runProjectsCommand(
       `    source      matched ${project.counts.source.matched} · cosmetic ${project.counts.source.cosmetic_drift} · drifted ${project.counts.source.drifted} · missing ${project.counts.source.missing} · unknown ${project.counts.source.unknown}`,
     );
     console.log(
-      `    status      verified ${project.counts.status.verified} · sourced ${project.counts.status.sourced_unverified} · stale ${project.counts.status.stale} · unsourced ${project.counts.status.unsourced} · unverifiable ${project.counts.status.unverifiable}`,
+      `    status      verified ${project.counts.status.verified} · cosmetic ${project.counts.status.cosmetic} · sourced ${project.counts.status.sourced_unverified} · stale ${project.counts.status.stale} · unsourced ${project.counts.status.unsourced} · unverifiable ${project.counts.status.unverifiable}`,
     );
     console.log(
       `    lifecycle   active ${project.counts.lifecycle.active} · needs_revalidation ${project.counts.lifecycle.needs_revalidation} · disputed ${project.counts.lifecycle.disputed} · archived ${project.counts.lifecycle.archived} · revoked ${project.counts.lifecycle.revoked} · superseded ${project.counts.lifecycle.superseded}`,

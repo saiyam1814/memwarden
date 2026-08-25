@@ -194,10 +194,10 @@ export function getQuantRescoreDepth(): number {
  * Recall policy for current/automatic recall (safe_only is its compatibility
  * alias). Classification always runs independently of this inclusion floor:
  *   balanced      (default) drop source-drifted/unverifiable, keep verified /
- *                 sourced / unsourced — labeled, never laundered.
- *   verified-only include ONLY hash-verified-current memory. The strict stance
- *                 against memory poisoning (OWASP ASI06): content that cannot
- *                 prove itself never reaches a model as current context.
+ *                 cosmetic / sourced / unsourced — labeled, never laundered.
+ *   verified-only include raw-verified or normalized-content-current memory.
+ *                 Cosmetic matches remain explicitly labeled, never promoted
+ *                 to byte-identical verification.
  * Deliberate memory_search mode=historical/all bypasses the current-recall
  * floor but never the classifier or source labels.
  */

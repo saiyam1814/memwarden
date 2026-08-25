@@ -18,6 +18,7 @@ import { StoreLibsql } from "./state/store-libsql.js";
 import { StateKV } from "./state/kv.js";
 import {
   registerCoreFunctions,
+  getEmbeddingProvider,
   setEmbeddingProvider,
   setVectorIndex,
   makeConfiguredVectorIndex,
@@ -28,9 +29,10 @@ import {
   getUpstreamKey,
   getProxyPort,
   getSecret,
+  getDataDir,
 } from "./functions/config.js";
 import { createEmbeddingProvider, LocalEmbeddingProvider } from "./embedding/index.js";
-import { registerApiTriggers } from "./triggers/api.js";
+import { registerApiTriggers, type ApiLifecycle } from "./triggers/api.js";
 import { startProxyServer } from "./proxy/server.js";
 
 const REST_PORT = parseInt(process.env.MEMWARDEN_REST_PORT ?? "3111", 10);
@@ -100,11 +102,14 @@ async function tryRegister(
  * (smart-search, remember, enrich, events, health) remain best-effort
  * dynamic imports so the kernel still boots while they land.
  */
-async function registerFunctions(sdk: Kernel): Promise<number> {
+async function registerFunctions(
+  sdk: Kernel,
+  lifecycle: ApiLifecycle,
+): Promise<number> {
   // Core path: one StateKV over the kernel, shared by all three functions.
   const kv = new StateKV(sdk);
   registerCoreFunctions(sdk, kv);
-  registerApiTriggers(sdk);
+  registerApiTriggers(sdk, undefined, lifecycle);
 
   let registered = 3; // observe + context + search
 
@@ -210,7 +215,14 @@ async function main(): Promise<void> {
     { store },
   );
 
-  const registered = await registerFunctions(sdk);
+  // The API lifecycle callback is registered before the HTTP server starts;
+  // it is bound to the real graceful shutdown implementation below as soon as
+  // all resources exist.
+  let requestShutdown = (): void => undefined;
+  const registered = await registerFunctions(sdk, {
+    dataDir: getDataDir(),
+    requestShutdown: () => requestShutdown(),
+  });
   console.log(
     `[memwarden] kernel ready — ${registered} function module(s) registered, store=${STORE_URL}`,
   );
@@ -220,6 +232,7 @@ async function main(): Promise<void> {
   // BM25-only — identical to the prior behavior. The model loads lazily on
   // first observe/search; warm it in the background so the first request is
   // fast without blocking boot.
+  let embeddingWarmup: Promise<void> | null = null;
   const embProvider = createEmbeddingProvider();
   if (embProvider) {
     // Don't claim semantic memory is on before confirming the optional
@@ -243,7 +256,7 @@ async function main(): Promise<void> {
       );
       const warmable = embProvider as { warmup?: () => Promise<void> };
       if (typeof warmable.warmup === "function") {
-        warmable.warmup().catch((err: unknown) => {
+        embeddingWarmup = warmable.warmup().catch((err: unknown) => {
           console.warn(
             `[memwarden] embedding model warmup failed — vector stream stays off until it loads:`,
             err instanceof Error ? err.message : err,
@@ -312,9 +325,25 @@ async function main(): Promise<void> {
     for (const t of timers) clearInterval(t);
     await http.close().catch(() => undefined);
     if (proxy) await proxy.close().catch(() => undefined);
+    // transformers.js owns ONNX native sessions. Let warmup settle and dispose
+    // them explicitly before Node tears down native mutexes; an immediate
+    // process.exit here used to crash after an otherwise-clean `down`.
+    if (embeddingWarmup) await embeddingWarmup.catch(() => undefined);
+    const provider = getEmbeddingProvider();
+    if (provider?.dispose) {
+      await Promise.resolve(provider.dispose()).catch((err: unknown) => {
+        console.warn(
+          `[memwarden] embedding shutdown failed:`,
+          err instanceof Error ? err.message : err,
+        );
+      });
+    }
+    setEmbeddingProvider(null);
+    setVectorIndex(null);
     await sdk.shutdown();
-    process.exit(0);
+    process.exitCode = 0;
   };
+  requestShutdown = () => void shutdown();
   process.on("SIGINT", () => void shutdown());
   process.on("SIGTERM", () => void shutdown());
 }

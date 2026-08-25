@@ -87,8 +87,12 @@ function adviceFor(verdict: Verdict, injectable: boolean): string {
   switch (verdict.status) {
     case "verified":
       return injectable
-        ? "Code-backed and current — safe to auto-inject."
+        ? "Code-backed and byte-identical to capture — safe to auto-inject."
         : "Verified, but the current recall policy still withholds it.";
+    case "cosmetic":
+      return injectable
+        ? "Code-backed and normalized-content current — line endings or trailing whitespace differ, so it is labeled [source-cosmetic]."
+        : "Normalized content is current, but the current recall policy still withholds it.";
     case "sourced_unverified":
       return injectable
         ? "Sourced but not hash-verified — injected under balanced policy, labeled [sourced]."
@@ -131,8 +135,9 @@ function explanationFields(
     projection.effective === "active" &&
     verdict.sourceStatus !== "drifted" &&
     verdict.sourceStatus !== "missing" &&
-    verdict.sourceStatus !== "cosmetic_drift" &&
-    (policy === "balanced" || verdict.status === "verified");
+    (policy === "balanced" ||
+      (verdict.evidenceTrust === "verified" &&
+        (verdict.status === "verified" || verdict.status === "cosmetic")));
   const intervals = memory ? validityIntervalsOf(memory) : [];
   const latest = intervals[intervals.length - 1];
   const observedAt =

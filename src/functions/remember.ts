@@ -11,7 +11,7 @@ import {
   projectIdentityMatchesPath,
   resolveMemoryIdentity,
 } from "./memory-identity.js";
-import { hashFiles } from "./verify.js";
+import { hashFileCommitments } from "./verify.js";
 import {
   getSearchIndex,
   vectorIndexAddGuarded,
@@ -318,8 +318,13 @@ export async function rememberMemory(
     if (agent) provenance.agent = agent;
     if (files.length > 0) {
       provenance.files = files;
-      const hashes = hashFiles(files, projectPath);
-      if (Object.keys(hashes).length > 0) provenance.fileHashes = hashes;
+      const commitments = hashFileCommitments(files, projectPath);
+      if (Object.keys(commitments.fileHashes).length > 0) {
+        provenance.fileHashes = commitments.fileHashes;
+      }
+      if (Object.keys(commitments.fileHashesNormalized).length > 0) {
+        provenance.fileHashesNormalized = commitments.fileHashesNormalized;
+      }
     }
     if (existing) {
       const priorFiles = [...(existing.provenance?.files ?? existing.files)].sort();
@@ -330,15 +335,37 @@ export async function rememberMemory(
       const nextHashes = Object.entries(provenance.fileHashes ?? {}).sort(
         ([left], [right]) => (left < right ? -1 : left > right ? 1 : 0),
       );
-      if (
-        JSON.stringify(priorFiles) !== JSON.stringify(nextFiles) ||
-        JSON.stringify(priorHashes) !== JSON.stringify(nextHashes)
-      ) {
+      const priorNormalized = Object.entries(
+        existing.provenance?.fileHashesNormalized ?? {},
+      ).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+      const nextNormalized = Object.entries(
+        provenance.fileHashesNormalized ?? {},
+      ).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+      const sameFiles = JSON.stringify(priorFiles) === JSON.stringify(nextFiles);
+      const rawEqual = JSON.stringify(priorHashes) === JSON.stringify(nextHashes);
+      const normalizedEqual =
+        priorNormalized.length === priorFiles.length &&
+        JSON.stringify(priorNormalized) === JSON.stringify(nextNormalized);
+      if (!sameFiles || (!rawEqual && !normalizedEqual)) {
         return {
           success: false,
           reason:
             "an existing memory with this content has different source evidence; use revalidate so the prior evidence version is preserved",
         };
+      }
+      // LF/CRLF-only conversion is current, not a new evidence version. Keep
+      // the original commitments so deduplication never rewrites capture history.
+      if (!rawEqual && normalizedEqual && existing.provenance) {
+        if (existing.provenance.fileHashes) {
+          provenance.fileHashes = existing.provenance.fileHashes;
+        }
+        if (existing.provenance.fileHashesNormalized) {
+          provenance.fileHashesNormalized =
+            existing.provenance.fileHashesNormalized;
+        }
+        if (existing.provenance.capturedAt) {
+          provenance.capturedAt = existing.provenance.capturedAt;
+        }
       }
     }
 
