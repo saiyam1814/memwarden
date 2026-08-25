@@ -355,6 +355,10 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
         cwd?: string;
         format?: string;
         token_budget?: number;
+        safe_only?: boolean;
+        mode?: string;
+        include_drifted?: boolean;
+        trust?: string[];
         include_memories?: boolean;
         all_projects?: boolean;
       }>,
@@ -413,6 +417,84 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
           body: { error: "token_budget must be a positive integer" },
         };
       }
+      if (
+        body["mode"] !== undefined &&
+        (typeof body["mode"] !== "string" ||
+          !["current", "historical", "all"].includes(
+            (body["mode"] as string).trim().toLowerCase(),
+          ))
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "mode must be one of: current, historical, all" },
+        };
+      }
+      if (
+        body["include_drifted"] !== undefined &&
+        typeof body["include_drifted"] !== "boolean"
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "include_drifted must be a boolean" },
+        };
+      }
+      const allowedTrust = new Set([
+        "verified",
+        "source-verified",
+        "sourced",
+        "sourced-unverified",
+        "unsourced",
+        "stale",
+        "source-drifted",
+        "unverifiable",
+      ]);
+      if (
+        body["trust"] !== undefined &&
+        (!Array.isArray(body["trust"]) ||
+          body["trust"].length === 0 ||
+          !body["trust"].every(
+            (item) =>
+              typeof item === "string" &&
+              allowedTrust.has(item.trim().toLowerCase()),
+          ))
+      ) {
+        return {
+          status_code: 400,
+          body: {
+            error:
+              "trust must be a non-empty array of source-verified, sourced, unsourced, source-drifted, or unverifiable",
+          },
+        };
+      }
+      const normalizedMode =
+        typeof body["mode"] === "string"
+          ? body["mode"].trim().toLowerCase()
+          : undefined;
+      const aliasMode =
+        body["include_drifted"] === true
+          ? "all"
+          : body["include_drifted"] === false
+            ? "current"
+            : undefined;
+      if (normalizedMode && aliasMode && normalizedMode !== aliasMode) {
+        return {
+          status_code: 400,
+          body: {
+            error:
+              "mode conflicts with include_drifted (true means all; false means current)",
+          },
+        };
+      }
+      if (
+        body["safe_only"] === true &&
+        ((normalizedMode !== undefined && normalizedMode !== "current") ||
+          (aliasMode !== undefined && aliasMode !== "current"))
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "safe_only is only compatible with mode=current" },
+        };
+      }
       // Verified Recall fails closed: safe_only needs a repo root to verify
       // against, so reject it rather than silently returning unverified memory.
       if (
@@ -432,6 +514,9 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
         format?: string;
         token_budget?: number;
         safe_only?: boolean;
+        mode?: string;
+        include_drifted?: boolean;
+        trust?: string[];
         include_memories?: boolean;
         all_projects?: boolean;
       } = { query: (body["query"] as string).trim() };
@@ -444,6 +529,11 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
       if (body["token_budget"] !== undefined)
         payload.token_budget = body["token_budget"] as number;
       if (body["safe_only"] === true) payload.safe_only = true;
+      if (normalizedMode !== undefined) payload.mode = normalizedMode;
+      if (typeof body["include_drifted"] === "boolean")
+        payload.include_drifted = body["include_drifted"];
+      if (Array.isArray(body["trust"]))
+        payload.trust = body["trust"].map((item) => String(item));
       if (inventory) payload.include_memories = true;
       if (body["all_projects"] === true) payload.all_projects = true;
 

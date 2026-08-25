@@ -424,7 +424,7 @@ describe("Verified Recall firewall (safe_only)", () => {
     expect(r.results[0]!.trust).toBe("verified");
   });
 
-  it("plain (non-safe_only) search stays unlabeled — no verdict was computed", async () => {
+  it("plain (non-safe_only) search is still classified and labeled", async () => {
     const root = repo();
     mkdirSync(join(root, "src"));
     writeFileSync(join(root, "src", "auth.ts"), "// bearer auth tokens\n");
@@ -438,10 +438,17 @@ describe("Verified Recall firewall (safe_only)", () => {
         limit: 10,
         format: "narrative",
       },
-    })) as { results: Array<{ trust?: string }>; text: string };
+    })) as {
+      results: Array<{ trust: string; source_status: string; evidence: string }>;
+      text: string;
+    };
     expect(r.results.length).toBe(1);
-    expect(r.results[0]!.trust).toBeUndefined();
-    expect(r.text).not.toContain("[verified]");
+    expect(r.results[0]).toMatchObject({
+      trust: "verified",
+      source_status: "source-verified",
+    });
+    expect(r.results[0]!.evidence).toMatch(/match their captured hashes/);
+    expect(r.text).toContain("[verified]");
   });
 
   it("does NOT silently drop conflicting memories from safe recall (both are kept, no conflicts_dropped)", async () => {

@@ -250,30 +250,79 @@ export function createMcpServer(opts: McpServerOptions) {
     {
       name: "memory_search",
       description:
-        "Search memories by meaning and keywords (TurboQuant vector + BM25 hybrid). Returns ranked matches. " +
-        "Scoped to the current project unless all_projects is true.",
+        "Search memories by meaning and keywords (TurboQuant vector + BM25 hybrid). " +
+        "Every result is trust/source-labeled. Defaults to current, firewalled memory in this project; " +
+        "source-drifted or superseded records require mode='historical'/'all' (or include_drifted=true).",
       inputSchema: {
         type: "object",
         properties: {
           query: { type: "string", description: "What to look for" },
           limit: { type: "number", description: "Max results (default 10)" },
+          mode: {
+            type: "string",
+            enum: ["current", "historical", "all"],
+            description:
+              "Inclusion policy: current (default, safe), historical (only source-drifted/superseded), or all (both). Classification and labels always run.",
+          },
+          include_drifted: {
+            type: "boolean",
+            description:
+              "Compatibility shorthand: true means mode='all'; false means mode='current'.",
+          },
+          trust: {
+            type: "array",
+            items: {
+              type: "string",
+              enum: [
+                "source-verified",
+                "sourced",
+                "unsourced",
+                "source-drifted",
+                "unverifiable",
+              ],
+            },
+            description: "Optional source-status allowlist applied after classification.",
+          },
+          format: {
+            type: "string",
+            enum: ["full", "compact", "narrative"],
+            description: "Result shape (default full); every shape carries source status.",
+          },
           all_projects: {
             type: "boolean",
             description:
-              "Search across every project instead of just this one (deliberate cross-repo lookup).",
+              "Search across every project instead of just this one. Each hit is checked against its own known checkout; unavailable checkouts are labeled unverifiable and excluded from current mode.",
           },
         },
         required: ["query"],
       },
-      // Project-scoped by default: an unscoped search silently mixes other
-      // repositories' memories into results. all_projects stays available
-      // as the explicit escape hatch for deliberate cross-repo lookups.
-      call: (a) =>
-        api("POST", "/memwarden/search", {
+      // Project-scoped and current by default. all_projects is an explicit
+      // cross-repo lookup, but it never verifies a hit against this server's
+      // unrelated cwd; the daemon classifies against each hit's own checkout.
+      call: (a) => {
+        const requestedMode =
+          typeof a["mode"] === "string" ? a["mode"].trim().toLowerCase() : undefined;
+        const aliasMode =
+          a["include_drifted"] === true
+            ? "all"
+            : a["include_drifted"] === false
+              ? "current"
+              : undefined;
+        if (requestedMode && aliasMode && requestedMode !== aliasMode) {
+          throw new Error(
+            "memory_search: mode conflicts with include_drifted (true means all; false means current)",
+          );
+        }
+        const mode = requestedMode ?? aliasMode ?? "current";
+        return api("POST", "/memwarden/search", {
           query: str(a["query"]),
           limit: typeof a["limit"] === "number" ? a["limit"] : 10,
+          mode,
+          ...(typeof a["format"] === "string" ? { format: a["format"] } : {}),
+          ...(Array.isArray(a["trust"]) ? { trust: a["trust"] } : {}),
           ...(a["all_projects"] === true ? {} : { cwd: serverCwd }),
-        }),
+        });
+      },
     },
     {
       name: "memory_context",

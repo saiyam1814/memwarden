@@ -18,7 +18,7 @@ these at boot and the CLI bakes `MEMWARDEN_*` tuning into the service unit).
 | `MEMWARDEN_CONSOLIDATE_IMPORTANCE_FLOOR` | `5` | observations above this importance are protected from proactive consolidation |
 | `MEMWARDEN_SECRET` | unset | bearer token for the REST API and the proxy (clients send it as their API key) |
 | `MEMWARDEN_INJECT` | on | `off` disables ALL auto-injection (SessionStart, Déjà Fix, proxy); the recall prompt and MCP tools still work |
-| `MEMWARDEN_RECALL_POLICY` | `balanced` | `verified-only` auto-injects ONLY hash-verified-current memory (strict ASI06 stance); `balanced` blocks detected-stale memory and keeps the rest (sourced and unsourced), each labeled |
+| `MEMWARDEN_RECALL_POLICY` | `balanced` | current/automatic inclusion floor: `verified-only` includes ONLY hash-verified-current memory (strict ASI06 stance); `balanced` blocks source-drifted/unverifiable memory and keeps verified, sourced, and unsourced results labeled. Classification always runs. |
 | `MEMWARDEN_CAPTURE` | on | `off` disables ALL auto-capture (PostToolUse hook, proxy tee) |
 | `MEMWARDEN_UPSTREAM_URL` | unset | upstream OpenAI-compatible base URL; enables the proxy |
 | `MEMWARDEN_UPSTREAM_KEY` | unset | API key forwarded to the upstream (omit for local models) |
@@ -51,6 +51,27 @@ latest payload still contains that claim and its accumulated lineage. Separate c
 live and are not superseded by activity elsewhere in the file. Expiring observations with no file
 provenance may still be removed, as may exact evidence-equivalent duplicates after their successor
 is durable.
+
+## Search classification and inclusion
+
+`memory_search` always classifies every returned item and labels all three output shapes (`full`,
+`compact`, and `narrative`) with `trust`, `source_status`, `captured_at`, and an evidence summary.
+The mode changes inclusion only:
+
+- `current` (the MCP default) excludes source-drifted, superseded, and cross-project unverifiable
+  records. `MEMWARDEN_RECALL_POLICY=verified-only` additionally excludes sourced and unsourced items.
+- `historical` returns only source-drifted or superseded records, with explicit temporal framing.
+- `all` returns current and historical classifications together. `include_drifted: true` is an alias
+  for this explicit mode.
+
+MCP search is scoped to its launch project unless `all_projects: true` is supplied. Cross-project
+results are verified against their own recorded or otherwise known checkout, never against the
+caller's unrelated files. A missing checkout produces `source_status: "unverifiable"`; it is available
+for deliberate `all` inspection but is not treated as current.
+
+The older `safe_only: true` REST/core flag remains supported for automatic recall surfaces and is
+fail-closed shorthand for project-scoped `current`. Deliberate historical/all inspection is not
+subject to the current inclusion floor, but it never bypasses classification or labeling.
 
 ## Per-project and per-session switches
 
