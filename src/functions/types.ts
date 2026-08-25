@@ -112,7 +112,8 @@ export interface Provenance {
   command?: string; // tool + command that produced it
   agent?: string; // which agent captured it (claude, codex, …)
   capturedAt?: string;
-  userConfirmed?: boolean; // explicitly saved by the user vs passively observed
+  userConfirmed?: boolean; // explicitly saved by a user/agent vs passively observed
+  authoredBy?: "user" | "agent" | "user_or_agent";
   /** The memory's CONTENT includes material its file evidence does not cover
    * (e.g. a handoff digest mixing code-backed decisions with unsourced
    * prompts/outcomes, or inherited files dropped by a cap). File drift can
@@ -167,8 +168,10 @@ export interface Memory {
   strength: number;
   confidence?: number;
   version: number;
+  origin?: "manual";
   parentId?: string;
   supersedes?: string[];
+  supersededBy?: string;
   relatedIds?: string[];
   sourceObservationIds?: string[];
   /** Full SHA-256 identities used by conservative claim-level consolidation.
@@ -177,6 +180,7 @@ export interface Memory {
   claimFingerprint?: string;
   evidenceFingerprint?: string;
   isLatest: boolean;
+  retention?: "durable" | "expires";
   forgetAfter?: string;
   imageRef?: string;
   imageData?: string;
