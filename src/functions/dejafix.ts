@@ -68,11 +68,10 @@ export interface VerifiedFix {
   sessionId?: string;
   cwd: string;
   timestamp: string;
-  /** "verified current" when all referenced files still hash-match; else
-   *  "sourced, unverified". Stale fixes are never returned at all. */
-  badge: "verified current" | "sourced, unverified";
-  /** The underlying classifier status (verified | sourced_unverified). */
-  status: "verified" | "sourced_unverified";
+  /** Exact, cosmetic-current, or sourced-only. Stale fixes are never returned. */
+  badge: "verified current" | "cosmetic current" | "sourced, unverified";
+  /** The underlying non-stale classifier status. */
+  status: "verified" | "cosmetic" | "sourced_unverified";
 }
 
 // ---------------------------------------------------------------------------
@@ -384,7 +383,11 @@ export async function lookupFix(
       timestamp: c.timestamp,
       status: verdict.status,
       badge:
-        verdict.status === "verified" ? "verified current" : "sourced, unverified",
+        verdict.status === "verified"
+          ? "verified current"
+          : verdict.status === "cosmetic"
+            ? "cosmetic current"
+            : "sourced, unverified",
     };
     if (c.rootCause !== undefined) fix.rootCause = c.rootCause;
     if (c.tool !== undefined) fix.tool = c.tool;

@@ -499,12 +499,14 @@ export type SearchVerdict = Verdict | {
 };
 export type TrustLabel =
   | "verified"
+  | "cosmetic"
   | "sourced"
   | "unsourced"
   | "stale"
   | "unverifiable";
 export type SourceStatusLabel =
   | "source-verified"
+  | "source-cosmetic"
   | "sourced"
   | "unsourced"
   | "source-drifted"
@@ -514,6 +516,8 @@ export function trustLabelOf(verdict: SearchVerdict): TrustLabel {
   switch (verdict.status) {
     case "verified":
       return "verified";
+    case "cosmetic":
+      return "cosmetic";
     case "sourced_unverified":
       return "sourced";
     case "stale":
@@ -529,6 +533,8 @@ export function sourceStatusOf(verdict: SearchVerdict): SourceStatusLabel {
   switch (verdict.status) {
     case "verified":
       return "source-verified";
+    case "cosmetic":
+      return "source-cosmetic";
     case "sourced_unverified":
       return "sourced";
     case "stale":
@@ -541,7 +547,7 @@ export function sourceStatusOf(verdict: SearchVerdict): SourceStatusLabel {
 }
 
 interface RecallClassificationFields {
-  /** Backward-compatible four-state label (`unverifiable` is additive). */
+  /** Trust label; `cosmetic` is current but explicitly not byte-identical. */
   trust: TrustLabel;
   /** Explicit source state; drift is never described as merely "stale". */
   source_status: SourceStatusLabel;
@@ -661,6 +667,8 @@ function normalizeTrustFilter(raw: unknown): Set<SourceStatusLabel> | null {
   const aliases: Record<string, SourceStatusLabel> = {
     verified: "source-verified",
     "source-verified": "source-verified",
+    cosmetic: "source-cosmetic",
+    "source-cosmetic": "source-cosmetic",
     sourced: "sourced",
     "sourced-unverified": "sourced",
     unsourced: "unsourced",
@@ -672,7 +680,7 @@ function normalizeTrustFilter(raw: unknown): Set<SourceStatusLabel> | null {
   for (const item of raw) {
     if (typeof item !== "string" || aliases[item.trim().toLowerCase()] === undefined) {
       throw new Error(
-        "mem::search: trust entries must be one of source-verified, sourced, unsourced, source-drifted, or unverifiable",
+        "mem::search: trust entries must be one of source-verified, source-cosmetic, sourced, unsourced, source-drifted, or unverifiable",
       );
     }
     normalized.add(aliases[item.trim().toLowerCase()]!);
@@ -1232,7 +1240,9 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
             !superseded &&
             sourceStatus !== "source-drifted" &&
             sourceStatus !== "unverifiable" &&
-            (getRecallPolicy() !== "verified-only" || verdict.status === "verified");
+            (getRecallPolicy() !== "verified-only" ||
+              verdict.status === "verified" ||
+              verdict.status === "cosmetic");
         } else if (inclusionMode === "historical") {
           included = superseded || sourceStatus === "source-drifted";
         }

@@ -20,7 +20,7 @@ flowchart TB
   subgraph Recall
     A1 -->|recall request| R1[Project scoping by canonical path]
     R1 --> R2[Hybrid BM25 + vector search, RRF]
-    R2 --> R3[Always-on provenance classifier: verified / sourced / source-drifted / unsourced / unverifiable]
+    R2 --> R3[Always-on provenance classifier: verified / cosmetic / sourced / source-drifted / unsourced / unverifiable]
     R3 --> R4[Inclusion policy: current / historical / all; verified-only raises the current floor]
     R4 --> R5[Untrusted-data framing]
     R5 --> A1
@@ -108,7 +108,7 @@ nuke-it-all path is `memwarden down --all --data`.
 src/kernel/      in-process runtime: function registry, trigger dispatch, pubsub, HTTP
 src/state/       StateKV, memory + libSQL stores, append-only hash-chained oplog
 src/functions/   observe / search (BM25 + TurboQuant vector + RRF) / doctor / conflicts / dejafix / context / forget+erase
-src/functions/verify.ts  Verified Recall: content-hash provenance -> verified / sourced_unverified / stale / unsourced
+src/functions/verify.ts  Verified Recall: raw + normalized commitments -> verified / cosmetic / sourced_unverified / stale / unsourced
 src/functions/injection-format.ts  the one untrusted-data formatter every injection surface routes through
 src/functions/paths.ts   canonical project/cwd scoping (recall never silently misses)
 src/embedding/   on-device embedding provider (transformers.js, optional)

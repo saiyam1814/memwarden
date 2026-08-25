@@ -120,7 +120,11 @@ export interface CanonAttestation {
 export interface Provenance {
   cwd?: string;
   files?: string[]; // files the memory references / was derived from
-  fileHashes?: Record<string, string>; // file -> sha256 at capture, for drift checks
+  fileHashes?: Record<string, string>; // file -> raw-byte sha256 at capture
+  /** UTF-8 text hash after CRLF/LF and trailing-whitespace normalization.
+   * Raw hashes remain authoritative when bytes match; this commitment only
+   * distinguishes cosmetic checkout conversion from actual source drift. */
+  fileHashesNormalized?: Record<string, string>;
   command?: string; // tool + command that produced it
   agent?: string; // which agent captured it (claude, codex, …)
   capturedAt?: string;
@@ -128,7 +132,7 @@ export interface Provenance {
   authoredBy?: "user" | "agent" | "user_or_agent";
   /** Set only by the dedicated Canon import boundary after local hash
    * verification. This records origin/attestation; it is NOT a cached trust
-   * verdict. Recall still re-hashes provenance.fileHashes every time. */
+   * verdict. Recall still re-hashes raw/normalized provenance every time. */
   canon?: CanonAttestation;
   /** The memory's CONTENT includes material its file evidence does not cover
    * (e.g. a handoff digest mixing code-backed decisions with unsourced
