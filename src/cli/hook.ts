@@ -582,7 +582,11 @@ async function dejaFixInjection(
         status?: string;
       }>;
     };
-    const fix = (data.fixes ?? []).find((f) => f.status === "verified" && f.fix);
+    const fix = (data.fixes ?? []).find(
+      (candidate) =>
+        (candidate.status === "verified" || candidate.status === "cosmetic") &&
+        candidate.fix,
+    );
     if (!fix || !fix.fix) return "";
     // EVERY capsule field originated from a prior session's tool output —
     // hostile text, including tool and timestamp. All of them live INSIDE the

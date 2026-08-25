@@ -310,6 +310,8 @@ function normalizeStringArray(
 function normalizeStatuses(value: unknown): Set<ManagementStatus> {
   const aliases: Record<string, ManagementStatus> = {
     verified: "verified",
+    cosmetic: "cosmetic",
+    reformatted: "cosmetic",
     sourced: "sourced_unverified",
     sourced_unverified: "sourced_unverified",
     "sourced-unverified": "sourced_unverified",
@@ -326,7 +328,7 @@ function normalizeStatuses(value: unknown): Set<ManagementStatus> {
     if (!normalized) {
       throw new ManagementError(
         "invalid_input",
-        "status entries must be verified, sourced_unverified, stale, unsourced, or unverifiable",
+        "status entries must be verified, cosmetic, sourced_unverified, stale, unsourced, or unverifiable",
       );
     }
     out.add(normalized);
@@ -1538,7 +1540,14 @@ function emptyProject(sortKey: string, identity: ResolvedMemoryIdentity): Mutabl
         ["matched", "cosmetic_drift", "drifted", "missing", "unknown"] as const,
       ),
       status: zeroCounts(
-        ["verified", "sourced_unverified", "stale", "unsourced", "unverifiable"] as const,
+        [
+          "verified",
+          "cosmetic",
+          "sourced_unverified",
+          "stale",
+          "unsourced",
+          "unverifiable",
+        ] as const,
       ),
       lifecycle: zeroCounts(MEMORY_LIFECYCLE_STATES),
     },

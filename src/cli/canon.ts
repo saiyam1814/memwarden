@@ -35,9 +35,11 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
-import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { hashFiles } from "../functions/verify.js";
+import {
+  hashFileCommitments,
+  normalizedFileHash,
+} from "../functions/verify.js";
 import {
   projectIdentityMatchesPath,
   resolveMemoryIdentity,
@@ -119,31 +121,9 @@ export function scanForSecrets(record: {
   return hits;
 }
 
-/**
- * Hash of the file with line endings normalized to LF and trailing whitespace
- * stripped per line.
- *
- * Raw hashes make every cosmetic change look like a lie: run Prettier, bump a
- * license header, or check out on Windows and every memory about that file goes
- * stale while remaining perfectly true. A canon that screams on formatting gets
- * its CI gate deleted within a sprint. Storing both hashes lets verify separate
- * "the code changed" from "the bytes moved", which is the distinction users
- * actually care about.
- */
-export function normalizedFileHash(absPath: string): string | null {
-  try {
-    const text = readFileSync(absPath, "utf8");
-    const norm = text
-      .replace(/\r\n/g, "\n")
-      .split("\n")
-      .map((l) => l.replace(/[ \t]+$/, ""))
-      .join("\n")
-      .replace(/\n+$/, "\n");
-    return createHash("sha256").update(norm).digest("hex");
-  } catch {
-    return null;
-  }
-}
+/** Shared core primitive: Canon and live provenance must agree on exactly
+ * what counts as cosmetic text drift, without making core import CLI code. */
+export { normalizedFileHash };
 
 /** Bumped only for breaking record-shape changes; readers tolerate unknown
  *  extra fields so a format-compatible newer writer never breaks an older one.
@@ -402,20 +382,16 @@ export function reanchorRecord(
 ): CanonRecord | null {
   const names = Object.keys(record.fileHashes ?? {});
   if (names.length === 0) return null;
-  const fresh = hashFiles(names, root);
+  const fresh = hashFileCommitments(names, root);
   // Every listed file must still exist and be hashable. A memory whose source
   // is gone is not re-anchorable — it is dead, and should be dropped in review.
   const fileHashes: Record<string, string> = {};
   for (const f of names) {
-    const h = fresh[f];
-    if (!h) return null;
-    fileHashes[f] = h;
+    const hash = fresh.fileHashes[f];
+    if (!hash) return null;
+    fileHashes[f] = hash;
   }
-  const fileHashesNormalized: Record<string, string> = {};
-  for (const f of names) {
-    const n = normalizedFileHash(resolve(root, f));
-    if (n) fileHashesNormalized[f] = n;
-  }
+  const fileHashesNormalized = fresh.fileHashesNormalized;
   return {
     ...record,
     fileHashes,
@@ -453,19 +429,27 @@ export function verifyCanon(records: CanonRecord[], root: string): CanonCheck[] 
         drifted: unsafe.length > 0 ? unsafe : [...declared],
       };
     }
-    const actual = hashFiles(names, root);
+    const actual = hashFileCommitments(names, root);
     const expectedNorm = record.fileHashesNormalized ?? {};
     const drifted: string[] = [];
     let cosmeticOnly = true;
     for (const f of names) {
-      if (actual[f] === expected[f]) continue;
+      const wantNorm = expectedNorm[f];
+      const gotNorm = actual.fileHashesNormalized[f];
+      if (actual.fileHashes[f] === expected[f]) {
+        // A supplied normalized fallback is trust-bearing too. It must describe
+        // the exact captured bytes, not remain dormant until a later change.
+        if (wantNorm && gotNorm !== wantNorm) {
+          drifted.push(f);
+          cosmeticOnly = false;
+        }
+        continue;
+      }
       drifted.push(f);
       // Cosmetic only when we have a normalized commitment AND it still
       // matches. No normalized hash (older record, or an unreadable file) means
       // we cannot make that claim, so it counts as real drift — unprovable must
       // never round down to harmless.
-      const wantNorm = expectedNorm[f];
-      const gotNorm = wantNorm ? normalizedFileHash(resolve(root, f)) : null;
       if (!wantNorm || gotNorm !== wantNorm) cosmeticOnly = false;
     }
     const verdict: CanonVerdict =
@@ -512,6 +496,7 @@ export function recordFromMemory(
       cwd?: string;
       files?: string[];
       fileHashes?: Record<string, string>;
+      fileHashesNormalized?: Record<string, string>;
       /** `host` is accepted for old stored rows; current Provenance calls this
        * `agent`. */
       host?: string;
@@ -550,6 +535,8 @@ export function recordFromMemory(
   const captureCwd = identity.captureCwd;
   const sameProject = projectIdentityMatchesPath(identity, root);
   const fileHashes: Record<string, string> = {};
+  const fileHashesNormalized: Record<string, string> = {};
+  const capturedNormalized = provenance.fileHashesNormalized ?? {};
   for (const file of evidenceFiles) {
     const hash = hashes[file];
     // Every referenced source needs a capture-time commitment. Silently
@@ -575,19 +562,27 @@ export function recordFromMemory(
     const prior = fileHashes[rel];
     if (prior && prior !== hash) return null;
     fileHashes[rel] = hash;
+    const normalized = capturedNormalized[file];
+    if (normalized !== undefined) {
+      if (!/^[a-f0-9]{64}$/.test(normalized)) return null;
+      const priorNormalized = fileHashesNormalized[rel];
+      if (priorNormalized && priorNormalized !== normalized) return null;
+      fileHashesNormalized[rel] = normalized;
+    }
   }
   const files = Object.keys(fileHashes);
   if (files.length === 0) return null;
 
-  // A normalized commitment can only be derived now when the raw bytes still
-  // match the capture-time hash. Computing it from an already-drifted checkout
-  // would make arbitrary source changes look like harmless formatting.
-  const current = hashFiles(files, root);
-  const fileHashesNormalized: Record<string, string> = {};
+  // New live memories already carry capture-time normalized commitments. For
+  // legacy rows, derive one now ONLY when raw bytes still match capture;
+  // computing it from drifted source would launder arbitrary changes.
+  const current = hashFileCommitments(files, root);
   for (const rel of files) {
-    if (current[rel] !== fileHashes[rel]) continue;
-    const normalized = normalizedFileHash(resolve(root, rel));
-    if (normalized) fileHashesNormalized[rel] = normalized;
+    if (current.fileHashes[rel] !== fileHashes[rel]) continue;
+    const normalized = current.fileHashesNormalized[rel];
+    const captured = fileHashesNormalized[rel];
+    if (captured && captured !== normalized) return null;
+    if (!captured && normalized) fileHashesNormalized[rel] = normalized;
   }
 
   const canonOrigin = provenance.canon;

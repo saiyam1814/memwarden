@@ -41,6 +41,8 @@ let sdk: Kernel;
 let store: StoreLibsql;
 let http: RunningHttpServer;
 let base: string;
+let shutdownRequests: number;
+let lifecycleDataDir: string;
 
 beforeEach(async () => {
   __resetKernelSingleton();
@@ -53,7 +55,14 @@ beforeEach(async () => {
   // Same wiring the boot entrypoint performs.
   const kv = new StateKV(sdk);
   registerCoreFunctions(sdk, kv);
-  registerApiTriggers(sdk);
+  shutdownRequests = 0;
+  lifecycleDataDir = process.env.MEMWARDEN_DATA_DIR ?? tmpdir();
+  registerApiTriggers(sdk, undefined, {
+    dataDir: lifecycleDataDir,
+    requestShutdown: () => {
+      shutdownRequests++;
+    },
+  });
 
   // Ephemeral port: 0 lets the OS assign a free one. Read it back off the
   // listening socket.
@@ -110,6 +119,20 @@ describe("E2E: boot -> observe -> search (BM25) -> context over the REST wire", 
     const res = await fetch(`${base}/livez`);
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ status: "ok", service: "memwarden" });
+  });
+
+  it("shutdown is bounded to the exact daemon data directory", async () => {
+    const wrong = await postJson("/shutdown", {
+      data_dir: join(lifecycleDataDir, "other-brain"),
+    });
+    expect(wrong.status).toBe(409);
+    expect(shutdownRequests).toBe(0);
+
+    const accepted = await postJson("/shutdown", { data_dir: lifecycleDataDir });
+    expect(accepted.status).toBe(202);
+    expect(await accepted.json()).toEqual({ stopping: true });
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    expect(shutdownRequests).toBe(1);
   });
 
   it("POST /observe persists an observation and returns 201 { observationId }", async () => {

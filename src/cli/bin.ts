@@ -321,6 +321,7 @@ async function doctor(rest: string[]): Promise<void> {
     total: number;
     safe: number;
     verified: number;
+    cosmetic?: number;
     sourcedUnverified: number;
     stale: Array<{ id: string; title: string; reason: string }>;
     unsourced: Array<{ id: string; title: string; reason: string }>;
@@ -339,7 +340,10 @@ async function doctor(rest: string[]): Promise<void> {
   console.log(
     `\nmemwarden doctor — ${root}${allProjects ? " (all projects)" : " (this project)"}\n`,
   );
-  console.log(`  VERIFIED:        ${r.verified} memories (hash-backed source currently matches)`);
+  console.log(`  VERIFIED:        ${r.verified} memories (byte-identical to capture)`);
+  console.log(
+    `  COSMETIC:        ${r.cosmetic ?? 0} memories (normalized content current; bytes differ)`,
+  );
   console.log(`  SOURCED:         ${r.sourcedUnverified} memories (sourced, not content-verified)`);
   console.log(`  STALE:           ${r.stale.length} memories reference files that changed/deleted`);
   console.log(`  UNSOURCED:       ${r.unsourced.length} memories have no evidence`);
@@ -1249,19 +1253,10 @@ async function up(rest: string[]): Promise<void> {
         ? `  daemon    ⚠ could not start at ${daemonUrl} (port in use?)`
         : `  daemon    ✓ ${daemonUrl}  brain: ${dataDir} (detached, no service)`,
     );
-    // `down` deliberately leaves non-default daemons alone (see below), so
-    // pointing people at it here would be a lie — the honest stop is a kill.
-    // Killing the daemon is #16's territory either way.
-    let port = "";
-    try {
-      port = new URL(daemonUrl).port || "80";
-    } catch {
-      /* unparseable URL — omit the kill hint */
-    }
     console.log(
-      `\n  Nothing global was touched. The daemon stays up until killed or reboot.\n` +
-        (port ? `    stop it:   kill $(lsof -ti tcp:${port})\n` : "") +
-        `    clean up:  MEMWARDEN_URL=${daemonUrl} MEMWARDEN_DATA_DIR=${dataDir} memwarden down --data\n`,
+      `\n  Nothing global was touched. This isolated daemon stays up until you stop it.\n` +
+        `    stop it:    MEMWARDEN_URL=${daemonUrl} MEMWARDEN_DATA_DIR=${dataDir} memwarden down\n` +
+        `    clean up:   MEMWARDEN_URL=${daemonUrl} MEMWARDEN_DATA_DIR=${dataDir} memwarden down --data\n`,
     );
     return;
   }
@@ -1438,7 +1433,34 @@ function relativeTime(iso: string): string {
   return `${Math.floor(h / 24)}d ago`;
 }
 
-function down(rest: string[]): void {
+type StopDaemonResult = "stopped" | "not-running" | "unsupported" | "refused";
+
+/** Ask the exact daemon serving this brain to shut down, then prove the port is
+ * gone. The data-dir match is enforced again inside the authenticated daemon
+ * route, so a custom/test `down` cannot kill an unrelated live installation. */
+async function stopTargetDaemon(dataDir: string): Promise<StopDaemonResult> {
+  if (!(await daemonAlive(DAEMON_URL))) return "not-running";
+  let response: globalThis.Response;
+  try {
+    response = await fetch(`${DAEMON_URL}/memwarden/shutdown`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ data_dir: resolve(dataDir) }),
+      signal: AbortSignal.timeout(3000),
+    });
+  } catch {
+    return (await daemonAlive(DAEMON_URL)) ? "refused" : "stopped";
+  }
+  if (response.status === 404) return "unsupported";
+  if (!response.ok) return "refused";
+  for (let i = 0; i < 40; i++) {
+    await new Promise((done) => setTimeout(done, 125));
+    if (!(await daemonAlive(DAEMON_URL))) return "stopped";
+  }
+  return "refused";
+}
+
+async function down(rest: string[]): Promise<void> {
   const all = rest.includes("--all");
   const purgeData = rest.includes("--data");
   const home = homedir();
@@ -1450,11 +1472,18 @@ function down(rest: string[]): void {
   // Scope the damage to what was actually targeted.
   const isDefault = targetsDefaultDaemon();
   if (!isDefault) {
+    const stopped = await stopTargetDaemon(dataDir);
     console.log(
       `[memwarden] this run targets a NON-DEFAULT memwarden (${nonDefaultTarget()}),\n` +
         `so the user-global launchd/systemd service and tool configs were LEFT ALONE.\n` +
-        `Stop that daemon directly, or unset those variables to act on the real install.`,
+        `The targeted daemon is ${stopped === "stopped" ? "stopped" : stopped === "not-running" ? "already down" : "still running"}.`,
     );
+    if (stopped === "unsupported" || stopped === "refused") {
+      console.error(
+        `[memwarden] could not prove a clean shutdown (${stopped}); refusing destructive cleanup.`,
+      );
+      process.exitCode = 1;
+    }
     if (purgeData) {
       // A non-default daemon with NO explicit brain dir means dataDir resolved
       // to the user-global ~/.memwarden — `--data` here would delete the REAL
@@ -1466,7 +1495,8 @@ function down(rest: string[]): void {
             `delete the DEFAULT brain at ${dataDir} while targeting a non-default daemon.\n` +
             `Set MEMWARDEN_DATA_DIR to the brain you mean, or unset the URL/port overrides.`,
         );
-      } else {
+        process.exitCode = 1;
+      } else if (stopped === "stopped" || stopped === "not-running") {
         purgeBrain(dataDir);
       }
     }
@@ -1477,9 +1507,17 @@ function down(rest: string[]): void {
   if (r.ok) {
     console.log(`[memwarden] stopped and removed the ${r.kind} service.`);
   } else {
+    console.log(`[memwarden] no service to remove (${r.message}).`);
+  }
+  const stopped = await stopTargetDaemon(dataDir);
+  if (stopped === "unsupported" || stopped === "refused") {
+    console.error(
+      `[memwarden] could not prove the daemon exited (${stopped}); check ${join(dataDir, "daemon.log")}.`,
+    );
+    process.exitCode = 1;
+  } else {
     console.log(
-      `[memwarden] no service to remove (${r.message}). ` +
-        `A daemon started in the background will exit when you log out.`,
+      `[memwarden] daemon ${stopped === "stopped" ? "shut down cleanly" : "is not running"}.`,
     );
   }
 
@@ -1526,8 +1564,11 @@ function down(rest: string[]): void {
       `'memwarden down --all' from each, or delete the marked block by hand.`,
   );
 
-  if (purgeData) {
+  if (purgeData && (stopped === "stopped" || stopped === "not-running")) {
     purgeBrain(dataDir);
+  } else if (purgeData) {
+    console.error("[memwarden] refusing --data because daemon shutdown was not proven.");
+    process.exitCode = 1;
   } else {
     console.log(
       `[memwarden] your brain is untouched at ${dataDir} — delete it with\n` +
@@ -1959,16 +2000,19 @@ async function canonPull(rest: string[]): Promise<void> {
   // The durable answer is CODEOWNERS on .memwarden/ plus review (documented in
   // the generated .memwarden/README.md); signing is the eventual fix.
   const checked = verifyCanon(records, root);
-  // Only exact raw capture-hash matches can enter the brain as source-verified.
-  // Cosmetic matches remain useful information in `canon verify`, but importing
-  // one with its old raw hash would immediately classify stale at recall.
-  const loadable = checked.filter((c) => c.verdict === "verified");
+  // Exact raw matches enter as verified; normalized-only matches enter as
+  // explicitly cosmetic/current. Both commitments are stored, so recall keeps
+  // the distinction instead of laundering CRLF conversion into "verified".
+  const loadable = checked.filter(
+    (candidate) =>
+      candidate.verdict === "verified" || candidate.verdict === "cosmetic",
+  );
   const yes = rest.includes("--yes");
   if (!yes && !asJson) {
     console.log(
       `\nmemwarden canon pull — ${root}\n\n` +
-        `  ${loadable.length} of ${checked.length} record(s) exactly match their capture hashes and would\n` +
-        `  be loaded into this machine's memory:\n`,
+        `  ${loadable.length} of ${checked.length} record(s) match raw or normalized capture commitments and would\n` +
+        `  be loaded into this machine's memory with honest trust labels:\n`,
     );
     for (const c of loadable.slice(0, 15)) {
       console.log(`    ${c.record.title}`);
@@ -1977,7 +2021,7 @@ async function canonPull(rest: string[]): Promise<void> {
     const rejected = checked.length - loadable.length;
     if (rejected > 0) {
       console.log(
-        `\n  ${rejected} refused (drifted, cosmetic-only, or unverifiable) — they will not be loaded.`,
+        `\n  ${rejected} refused (source-drifted or unverifiable) — they will not be loaded.`,
       );
     }
     console.log(
@@ -1992,11 +2036,13 @@ async function canonPull(rest: string[]): Promise<void> {
   for (const candidate of loadable) {
     const record = candidate.record;
     // Re-run local verification immediately before each import, after any
-    // confirmation delay. The daemon repeats the same raw-hash check at its
-    // core boundary immediately before writing, closing both stale previews and
-    // direct-API attempts to attach trusted status to caller prose.
+    // confirmation delay. The daemon repeats the raw/normalized check at its
+    // core boundary immediately before writing.
     const fresh = verifyCanon([record], root)[0];
-    if (!fresh || fresh.verdict !== "verified") {
+    if (
+      !fresh ||
+      (fresh.verdict !== "verified" && fresh.verdict !== "cosmetic")
+    ) {
       refused++;
       continue;
     }
@@ -2015,11 +2061,11 @@ async function canonPull(rest: string[]): Promise<void> {
   }
   console.log(
     `\nmemwarden canon pull — ${root}\n\n` +
-      `  loaded    ${loaded} verified memories into this machine's brain\n` +
+      `  loaded    ${loaded} verified/cosmetic-current memories into this machine's brain\n` +
       (refused > 0
-        ? `  refused   ${refused} without an exact local capture-hash match\n`
+        ? `  refused   ${refused} without a local raw or normalized commitment match\n`
         : "") +
-      `\n  Your agents now start with the team's verified canon instead of nothing.\n`,
+      `\n  Your agents now start with the team's source-current canon instead of nothing.\n`,
   );
 }
 

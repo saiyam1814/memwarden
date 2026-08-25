@@ -239,8 +239,10 @@ export interface LifecycleProjection {
   effectiveReason: string;
 }
 
-/** Source status influences only the read-time current projection. In
- * particular, drift does not append a transition or change validTo. */
+/** Source status influences only the read-time current projection. Real drift
+ * or missing/unavailable evidence projects to needs_revalidation without a
+ * write. A normalized-content cosmetic match remains active but stays visibly
+ * labeled `cosmetic_drift`; it is never promoted to raw-byte verification. */
 export function lifecycleProjection(
   memory: Memory | null,
   sourceStatus:
@@ -257,8 +259,7 @@ export function lifecycleProjection(
     : "observation defaults to active (no persisted Memory lifecycle)";
   if (
     persisted === "active" &&
-    (sourceStatus === "cosmetic_drift" ||
-      sourceStatus === "drifted" ||
+    (sourceStatus === "drifted" ||
       sourceStatus === "missing" ||
       (sourceStatus === "unknown" && sourceUnavailable))
   ) {
@@ -271,9 +272,7 @@ export function lifecycleProjection(
           ? "live source evidence is missing"
           : sourceStatus === "drifted"
             ? "live source evidence drifted from its capture commitment"
-            : sourceStatus === "cosmetic_drift"
-              ? "live source bytes changed cosmetically from their raw capture commitment"
-              : "source evidence cannot be checked in an available checkout",
+            : "source evidence cannot be checked in an available checkout",
     };
   }
   return {

@@ -199,7 +199,7 @@ async function why(memoryId: string, root: string): Promise<WhyResult> {
 }
 
 async function safeRecall(root: string): Promise<{
-  results: Array<{ obsId: string; trust?: string }>;
+  results: Array<{ obsId: string; trust?: string; source_status?: string }>;
   firewall?: { refused: number; samples: Array<{ obsId: string }> };
 }> {
   return sdk.trigger({
@@ -235,7 +235,7 @@ async function inventory(root: string): Promise<Memory[]> {
 async function expectCheckoutVerdict(
   memoryId: string,
   root: string,
-  expected: "verified" | "stale",
+  expected: "verified" | "cosmetic" | "stale",
 ): Promise<void> {
   const [report, explanation, recall] = await Promise.all([
     doctor(root),
@@ -247,14 +247,19 @@ async function expectCheckoutVerdict(
     ? "stale"
     : report.verified === 1
       ? "verified"
-      : "other";
+      : report.cosmetic === 1
+        ? "cosmetic"
+        : "other";
   expect(doctorVerdict).toBe(expected);
   expect(explanation.found).toBe(true);
   expect(explanation.verdict?.status).toBe(expected);
 
   const recalled = recall.results.find((item) => item.obsId === memoryId);
-  if (expected === "verified") {
-    expect(recalled?.trust).toBe("verified");
+  if (expected === "verified" || expected === "cosmetic") {
+    expect(recalled?.trust).toBe(expected);
+    expect(recalled?.source_status).toBe(
+      expected === "verified" ? "source-verified" : "source-cosmetic",
+    );
     expect(explanation.injectable).toBe(true);
   } else {
     expect(recalled).toBeUndefined();
@@ -279,6 +284,8 @@ for (const kind of ["remote", "remote-less"] as const) {
       expect(memory.projectPath).toBe(repos.main);
       expect(memory.projectKey).toBe(stableKey);
       expect(memory.captureCwd).toBe(repos.main);
+      expect(memory.provenance?.fileHashes?.["src/auth.ts"]).toBeDefined();
+      expect(memory.provenance?.fileHashesNormalized?.["src/auth.ts"]).toBeDefined();
 
       // Both checkouts initially have identical files, so every surface agrees.
       await expectCheckoutVerdict(memory.id, repos.main, "verified");
@@ -290,6 +297,16 @@ for (const kind of ["remote", "remote-less"] as const) {
         memory.id,
       ]);
 
+      // Simulate Windows checkout conversion independently of the host OS: the
+      // capture checkout remains LF while the linked worktree is CRLF. Raw
+      // bytes differ, but normalized content is current and must stay recallable
+      // with an honest cosmetic label on doctor/why/search.
+      writeFileSync(
+        join(repos.worktree, "src", "auth.ts"),
+        "export const IDENTITY_TTL = 15;\r\n",
+      );
+      await expectCheckoutVerdict(memory.id, repos.worktree, "cosmetic");
+
       // Exercise the explicit legacy fallback in the same real worktree setup:
       // old consolidation stored the stable key in overloaded `project` and
       // had none of the three split fields.
@@ -298,7 +315,7 @@ for (const kind of ["remote", "remote-less"] as const) {
       delete legacy.projectKey;
       delete legacy.captureCwd;
       await kv.set(KV.memories, legacy.id, legacy);
-      await expectCheckoutVerdict(memory.id, repos.worktree, "verified");
+      await expectCheckoutVerdict(memory.id, repos.worktree, "cosmetic");
       const migratedInventory = await inventory(repos.worktree);
       expect(migratedInventory[0]).toMatchObject({
         id: memory.id,
@@ -311,6 +328,8 @@ for (const kind of ["remote", "remote-less"] as const) {
       // Also emulate an old absolute evidence key captured in the main checkout:
       // it must become repo-relative against the caller's worktree, not be lost.
       const storedHash = legacy.provenance?.fileHashes?.["src/auth.ts"]!;
+      const storedNormalized =
+        legacy.provenance?.fileHashesNormalized?.["src/auth.ts"]!;
       const absoluteCaptureFile = join(repos.main, "src", "auth.ts");
       const canonRecord = recordFromMemory(
         {
@@ -319,14 +338,20 @@ for (const kind of ["remote", "remote-less"] as const) {
             ...migratedInventory[0]!.provenance,
             files: [absoluteCaptureFile],
             fileHashes: { [absoluteCaptureFile]: storedHash },
+            fileHashesNormalized: {
+              [absoluteCaptureFile]: storedNormalized,
+            },
           },
         },
         repos.worktree,
         new Date().toISOString(),
       );
       expect(canonRecord?.files).toEqual(["src/auth.ts"]);
+      expect(canonRecord?.fileHashesNormalized?.["src/auth.ts"]).toBe(
+        storedNormalized,
+      );
       expect(verifyCanon([canonRecord!], repos.worktree)[0]!.verdict).toBe(
-        "verified",
+        "cosmetic",
       );
 
       // Diverge ONLY the caller worktree. Stable identity widens visibility,

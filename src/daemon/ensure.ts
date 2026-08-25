@@ -57,28 +57,27 @@ export async function ensureDaemon(
   if (await daemonAlive(url)) return "already";
   // libSQL won't create the data directory; make it so the daemon can open
   // its db instead of crashing on boot.
-  mkdirSync(dataDir, { recursive: true });
-  let logFd: number | null = null;
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  // Detached fallbacks need the same diagnosability as managed services. Keep
+  // stdout/stderr in the isolated brain so release gates and `memwarden logs`
+  // can inspect startup/shutdown failures instead of losing them to
+  // stdio="ignore".
+  const logPath = daemonLogPath(dataDir);
+  const logFd = openSync(logPath, "a", 0o600);
   try {
-    logFd = openSync(daemonLogPath(dataDir), "a", 0o600);
-    try {
-      chmodSync(daemonLogPath(dataDir), 0o600);
-    } catch {
-      // best-effort on filesystems without chmod
-    }
+    chmodSync(logPath, 0o600);
   } catch {
-    // Starting the daemon is more important than optional detached logs.
-    logFd = null;
+    // Best-effort on filesystems that do not implement POSIX permissions.
   }
   let child: ReturnType<typeof spawn>;
   try {
     child = spawn(process.execPath, [DAEMON_ENTRY], {
       detached: true,
-      stdio: logFd === null ? "ignore" : ["ignore", logFd, logFd],
+      stdio: ["ignore", logFd, logFd],
       env: { ...process.env, MEMWARDEN_DATA_DIR: dataDir },
     });
   } finally {
-    if (logFd !== null) closeSync(logFd);
+    closeSync(logFd);
   }
   child.unref();
   const deadline = Date.now() + timeoutMs;
