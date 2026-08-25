@@ -1,0 +1,2435 @@
+{
+  "schemaVersion": 1,
+  "kind": "memwarden-memory-halflife-summary",
+  "runId": "2026-08-24-four-repo",
+  "repositoryCount": 4,
+  "quantileMethod": "R7_LINEAR_INTERPOLATION",
+  "metric": {
+    "name": "substantive source drift exposure",
+    "unit": "sampled files",
+    "nonClaim": "Source drift is revalidation exposure. This study never observes a memory, recall, wrong answer, or semantic falsehood, so it is not a measured wrong-memory rate."
+  },
+  "analyses": [
+    {
+      "id": "primary",
+      "role": "primary",
+      "includeI18n": false,
+      "repositories": [
+        {
+          "name": "django",
+          "url": "https://github.com/django/django.git",
+          "headSha": "0b40210e4808937a7c0922e8b7502bff4752faa3",
+          "headDate": "2026-08-23",
+          "points": [
+            {
+              "days": 7,
+              "captureCommit": "c72f5fb4793f2cac66d76e3cbd590499ad85b89e",
+              "captureDate": "2026-08-17",
+              "arms": {
+                "touched": {
+                  "sampled": 224,
+                  "fates": {
+                    "identical": 209,
+                    "reformatted": 0,
+                    "modified": 15,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.06696428571428571,
+                  "substantiveRate": 0.06696428571428571,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 397,
+                    "reformatted": 0,
+                    "modified": 3,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.0075,
+                  "substantiveRate": 0.0075,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 7
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 297
+                  }
+                },
+                "sweeps": {
+                  "commits": 0,
+                  "touchedFiles": 0,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 30,
+              "captureCommit": "957d0cee7167757ae221ffde59d2cf0a322e89c7",
+              "captureDate": "2026-07-24",
+              "arms": {
+                "touched": {
+                  "sampled": 156,
+                  "fates": {
+                    "identical": 128,
+                    "reformatted": 0,
+                    "modified": 28,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.1794871794871795,
+                  "substantiveRate": 0.1794871794871795,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 380,
+                    "reformatted": 0,
+                    "modified": 19,
+                    "renamed": 0,
+                    "deleted": 1
+                  },
+                  "driftRate": 0.05,
+                  "substantiveRate": 0.05,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 10
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 295
+                  }
+                },
+                "sweeps": {
+                  "commits": 0,
+                  "touchedFiles": 0,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 90,
+              "captureCommit": "032549216074d25628a9d63f44767fa1ed801286",
+              "captureDate": "2026-05-25",
+              "arms": {
+                "touched": {
+                  "sampled": 168,
+                  "fates": {
+                    "identical": 93,
+                    "reformatted": 0,
+                    "modified": 75,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.44642857142857145,
+                  "substantiveRate": 0.44642857142857145,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 362,
+                    "reformatted": 0,
+                    "modified": 37,
+                    "renamed": 0,
+                    "deleted": 1
+                  },
+                  "driftRate": 0.095,
+                  "substantiveRate": 0.095,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 0
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 292
+                  }
+                },
+                "sweeps": {
+                  "commits": 1,
+                  "touchedFiles": 1,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 180,
+              "captureCommit": "169152f8f5ac586e19779faf9943086fe0f416e9",
+              "captureDate": "2026-02-25",
+              "arms": {
+                "touched": {
+                  "sampled": 64,
+                  "fates": {
+                    "identical": 14,
+                    "reformatted": 0,
+                    "modified": 50,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.78125,
+                  "substantiveRate": 0.78125,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 347,
+                    "reformatted": 0,
+                    "modified": 53,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.1325,
+                  "substantiveRate": 0.1325,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 5
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 289
+                  }
+                },
+                "sweeps": {
+                  "commits": 5,
+                  "touchedFiles": 0,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 365,
+              "captureCommit": "165ad74c578f94f962624a40dff14e1b2e23a1f8",
+              "captureDate": "2025-08-23",
+              "arms": {
+                "touched": {
+                  "sampled": 77,
+                  "fates": {
+                    "identical": 19,
+                    "reformatted": 0,
+                    "modified": 58,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.7532467532467533,
+                  "substantiveRate": 0.7532467532467533,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 398,
+                  "fates": {
+                    "identical": 316,
+                    "reformatted": 0,
+                    "modified": 82,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.20603015075376885,
+                  "substantiveRate": 0.20603015075376885,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 4
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 284
+                  }
+                },
+                "sweeps": {
+                  "commits": 13,
+                  "touchedFiles": 10,
+                  "randomFiles": 2
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "fastapi",
+          "url": "https://github.com/fastapi/fastapi.git",
+          "headSha": "c3f316b7e814667e8ee81e03a7330d00ee61e45c",
+          "headDate": "2026-08-19",
+          "points": [
+            {
+              "days": 7,
+              "captureCommit": "a1fa70d4237d50aae6586a0d9b229df583463d21",
+              "captureDate": "2026-08-14",
+              "arms": {
+                "touched": {
+                  "sampled": 13,
+                  "fates": {
+                    "identical": 12,
+                    "reformatted": 0,
+                    "modified": 1,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.07692307692307693,
+                  "substantiveRate": 0.07692307692307693,
+                  "underpowered": true
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 400,
+                    "reformatted": 0,
+                    "modified": 0,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0,
+                  "substantiveRate": 0,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 12,
+                    "nonSource": 23
+                  },
+                  "random": {
+                    "i18n": 1919,
+                    "nonSource": 30
+                  }
+                },
+                "sweeps": {
+                  "commits": 0,
+                  "touchedFiles": 0,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 30,
+              "captureCommit": "255b912928904e3ba5980425a54d6837c8bd1a1c",
+              "captureDate": "2026-07-24",
+              "arms": {
+                "touched": {
+                  "sampled": 15,
+                  "fates": {
+                    "identical": 4,
+                    "reformatted": 0,
+                    "modified": 11,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.7333333333333333,
+                  "substantiveRate": 0.7333333333333333,
+                  "underpowered": true
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 391,
+                    "reformatted": 0,
+                    "modified": 9,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.0225,
+                  "substantiveRate": 0.0225,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 193,
+                    "nonSource": 19
+                  },
+                  "random": {
+                    "i18n": 1918,
+                    "nonSource": 30
+                  }
+                },
+                "sweeps": {
+                  "commits": 0,
+                  "touchedFiles": 0,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 90,
+              "captureCommit": "6cbdde231589f14df19034e528f47216b52eb755",
+              "captureDate": "2026-05-24",
+              "arms": {
+                "touched": {
+                  "sampled": 23,
+                  "fates": {
+                    "identical": 7,
+                    "reformatted": 0,
+                    "modified": 16,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.6956521739130435,
+                  "substantiveRate": 0.6956521739130435,
+                  "underpowered": true
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 373,
+                    "reformatted": 0,
+                    "modified": 25,
+                    "renamed": 0,
+                    "deleted": 2
+                  },
+                  "driftRate": 0.0675,
+                  "substantiveRate": 0.0675,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 116,
+                    "nonSource": 9
+                  },
+                  "random": {
+                    "i18n": 1776,
+                    "nonSource": 28
+                  }
+                },
+                "sweeps": {
+                  "commits": 0,
+                  "touchedFiles": 0,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 180,
+              "captureCommit": "2b476737b8ed6aa8a42acd5a8e912656d08f15de",
+              "captureDate": "2026-02-25",
+              "arms": {
+                "touched": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 353,
+                    "reformatted": 0,
+                    "modified": 43,
+                    "renamed": 2,
+                    "deleted": 2
+                  },
+                  "driftRate": 0.1175,
+                  "substantiveRate": 0.1175,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 368,
+                    "reformatted": 0,
+                    "modified": 28,
+                    "renamed": 1,
+                    "deleted": 3
+                  },
+                  "driftRate": 0.08,
+                  "substantiveRate": 0.08,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 1144,
+                    "nonSource": 5
+                  },
+                  "random": {
+                    "i18n": 1712,
+                    "nonSource": 28
+                  }
+                },
+                "sweeps": {
+                  "commits": 1,
+                  "touchedFiles": 0,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 365,
+              "captureCommit": "9cf7b70d7b282b0671dbb1a93a4cbc31aac58abe",
+              "captureDate": "2025-08-20",
+              "arms": {
+                "touched": {
+                  "sampled": 2,
+                  "fates": {
+                    "identical": 0,
+                    "reformatted": 0,
+                    "modified": 1,
+                    "renamed": 0,
+                    "deleted": 1
+                  },
+                  "driftRate": 1,
+                  "substantiveRate": 1,
+                  "underpowered": true
+                },
+                "random": {
+                  "sampled": 260,
+                  "fates": {
+                    "identical": 94,
+                    "reformatted": 0,
+                    "modified": 66,
+                    "renamed": 61,
+                    "deleted": 39
+                  },
+                  "driftRate": 0.6384615384615384,
+                  "substantiveRate": 0.6384615384615384,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 4,
+                    "nonSource": 14
+                  },
+                  "random": {
+                    "i18n": 1313,
+                    "nonSource": 25
+                  }
+                },
+                "sweeps": {
+                  "commits": 4,
+                  "touchedFiles": 0,
+                  "randomFiles": 140
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "react",
+          "url": "https://github.com/facebook/react.git",
+          "headSha": "bd6ea412c6732b3b946a2827fcaac3a1c8f2e863",
+          "headDate": "2026-08-24",
+          "points": [
+            {
+              "days": 7,
+              "captureCommit": "eb8feb71096eec5c885b2a4c7d8d030d3622f265",
+              "captureDate": "2026-08-14",
+              "arms": {
+                "touched": {
+                  "sampled": 99,
+                  "fates": {
+                    "identical": 83,
+                    "reformatted": 0,
+                    "modified": 16,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.16161616161616163,
+                  "substantiveRate": 0.16161616161616163,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 399,
+                    "reformatted": 0,
+                    "modified": 1,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.0025,
+                  "substantiveRate": 0.0025,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 7
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 4376
+                  }
+                },
+                "sweeps": {
+                  "commits": 0,
+                  "touchedFiles": 0,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 30,
+              "captureCommit": "b685b40d870b90a975da28c8d22ecf0ba910b1a1",
+              "captureDate": "2026-07-24",
+              "arms": {
+                "touched": {
+                  "sampled": 86,
+                  "fates": {
+                    "identical": 42,
+                    "reformatted": 0,
+                    "modified": 44,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.5116279069767442,
+                  "substantiveRate": 0.5116279069767442,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 374,
+                    "reformatted": 0,
+                    "modified": 22,
+                    "renamed": 0,
+                    "deleted": 4
+                  },
+                  "driftRate": 0.065,
+                  "substantiveRate": 0.065,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 7
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 4381
+                  }
+                },
+                "sweeps": {
+                  "commits": 0,
+                  "touchedFiles": 0,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 90,
+              "captureCommit": "75b0945b18f4a60c80c931fd8067d9c715957879",
+              "captureDate": "2026-05-26",
+              "arms": {
+                "touched": {
+                  "sampled": 21,
+                  "fates": {
+                    "identical": 12,
+                    "reformatted": 0,
+                    "modified": 9,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.42857142857142855,
+                  "substantiveRate": 0.42857142857142855,
+                  "underpowered": true
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 288,
+                    "reformatted": 0,
+                    "modified": 104,
+                    "renamed": 0,
+                    "deleted": 8
+                  },
+                  "driftRate": 0.28,
+                  "substantiveRate": 0.28,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 15
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 4184
+                  }
+                },
+                "sweeps": {
+                  "commits": 0,
+                  "touchedFiles": 0,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 180,
+              "captureCommit": "e33071c6142ae5212483a63b87d5d962860e535a",
+              "captureDate": "2026-02-24",
+              "arms": {
+                "touched": {
+                  "sampled": 110,
+                  "fates": {
+                    "identical": 60,
+                    "reformatted": 0,
+                    "modified": 49,
+                    "renamed": 0,
+                    "deleted": 1
+                  },
+                  "driftRate": 0.45454545454545453,
+                  "substantiveRate": 0.45454545454545453,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 286,
+                    "reformatted": 0,
+                    "modified": 92,
+                    "renamed": 2,
+                    "deleted": 20
+                  },
+                  "driftRate": 0.285,
+                  "substantiveRate": 0.285,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 326
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 4147
+                  }
+                },
+                "sweeps": {
+                  "commits": 1,
+                  "touchedFiles": 0,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 365,
+              "captureCommit": "090777d78a4d61462dc984b9bba169edd3e7c088",
+              "captureDate": "2025-08-22",
+              "arms": {
+                "touched": {
+                  "sampled": 288,
+                  "fates": {
+                    "identical": 40,
+                    "reformatted": 0,
+                    "modified": 231,
+                    "renamed": 1,
+                    "deleted": 16
+                  },
+                  "driftRate": 0.8611111111111112,
+                  "substantiveRate": 0.8611111111111112,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 214,
+                    "reformatted": 0,
+                    "modified": 161,
+                    "renamed": 2,
+                    "deleted": 23
+                  },
+                  "driftRate": 0.465,
+                  "substantiveRate": 0.465,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 55
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 4130
+                  }
+                },
+                "sweeps": {
+                  "commits": 3,
+                  "touchedFiles": 2,
+                  "randomFiles": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "vite",
+          "url": "https://github.com/vitejs/vite.git",
+          "headSha": "c32e784c95b51f7969cebc7522a5037f14fb6606",
+          "headDate": "2026-08-24",
+          "points": [
+            {
+              "days": 7,
+              "captureCommit": "83ecb2c8059e8ce946a7cc835d4c14ef78aef4fd",
+              "captureDate": "2026-08-17",
+              "arms": {
+                "touched": {
+                  "sampled": 74,
+                  "fates": {
+                    "identical": 29,
+                    "reformatted": 0,
+                    "modified": 45,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.6081081081081081,
+                  "substantiveRate": 0.6081081081081081,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 351,
+                    "reformatted": 0,
+                    "modified": 49,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.1225,
+                  "substantiveRate": 0.1225,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 6
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 489
+                  }
+                },
+                "sweeps": {
+                  "commits": 3,
+                  "touchedFiles": 2,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 30,
+              "captureCommit": "3ac77d9dd742968961af38a5a91ed6b061ceda7d",
+              "captureDate": "2026-07-24",
+              "arms": {
+                "touched": {
+                  "sampled": 197,
+                  "fates": {
+                    "identical": 66,
+                    "reformatted": 0,
+                    "modified": 131,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.6649746192893401,
+                  "substantiveRate": 0.6649746192893401,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 399,
+                  "fates": {
+                    "identical": 334,
+                    "reformatted": 0,
+                    "modified": 65,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.16290726817042606,
+                  "substantiveRate": 0.16290726817042606,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 45
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 481
+                  }
+                },
+                "sweeps": {
+                  "commits": 3,
+                  "touchedFiles": 4,
+                  "randomFiles": 1
+                }
+              }
+            },
+            {
+              "days": 90,
+              "captureCommit": "b089c2bab9a92543678e07af6997435542d738c5",
+              "captureDate": "2026-05-26",
+              "arms": {
+                "touched": {
+                  "sampled": 128,
+                  "fates": {
+                    "identical": 49,
+                    "reformatted": 0,
+                    "modified": 78,
+                    "renamed": 0,
+                    "deleted": 1
+                  },
+                  "driftRate": 0.6171875,
+                  "substantiveRate": 0.6171875,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 315,
+                    "reformatted": 0,
+                    "modified": 83,
+                    "renamed": 0,
+                    "deleted": 2
+                  },
+                  "driftRate": 0.2125,
+                  "substantiveRate": 0.2125,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 28
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 437
+                  }
+                },
+                "sweeps": {
+                  "commits": 4,
+                  "touchedFiles": 0,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 180,
+              "captureCommit": "521fdc0ced51ddee7f728e6f891f36ebc6c0e1ce",
+              "captureDate": "2026-02-24",
+              "arms": {
+                "touched": {
+                  "sampled": 62,
+                  "fates": {
+                    "identical": 8,
+                    "reformatted": 0,
+                    "modified": 54,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.8709677419354839,
+                  "substantiveRate": 0.8709677419354839,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 295,
+                    "reformatted": 0,
+                    "modified": 99,
+                    "renamed": 5,
+                    "deleted": 1
+                  },
+                  "driftRate": 0.2625,
+                  "substantiveRate": 0.2625,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 10
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 405
+                  }
+                },
+                "sweeps": {
+                  "commits": 5,
+                  "touchedFiles": 3,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 365,
+              "captureCommit": "e899bc7c73a27cdf327875e5d696c50d396a7fc2",
+              "captureDate": "2025-08-21",
+              "arms": {
+                "touched": {
+                  "sampled": 130,
+                  "fates": {
+                    "identical": 26,
+                    "reformatted": 0,
+                    "modified": 88,
+                    "renamed": 0,
+                    "deleted": 16
+                  },
+                  "driftRate": 0.8,
+                  "substantiveRate": 0.8,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 398,
+                  "fates": {
+                    "identical": 264,
+                    "reformatted": 0,
+                    "modified": 120,
+                    "renamed": 8,
+                    "deleted": 6
+                  },
+                  "driftRate": 0.33668341708542715,
+                  "substantiveRate": 0.33668341708542715,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 45
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 339
+                  }
+                },
+                "sweeps": {
+                  "commits": 7,
+                  "touchedFiles": 3,
+                  "randomFiles": 2
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "acrossRepositories": [
+        {
+          "days": 7,
+          "repositoryCount": 4,
+          "arms": {
+            "touched": {
+              "includedRepositories": [
+                "django",
+                "react",
+                "vite"
+              ],
+              "excludedRepositories": [
+                {
+                  "name": "fastapi",
+                  "sampleSize": 13,
+                  "reason": "underpowered"
+                }
+              ],
+              "median": 0.16161616161616163,
+              "q1": null,
+              "q3": null
+            },
+            "random": {
+              "includedRepositories": [
+                "django",
+                "fastapi",
+                "react",
+                "vite"
+              ],
+              "excludedRepositories": [],
+              "median": 0.004999999999999999,
+              "q1": 0.001875,
+              "q3": 0.03625
+            }
+          }
+        },
+        {
+          "days": 30,
+          "repositoryCount": 4,
+          "arms": {
+            "touched": {
+              "includedRepositories": [
+                "django",
+                "react",
+                "vite"
+              ],
+              "excludedRepositories": [
+                {
+                  "name": "fastapi",
+                  "sampleSize": 15,
+                  "reason": "underpowered"
+                }
+              ],
+              "median": 0.5116279069767442,
+              "q1": null,
+              "q3": null
+            },
+            "random": {
+              "includedRepositories": [
+                "django",
+                "fastapi",
+                "react",
+                "vite"
+              ],
+              "excludedRepositories": [],
+              "median": 0.0575,
+              "q1": 0.043125000000000004,
+              "q3": 0.08947681704260652
+            }
+          }
+        },
+        {
+          "days": 90,
+          "repositoryCount": 4,
+          "arms": {
+            "touched": {
+              "includedRepositories": [
+                "django",
+                "vite"
+              ],
+              "excludedRepositories": [
+                {
+                  "name": "fastapi",
+                  "sampleSize": 23,
+                  "reason": "underpowered"
+                },
+                {
+                  "name": "react",
+                  "sampleSize": 21,
+                  "reason": "underpowered"
+                }
+              ],
+              "median": 0.5318080357142857,
+              "q1": null,
+              "q3": null
+            },
+            "random": {
+              "includedRepositories": [
+                "django",
+                "fastapi",
+                "react",
+                "vite"
+              ],
+              "excludedRepositories": [],
+              "median": 0.15375,
+              "q1": 0.08812500000000001,
+              "q3": 0.229375
+            }
+          }
+        },
+        {
+          "days": 180,
+          "repositoryCount": 4,
+          "arms": {
+            "touched": {
+              "includedRepositories": [
+                "django",
+                "fastapi",
+                "react",
+                "vite"
+              ],
+              "excludedRepositories": [],
+              "median": 0.6178977272727273,
+              "q1": 0.3702840909090909,
+              "q3": 0.803679435483871
+            },
+            "random": {
+              "includedRepositories": [
+                "django",
+                "fastapi",
+                "react",
+                "vite"
+              ],
+              "excludedRepositories": [],
+              "median": 0.1975,
+              "q1": 0.11937500000000001,
+              "q3": 0.268125
+            }
+          }
+        },
+        {
+          "days": 365,
+          "repositoryCount": 4,
+          "arms": {
+            "touched": {
+              "includedRepositories": [
+                "django",
+                "react",
+                "vite"
+              ],
+              "excludedRepositories": [
+                {
+                  "name": "fastapi",
+                  "sampleSize": 2,
+                  "reason": "underpowered"
+                }
+              ],
+              "median": 0.8,
+              "q1": null,
+              "q3": null
+            },
+            "random": {
+              "includedRepositories": [
+                "django",
+                "fastapi",
+                "react",
+                "vite"
+              ],
+              "excludedRepositories": [],
+              "median": 0.4008417085427136,
+              "q1": 0.3040201005025126,
+              "q3": 0.5083653846153846
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "include-i18n",
+      "role": "sensitivity",
+      "includeI18n": true,
+      "repositories": [
+        {
+          "name": "django",
+          "url": "https://github.com/django/django.git",
+          "headSha": "0b40210e4808937a7c0922e8b7502bff4752faa3",
+          "headDate": "2026-08-23",
+          "points": [
+            {
+              "days": 7,
+              "captureCommit": "c72f5fb4793f2cac66d76e3cbd590499ad85b89e",
+              "captureDate": "2026-08-17",
+              "arms": {
+                "touched": {
+                  "sampled": 224,
+                  "fates": {
+                    "identical": 209,
+                    "reformatted": 0,
+                    "modified": 15,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.06696428571428571,
+                  "substantiveRate": 0.06696428571428571,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 397,
+                    "reformatted": 0,
+                    "modified": 3,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.0075,
+                  "substantiveRate": 0.0075,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 7
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 297
+                  }
+                },
+                "sweeps": {
+                  "commits": 0,
+                  "touchedFiles": 0,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 30,
+              "captureCommit": "957d0cee7167757ae221ffde59d2cf0a322e89c7",
+              "captureDate": "2026-07-24",
+              "arms": {
+                "touched": {
+                  "sampled": 156,
+                  "fates": {
+                    "identical": 128,
+                    "reformatted": 0,
+                    "modified": 28,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.1794871794871795,
+                  "substantiveRate": 0.1794871794871795,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 380,
+                    "reformatted": 0,
+                    "modified": 19,
+                    "renamed": 0,
+                    "deleted": 1
+                  },
+                  "driftRate": 0.05,
+                  "substantiveRate": 0.05,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 10
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 295
+                  }
+                },
+                "sweeps": {
+                  "commits": 0,
+                  "touchedFiles": 0,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 90,
+              "captureCommit": "032549216074d25628a9d63f44767fa1ed801286",
+              "captureDate": "2026-05-25",
+              "arms": {
+                "touched": {
+                  "sampled": 168,
+                  "fates": {
+                    "identical": 93,
+                    "reformatted": 0,
+                    "modified": 75,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.44642857142857145,
+                  "substantiveRate": 0.44642857142857145,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 362,
+                    "reformatted": 0,
+                    "modified": 37,
+                    "renamed": 0,
+                    "deleted": 1
+                  },
+                  "driftRate": 0.095,
+                  "substantiveRate": 0.095,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 0
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 292
+                  }
+                },
+                "sweeps": {
+                  "commits": 1,
+                  "touchedFiles": 1,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 180,
+              "captureCommit": "169152f8f5ac586e19779faf9943086fe0f416e9",
+              "captureDate": "2026-02-25",
+              "arms": {
+                "touched": {
+                  "sampled": 64,
+                  "fates": {
+                    "identical": 14,
+                    "reformatted": 0,
+                    "modified": 50,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.78125,
+                  "substantiveRate": 0.78125,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 347,
+                    "reformatted": 0,
+                    "modified": 53,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.1325,
+                  "substantiveRate": 0.1325,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 5
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 289
+                  }
+                },
+                "sweeps": {
+                  "commits": 5,
+                  "touchedFiles": 0,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 365,
+              "captureCommit": "165ad74c578f94f962624a40dff14e1b2e23a1f8",
+              "captureDate": "2025-08-23",
+              "arms": {
+                "touched": {
+                  "sampled": 77,
+                  "fates": {
+                    "identical": 19,
+                    "reformatted": 0,
+                    "modified": 58,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.7532467532467533,
+                  "substantiveRate": 0.7532467532467533,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 398,
+                  "fates": {
+                    "identical": 316,
+                    "reformatted": 0,
+                    "modified": 82,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.20603015075376885,
+                  "substantiveRate": 0.20603015075376885,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 4
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 284
+                  }
+                },
+                "sweeps": {
+                  "commits": 13,
+                  "touchedFiles": 10,
+                  "randomFiles": 2
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "fastapi",
+          "url": "https://github.com/fastapi/fastapi.git",
+          "headSha": "c3f316b7e814667e8ee81e03a7330d00ee61e45c",
+          "headDate": "2026-08-19",
+          "points": [
+            {
+              "days": 7,
+              "captureCommit": "a1fa70d4237d50aae6586a0d9b229df583463d21",
+              "captureDate": "2026-08-14",
+              "arms": {
+                "touched": {
+                  "sampled": 24,
+                  "fates": {
+                    "identical": 22,
+                    "reformatted": 0,
+                    "modified": 2,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.08333333333333333,
+                  "substantiveRate": 0.08333333333333333,
+                  "underpowered": true
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 300,
+                    "reformatted": 0,
+                    "modified": 100,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.25,
+                  "substantiveRate": 0.25,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 24
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 273
+                  }
+                },
+                "sweeps": {
+                  "commits": 0,
+                  "touchedFiles": 0,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 30,
+              "captureCommit": "255b912928904e3ba5980425a54d6837c8bd1a1c",
+              "captureDate": "2026-07-24",
+              "arms": {
+                "touched": {
+                  "sampled": 208,
+                  "fates": {
+                    "identical": 126,
+                    "reformatted": 0,
+                    "modified": 82,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.3942307692307692,
+                  "substantiveRate": 0.3942307692307692,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 285,
+                    "reformatted": 0,
+                    "modified": 115,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.2875,
+                  "substantiveRate": 0.2875,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 19
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 274
+                  }
+                },
+                "sweeps": {
+                  "commits": 0,
+                  "touchedFiles": 0,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 90,
+              "captureCommit": "6cbdde231589f14df19034e528f47216b52eb755",
+              "captureDate": "2026-05-24",
+              "arms": {
+                "touched": {
+                  "sampled": 125,
+                  "fates": {
+                    "identical": 23,
+                    "reformatted": 0,
+                    "modified": 102,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.816,
+                  "substantiveRate": 0.816,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 213,
+                    "reformatted": 0,
+                    "modified": 187,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.4675,
+                  "substantiveRate": 0.4675,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 10
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 269
+                  }
+                },
+                "sweeps": {
+                  "commits": 0,
+                  "touchedFiles": 0,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 180,
+              "captureCommit": "2b476737b8ed6aa8a42acd5a8e912656d08f15de",
+              "captureDate": "2026-02-25",
+              "arms": {
+                "touched": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 114,
+                    "reformatted": 0,
+                    "modified": 284,
+                    "renamed": 0,
+                    "deleted": 2
+                  },
+                  "driftRate": 0.715,
+                  "substantiveRate": 0.715,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 165,
+                    "reformatted": 0,
+                    "modified": 231,
+                    "renamed": 0,
+                    "deleted": 4
+                  },
+                  "driftRate": 0.5875,
+                  "substantiveRate": 0.5875,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 5
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 263
+                  }
+                },
+                "sweeps": {
+                  "commits": 1,
+                  "touchedFiles": 0,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 365,
+              "captureCommit": "9cf7b70d7b282b0671dbb1a93a4cbc31aac58abe",
+              "captureDate": "2025-08-20",
+              "arms": {
+                "touched": {
+                  "sampled": 4,
+                  "fates": {
+                    "identical": 0,
+                    "reformatted": 0,
+                    "modified": 3,
+                    "renamed": 0,
+                    "deleted": 1
+                  },
+                  "driftRate": 1,
+                  "substantiveRate": 1,
+                  "underpowered": true
+                },
+                "random": {
+                  "sampled": 280,
+                  "fates": {
+                    "identical": 36,
+                    "reformatted": 0,
+                    "modified": 148,
+                    "renamed": 37,
+                    "deleted": 59
+                  },
+                  "driftRate": 0.8714285714285714,
+                  "substantiveRate": 0.8714285714285714,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 15
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 251
+                  }
+                },
+                "sweeps": {
+                  "commits": 4,
+                  "touchedFiles": 1,
+                  "randomFiles": 120
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "react",
+          "url": "https://github.com/facebook/react.git",
+          "headSha": "bd6ea412c6732b3b946a2827fcaac3a1c8f2e863",
+          "headDate": "2026-08-24",
+          "points": [
+            {
+              "days": 7,
+              "captureCommit": "eb8feb71096eec5c885b2a4c7d8d030d3622f265",
+              "captureDate": "2026-08-14",
+              "arms": {
+                "touched": {
+                  "sampled": 99,
+                  "fates": {
+                    "identical": 83,
+                    "reformatted": 0,
+                    "modified": 16,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.16161616161616163,
+                  "substantiveRate": 0.16161616161616163,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 399,
+                    "reformatted": 0,
+                    "modified": 1,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.0025,
+                  "substantiveRate": 0.0025,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 7
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 4376
+                  }
+                },
+                "sweeps": {
+                  "commits": 0,
+                  "touchedFiles": 0,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 30,
+              "captureCommit": "b685b40d870b90a975da28c8d22ecf0ba910b1a1",
+              "captureDate": "2026-07-24",
+              "arms": {
+                "touched": {
+                  "sampled": 86,
+                  "fates": {
+                    "identical": 42,
+                    "reformatted": 0,
+                    "modified": 44,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.5116279069767442,
+                  "substantiveRate": 0.5116279069767442,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 374,
+                    "reformatted": 0,
+                    "modified": 22,
+                    "renamed": 0,
+                    "deleted": 4
+                  },
+                  "driftRate": 0.065,
+                  "substantiveRate": 0.065,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 7
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 4381
+                  }
+                },
+                "sweeps": {
+                  "commits": 0,
+                  "touchedFiles": 0,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 90,
+              "captureCommit": "75b0945b18f4a60c80c931fd8067d9c715957879",
+              "captureDate": "2026-05-26",
+              "arms": {
+                "touched": {
+                  "sampled": 21,
+                  "fates": {
+                    "identical": 12,
+                    "reformatted": 0,
+                    "modified": 9,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.42857142857142855,
+                  "substantiveRate": 0.42857142857142855,
+                  "underpowered": true
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 288,
+                    "reformatted": 0,
+                    "modified": 104,
+                    "renamed": 0,
+                    "deleted": 8
+                  },
+                  "driftRate": 0.28,
+                  "substantiveRate": 0.28,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 15
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 4184
+                  }
+                },
+                "sweeps": {
+                  "commits": 0,
+                  "touchedFiles": 0,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 180,
+              "captureCommit": "e33071c6142ae5212483a63b87d5d962860e535a",
+              "captureDate": "2026-02-24",
+              "arms": {
+                "touched": {
+                  "sampled": 110,
+                  "fates": {
+                    "identical": 60,
+                    "reformatted": 0,
+                    "modified": 49,
+                    "renamed": 0,
+                    "deleted": 1
+                  },
+                  "driftRate": 0.45454545454545453,
+                  "substantiveRate": 0.45454545454545453,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 286,
+                    "reformatted": 0,
+                    "modified": 92,
+                    "renamed": 2,
+                    "deleted": 20
+                  },
+                  "driftRate": 0.285,
+                  "substantiveRate": 0.285,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 326
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 4147
+                  }
+                },
+                "sweeps": {
+                  "commits": 1,
+                  "touchedFiles": 0,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 365,
+              "captureCommit": "090777d78a4d61462dc984b9bba169edd3e7c088",
+              "captureDate": "2025-08-22",
+              "arms": {
+                "touched": {
+                  "sampled": 288,
+                  "fates": {
+                    "identical": 40,
+                    "reformatted": 0,
+                    "modified": 231,
+                    "renamed": 1,
+                    "deleted": 16
+                  },
+                  "driftRate": 0.8611111111111112,
+                  "substantiveRate": 0.8611111111111112,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 214,
+                    "reformatted": 0,
+                    "modified": 161,
+                    "renamed": 2,
+                    "deleted": 23
+                  },
+                  "driftRate": 0.465,
+                  "substantiveRate": 0.465,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 55
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 4130
+                  }
+                },
+                "sweeps": {
+                  "commits": 3,
+                  "touchedFiles": 2,
+                  "randomFiles": 0
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "vite",
+          "url": "https://github.com/vitejs/vite.git",
+          "headSha": "c32e784c95b51f7969cebc7522a5037f14fb6606",
+          "headDate": "2026-08-24",
+          "points": [
+            {
+              "days": 7,
+              "captureCommit": "83ecb2c8059e8ce946a7cc835d4c14ef78aef4fd",
+              "captureDate": "2026-08-17",
+              "arms": {
+                "touched": {
+                  "sampled": 74,
+                  "fates": {
+                    "identical": 29,
+                    "reformatted": 0,
+                    "modified": 45,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.6081081081081081,
+                  "substantiveRate": 0.6081081081081081,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 351,
+                    "reformatted": 0,
+                    "modified": 49,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.1225,
+                  "substantiveRate": 0.1225,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 6
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 489
+                  }
+                },
+                "sweeps": {
+                  "commits": 3,
+                  "touchedFiles": 2,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 30,
+              "captureCommit": "3ac77d9dd742968961af38a5a91ed6b061ceda7d",
+              "captureDate": "2026-07-24",
+              "arms": {
+                "touched": {
+                  "sampled": 197,
+                  "fates": {
+                    "identical": 66,
+                    "reformatted": 0,
+                    "modified": 131,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.6649746192893401,
+                  "substantiveRate": 0.6649746192893401,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 399,
+                  "fates": {
+                    "identical": 334,
+                    "reformatted": 0,
+                    "modified": 65,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.16290726817042606,
+                  "substantiveRate": 0.16290726817042606,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 45
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 481
+                  }
+                },
+                "sweeps": {
+                  "commits": 3,
+                  "touchedFiles": 4,
+                  "randomFiles": 1
+                }
+              }
+            },
+            {
+              "days": 90,
+              "captureCommit": "b089c2bab9a92543678e07af6997435542d738c5",
+              "captureDate": "2026-05-26",
+              "arms": {
+                "touched": {
+                  "sampled": 128,
+                  "fates": {
+                    "identical": 49,
+                    "reformatted": 0,
+                    "modified": 78,
+                    "renamed": 0,
+                    "deleted": 1
+                  },
+                  "driftRate": 0.6171875,
+                  "substantiveRate": 0.6171875,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 315,
+                    "reformatted": 0,
+                    "modified": 83,
+                    "renamed": 0,
+                    "deleted": 2
+                  },
+                  "driftRate": 0.2125,
+                  "substantiveRate": 0.2125,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 28
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 437
+                  }
+                },
+                "sweeps": {
+                  "commits": 4,
+                  "touchedFiles": 0,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 180,
+              "captureCommit": "521fdc0ced51ddee7f728e6f891f36ebc6c0e1ce",
+              "captureDate": "2026-02-24",
+              "arms": {
+                "touched": {
+                  "sampled": 62,
+                  "fates": {
+                    "identical": 8,
+                    "reformatted": 0,
+                    "modified": 54,
+                    "renamed": 0,
+                    "deleted": 0
+                  },
+                  "driftRate": 0.8709677419354839,
+                  "substantiveRate": 0.8709677419354839,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 400,
+                  "fates": {
+                    "identical": 295,
+                    "reformatted": 0,
+                    "modified": 99,
+                    "renamed": 5,
+                    "deleted": 1
+                  },
+                  "driftRate": 0.2625,
+                  "substantiveRate": 0.2625,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 10
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 405
+                  }
+                },
+                "sweeps": {
+                  "commits": 5,
+                  "touchedFiles": 3,
+                  "randomFiles": 0
+                }
+              }
+            },
+            {
+              "days": 365,
+              "captureCommit": "e899bc7c73a27cdf327875e5d696c50d396a7fc2",
+              "captureDate": "2025-08-21",
+              "arms": {
+                "touched": {
+                  "sampled": 130,
+                  "fates": {
+                    "identical": 26,
+                    "reformatted": 0,
+                    "modified": 88,
+                    "renamed": 0,
+                    "deleted": 16
+                  },
+                  "driftRate": 0.8,
+                  "substantiveRate": 0.8,
+                  "underpowered": false
+                },
+                "random": {
+                  "sampled": 398,
+                  "fates": {
+                    "identical": 264,
+                    "reformatted": 0,
+                    "modified": 120,
+                    "renamed": 8,
+                    "deleted": 6
+                  },
+                  "driftRate": 0.33668341708542715,
+                  "substantiveRate": 0.33668341708542715,
+                  "underpowered": false
+                }
+              },
+              "exclusions": {
+                "candidates": {
+                  "touched": {
+                    "i18n": 0,
+                    "nonSource": 45
+                  },
+                  "random": {
+                    "i18n": 0,
+                    "nonSource": 339
+                  }
+                },
+                "sweeps": {
+                  "commits": 7,
+                  "touchedFiles": 3,
+                  "randomFiles": 2
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "acrossRepositories": [
+        {
+          "days": 7,
+          "repositoryCount": 4,
+          "arms": {
+            "touched": {
+              "includedRepositories": [
+                "django",
+                "react",
+                "vite"
+              ],
+              "excludedRepositories": [
+                {
+                  "name": "fastapi",
+                  "sampleSize": 24,
+                  "reason": "underpowered"
+                }
+              ],
+              "median": 0.16161616161616163,
+              "q1": null,
+              "q3": null
+            },
+            "random": {
+              "includedRepositories": [
+                "django",
+                "fastapi",
+                "react",
+                "vite"
+              ],
+              "excludedRepositories": [],
+              "median": 0.065,
+              "q1": 0.0062499999999999995,
+              "q3": 0.15437499999999998
+            }
+          }
+        },
+        {
+          "days": 30,
+          "repositoryCount": 4,
+          "arms": {
+            "touched": {
+              "includedRepositories": [
+                "django",
+                "fastapi",
+                "react",
+                "vite"
+              ],
+              "excludedRepositories": [],
+              "median": 0.4529293381037567,
+              "q1": 0.3405448717948718,
+              "q3": 0.5499645850548932
+            },
+            "random": {
+              "includedRepositories": [
+                "django",
+                "fastapi",
+                "react",
+                "vite"
+              ],
+              "excludedRepositories": [],
+              "median": 0.11395363408521303,
+              "q1": 0.06125,
+              "q3": 0.19405545112781952
+            }
+          }
+        },
+        {
+          "days": 90,
+          "repositoryCount": 4,
+          "arms": {
+            "touched": {
+              "includedRepositories": [
+                "django",
+                "fastapi",
+                "vite"
+              ],
+              "excludedRepositories": [
+                {
+                  "name": "react",
+                  "sampleSize": 21,
+                  "reason": "underpowered"
+                }
+              ],
+              "median": 0.6171875,
+              "q1": null,
+              "q3": null
+            },
+            "random": {
+              "includedRepositories": [
+                "django",
+                "fastapi",
+                "react",
+                "vite"
+              ],
+              "excludedRepositories": [],
+              "median": 0.24625000000000002,
+              "q1": 0.18312499999999998,
+              "q3": 0.326875
+            }
+          }
+        },
+        {
+          "days": 180,
+          "repositoryCount": 4,
+          "arms": {
+            "touched": {
+              "includedRepositories": [
+                "django",
+                "fastapi",
+                "react",
+                "vite"
+              ],
+              "excludedRepositories": [],
+              "median": 0.7481249999999999,
+              "q1": 0.6498863636363637,
+              "q3": 0.803679435483871
+            },
+            "random": {
+              "includedRepositories": [
+                "django",
+                "fastapi",
+                "react",
+                "vite"
+              ],
+              "excludedRepositories": [],
+              "median": 0.27375,
+              "q1": 0.23,
+              "q3": 0.360625
+            }
+          }
+        },
+        {
+          "days": 365,
+          "repositoryCount": 4,
+          "arms": {
+            "touched": {
+              "includedRepositories": [
+                "django",
+                "react",
+                "vite"
+              ],
+              "excludedRepositories": [
+                {
+                  "name": "fastapi",
+                  "sampleSize": 4,
+                  "reason": "underpowered"
+                }
+              ],
+              "median": 0.8,
+              "q1": null,
+              "q3": null
+            },
+            "random": {
+              "includedRepositories": [
+                "django",
+                "fastapi",
+                "react",
+                "vite"
+              ],
+              "excludedRepositories": [],
+              "median": 0.4008417085427136,
+              "q1": 0.3040201005025126,
+              "q3": 0.5666071428571429
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
