@@ -4,12 +4,17 @@
 // that validates the request body and delegates to a mem::<x> business
 // handler via sdk.trigger (paths prefixed /memwarden, with the
 // middleware::api-auth chain). Scope: livez, observe, context, search,
-// verify, stats, doctor, export, import.
+// verify, stats, doctor, Canon export/import, and Brain Bundle export/import.
 
 import type { ApiRequest, ISdk } from "../kernel/index.js";
 import type { HookPayload } from "../functions/types.js";
 import { getSecret, getQuantBits } from "../functions/config.js";
-import { getVectorIndex, getEmbeddingProvider } from "../functions/index.js";
+import {
+  getVectorIndex,
+  getEmbeddingProvider,
+  MANUAL_MEMORY_KINDS,
+} from "../functions/index.js";
+import type { RememberMemoryInput, RememberMemoryResult } from "../functions/index.js";
 import { listActiveAgents } from "../functions/fleet.js";
 import { summarizeFirewall } from "../functions/firewall-stats.js";
 import { QuantizedVectorIndex } from "../functions/quantized-vector-index.js";
@@ -17,6 +22,11 @@ import { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { metrics } from "../observability/metrics.js";
 import { exportBundle, importBundle, isBrainBundle } from "../bundle/bundle.js";
+import {
+  CANON_EXPORT_MAX_PAGE,
+  isCanonRecord,
+  type CanonImportResult,
+} from "../functions/canon.js";
 import { timingSafeCompare } from "./auth.js";
 
 type Response = {
@@ -189,6 +199,112 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
     },
   });
 
+  // --- POST /memwarden/remember -----------------------------------
+  sdk.registerFunction(
+    "api::remember",
+    async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const text = body["text"];
+      const project = asNonEmptyString(body["project"]);
+      if (typeof text !== "string" || !text.trim() || !project) {
+        return {
+          status_code: 400,
+          body: { error: "text and project are required strings" },
+        };
+      }
+      if (
+        body["title"] !== undefined &&
+        (typeof body["title"] !== "string" || !body["title"].trim())
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "title must be a non-empty string" },
+        };
+      }
+      if (
+        body["kind"] !== undefined &&
+        (typeof body["kind"] !== "string" ||
+          !(MANUAL_MEMORY_KINDS as readonly string[]).includes(body["kind"]))
+      ) {
+        return {
+          status_code: 400,
+          body: { error: `kind must be one of: ${MANUAL_MEMORY_KINDS.join(", ")}` },
+        };
+      }
+      if (
+        body["files"] !== undefined &&
+        (!Array.isArray(body["files"]) ||
+          body["files"].some((file) => typeof file !== "string"))
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "files must be an array of project-relative paths" },
+        };
+      }
+      const expiry =
+        body["expires_at"] !== undefined
+          ? body["expires_at"]
+          : body["expiry"] !== undefined
+            ? body["expiry"]
+            : body["expiresAt"];
+      if (
+        expiry !== undefined &&
+        expiry !== null &&
+        (typeof expiry !== "string" ||
+          !expiry.trim() ||
+          Number.isNaN(new Date(expiry).getTime()))
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "expires_at must be null or a valid date-time string" },
+        };
+      }
+      for (const field of ["sessionId", "supersedes", "agent"] as const) {
+        if (
+          body[field] !== undefined &&
+          (typeof body[field] !== "string" || !body[field].trim())
+        ) {
+          return {
+            status_code: 400,
+            body: { error: `${field} must be a non-empty string` },
+          };
+        }
+      }
+
+      const payload: RememberMemoryInput = { text, project };
+      if (typeof body["title"] === "string") payload.title = body["title"];
+      if (typeof body["kind"] === "string") {
+        payload.kind = body["kind"] as NonNullable<RememberMemoryInput["kind"]>;
+      }
+      if (Array.isArray(body["files"])) payload.files = body["files"] as string[];
+      if (expiry === null || typeof expiry === "string") payload.expiresAt = expiry;
+      if (typeof body["supersedes"] === "string") {
+        payload.supersedes = body["supersedes"];
+      }
+      if (typeof body["sessionId"] === "string") payload.sessionId = body["sessionId"];
+      if (typeof body["agent"] === "string") payload.agent = body["agent"];
+
+      await recordHostHeartbeat(payload.agent);
+      const result = await sdk.trigger<RememberMemoryInput, RememberMemoryResult>({
+        function_id: "mem::remember",
+        payload,
+      });
+      return {
+        status_code: result.success ? 201 : 400,
+        body: result.success ? result : { error: result.reason ?? "memory was not saved" },
+      };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::remember",
+    config: {
+      api_path: "/memwarden/remember",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
   // --- POST /memwarden/context ------------------------------------
   sdk.registerFunction(
     "api::context",
@@ -244,13 +360,26 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
         cwd?: string;
         format?: string;
         token_budget?: number;
+        safe_only?: boolean;
+        mode?: string;
+        include_drifted?: boolean;
+        trust?: string[];
+        include_memories?: boolean;
+        all_projects?: boolean;
       }>,
     ): Promise<Response> => {
       const body = (req.body ?? {}) as Record<string, unknown>;
-      if (typeof body["query"] !== "string" || !body["query"].trim()) {
+      const inventory = body["include_memories"] === true;
+      if (
+        typeof body["query"] !== "string" ||
+        (!body["query"].trim() && !inventory)
+      ) {
         return {
           status_code: 400,
-          body: { error: "query is required and must be a non-empty string" },
+          body: {
+            error:
+              "query is required and must be non-empty (except explicit memory inventory)",
+          },
         };
       }
       if (
@@ -293,6 +422,84 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
           body: { error: "token_budget must be a positive integer" },
         };
       }
+      if (
+        body["mode"] !== undefined &&
+        (typeof body["mode"] !== "string" ||
+          !["current", "historical", "all"].includes(
+            (body["mode"] as string).trim().toLowerCase(),
+          ))
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "mode must be one of: current, historical, all" },
+        };
+      }
+      if (
+        body["include_drifted"] !== undefined &&
+        typeof body["include_drifted"] !== "boolean"
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "include_drifted must be a boolean" },
+        };
+      }
+      const allowedTrust = new Set([
+        "verified",
+        "source-verified",
+        "sourced",
+        "sourced-unverified",
+        "unsourced",
+        "stale",
+        "source-drifted",
+        "unverifiable",
+      ]);
+      if (
+        body["trust"] !== undefined &&
+        (!Array.isArray(body["trust"]) ||
+          body["trust"].length === 0 ||
+          !body["trust"].every(
+            (item) =>
+              typeof item === "string" &&
+              allowedTrust.has(item.trim().toLowerCase()),
+          ))
+      ) {
+        return {
+          status_code: 400,
+          body: {
+            error:
+              "trust must be a non-empty array of source-verified, sourced, unsourced, source-drifted, or unverifiable",
+          },
+        };
+      }
+      const normalizedMode =
+        typeof body["mode"] === "string"
+          ? body["mode"].trim().toLowerCase()
+          : undefined;
+      const aliasMode =
+        body["include_drifted"] === true
+          ? "all"
+          : body["include_drifted"] === false
+            ? "current"
+            : undefined;
+      if (normalizedMode && aliasMode && normalizedMode !== aliasMode) {
+        return {
+          status_code: 400,
+          body: {
+            error:
+              "mode conflicts with include_drifted (true means all; false means current)",
+          },
+        };
+      }
+      if (
+        body["safe_only"] === true &&
+        ((normalizedMode !== undefined && normalizedMode !== "current") ||
+          (aliasMode !== undefined && aliasMode !== "current"))
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "safe_only is only compatible with mode=current" },
+        };
+      }
       // Verified Recall fails closed: safe_only needs a repo root to verify
       // against, so reject it rather than silently returning unverified memory.
       if (
@@ -312,6 +519,11 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
         format?: string;
         token_budget?: number;
         safe_only?: boolean;
+        mode?: string;
+        include_drifted?: boolean;
+        trust?: string[];
+        include_memories?: boolean;
+        all_projects?: boolean;
       } = { query: (body["query"] as string).trim() };
       if (body["limit"] !== undefined) payload.limit = body["limit"] as number;
       if (body["project"] !== undefined)
@@ -322,6 +534,13 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
       if (body["token_budget"] !== undefined)
         payload.token_budget = body["token_budget"] as number;
       if (body["safe_only"] === true) payload.safe_only = true;
+      if (normalizedMode !== undefined) payload.mode = normalizedMode;
+      if (typeof body["include_drifted"] === "boolean")
+        payload.include_drifted = body["include_drifted"];
+      if (Array.isArray(body["trust"]))
+        payload.trust = body["trust"].map((item) => String(item));
+      if (inventory) payload.include_memories = true;
+      if (body["all_projects"] === true) payload.all_projects = true;
 
       // Session-start injection is a search; its `agent` field only feeds the
       // liveness heartbeat (never the search itself).
@@ -339,6 +558,112 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
     function_id: "api::search",
     config: {
       api_path: "/memwarden/search",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  // --- POST /memwarden/canon/export -------------------------------
+  // A bounded inventory of REAL stored Memory rows for exactly one project.
+  // This must never be implemented via search: search is ranked, capped, and
+  // returns observation-shaped results rather than the durable Memory records
+  // whose capture hashes Canon needs.
+  sdk.registerFunction(
+    "api::canon-export",
+    async (
+      req: ApiRequest<{ root?: string; cursor?: string; limit?: number }>,
+    ): Promise<Response> => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const root = asNonEmptyString(body["root"]);
+      if (!root) {
+        return { status_code: 400, body: { error: "root is required" } };
+      }
+      const limit = parseOptionalPositiveInt(body["limit"]);
+      if (limit === null || (limit !== undefined && limit > CANON_EXPORT_MAX_PAGE)) {
+        return {
+          status_code: 400,
+          body: {
+            error: `limit must be an integer between 1 and ${CANON_EXPORT_MAX_PAGE}`,
+          },
+        };
+      }
+      const cursor =
+        body["cursor"] === undefined
+          ? undefined
+          : asNonEmptyString(body["cursor"]);
+      if (body["cursor"] !== undefined && !cursor) {
+        return {
+          status_code: 400,
+          body: { error: "cursor must be a non-empty Memory id" },
+        };
+      }
+      try {
+        const result = await sdk.trigger({
+          function_id: "mem::canon-export",
+          payload: {
+            root,
+            ...(cursor ? { cursor } : {}),
+            ...(limit !== undefined ? { limit } : {}),
+          },
+        });
+        return { status_code: 200, body: result };
+      } catch (err) {
+        return {
+          status_code: 400,
+          body: { error: err instanceof Error ? err.message : String(err) },
+        };
+      }
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::canon-export",
+    config: {
+      api_path: "/memwarden/canon/export",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  // --- POST /memwarden/canon/import -------------------------------
+  // The core handler repeats local hash verification immediately before the
+  // write. The route validates shape for a useful 400, but API validation is
+  // never the trust boundary (in-process callers cannot bypass the core gate).
+  sdk.registerFunction(
+    "api::canon-import",
+    async (
+      req: ApiRequest<{ root?: string; record?: unknown }>,
+    ): Promise<Response> => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const root = asNonEmptyString(body["root"]);
+      if (!root) {
+        return { status_code: 400, body: { error: "root is required" } };
+      }
+      if (!isCanonRecord(body["record"])) {
+        return {
+          status_code: 400,
+          body: { error: "record is not a valid supported Canon record" },
+        };
+      }
+      const result = await sdk.trigger<
+        { root: string; record: unknown },
+        CanonImportResult
+      >({
+        function_id: "mem::canon-import",
+        payload: { root, record: body["record"] },
+      });
+      if (result.ok) return { status_code: 201, body: result };
+      return {
+        status_code: result.code === "invalid_record" ? 400 : 409,
+        body: result,
+      };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::canon-import",
+    config: {
+      api_path: "/memwarden/canon/import",
       http_method: "POST",
       middleware_function_ids: ["middleware::api-auth"],
     },

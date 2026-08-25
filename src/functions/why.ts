@@ -9,8 +9,12 @@ import type { StateKV } from "../state/kv.js";
 import type { CompressedObservation, Memory, Session } from "./types.js";
 import { KV } from "../state/schema.js";
 import { classifyProvenance, type Verdict } from "./verify.js";
-import { gitProjectKey } from "./git-identity.js";
 import { memoryToObservation } from "./memory-utils.js";
+import {
+  projectIdentityMatchesPath,
+  resolveMemoryIdentity,
+  sessionProjectIdentity,
+} from "./memory-identity.js";
 import { getRecallPolicy } from "./config.js";
 import { trustLabelOf, type TrustLabel } from "./search.js";
 
@@ -88,18 +92,20 @@ export function registerWhyFunction(sdk: ISdk, kv: StateKV): void {
         typeof data?.root === "string" && data.root.trim()
           ? data.root.trim()
           : process.cwd();
-      const rootKey = gitProjectKey(root);
 
       const sessions = await kv.list<Session>(KV.sessions);
+      const sessionsById = new Map(sessions.map((session) => [session.id, session]));
       for (const s of sessions) {
         if (!s?.id) continue;
         const obs = await kv
           .get<CompressedObservation>(KV.observations(s.id), observationId)
           .catch(() => null);
         if (!obs) continue;
+        const identity = sessionProjectIdentity(s);
         const verdict = classifyProvenance(obs.provenance, root, {
-          verifyAgainstRoot:
-            s.projectKey !== undefined && s.projectKey === rootKey,
+          // Stable identity decides that re-rooting is safe; `root` remains
+          // the caller's checkout path actually read by the verifier.
+          verifyAgainstRoot: projectIdentityMatchesPath(identity, root),
         });
         const trust = trustLabelOf(verdict);
         const policy = getRecallPolicy();
@@ -135,13 +141,17 @@ export function registerWhyFunction(sdk: ISdk, kv: StateKV): void {
       // Explicit memories (mem::remember / MCP) live under KV.memories.
       const mem = await kv.get<Memory>(KV.memories, observationId).catch(() => null);
       if (mem) {
-        const obs = memoryToObservation(mem);
-        const verdict = classifyProvenance(obs.provenance, root);
+        const identity = resolveMemoryIdentity(mem, sessionsById);
+        const obs = memoryToObservation(mem, identity);
+        const verdict = classifyProvenance(obs.provenance, root, {
+          verifyAgainstRoot: projectIdentityMatchesPath(identity, root),
+        });
         const trust = trustLabelOf(verdict);
         const policy = getRecallPolicy();
         const injectable =
           verdict.status !== "stale" &&
           (policy === "balanced" || verdict.status === "verified");
+        const sourceSession = identity.sourceSession;
         return {
           found: true,
           observationId,
@@ -153,6 +163,21 @@ export function registerWhyFunction(sdk: ISdk, kv: StateKV): void {
             timestamp: obs.timestamp,
             sessionId: obs.sessionId,
           },
+          ...(sourceSession
+            ? {
+                session: {
+                  id: sourceSession.id,
+                  project: sourceSession.project,
+                  cwd: sourceSession.cwd,
+                  ...(sourceSession.agentId
+                    ? { agentId: sourceSession.agentId }
+                    : {}),
+                  ...(identity.projectKey
+                    ? { projectKey: identity.projectKey }
+                    : {}),
+                },
+              }
+            : {}),
           verdict: { ...verdict, trust },
           injectable,
           provenance: obs.provenance,

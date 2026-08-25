@@ -83,19 +83,29 @@ memwarden flips the default: **memory is untrusted until its source still checks
 
 ## 🚦 The four trust states
 
-Every memory is classified against the live repo before it can reach a model:
+Every search hit is classified against its source before an inclusion policy decides whether it can reach a model:
 
 | State | Meaning | Firewall |
 | --- | --- | --- |
 | 🟢 `verified` | a captured source-file hash still matches the file on disk - code-backed and current | **injected** (only content-hash-confirmed memory earns this) |
 | 🔵 `sourced` | has a source (command, or files present but not hashable), no content hash to re-check | injected, **labeled** |
-| 🟠 `stale` | a referenced file was deleted or its content changed since capture | **blocked** |
-| ⚪ `unsourced` | no provenance at all | kept for explicit lookups, **labeled** (unverified ≠ dangerous) |
+| 🟠 `stale` / `source-drifted` | a referenced file was deleted or its content changed since capture | **blocked from current recall**; explicit history only |
+| ⚪ `unsourced` | no provenance at all | included by balanced recall, always **labeled** (unverified ≠ dangerous) |
 
-Two policies: **`balanced`** (default) blocks stale and keeps the rest, each labeled - it means "not
-detected stale," not "proven safe." **`verified-only`** raises the floor so only hash-verified memory is
-ever auto-injected (for hostile-repo threat models). Either way, recalled content is framed and
-delimited as untrusted **data**, with embedded delimiters defanged so stored text can't break out.
+Classification always runs; policy controls **inclusion**, not whether a result gets a verdict. Every
+`full`, `compact`, and `narrative` search result carries `trust`, `source_status`, capture time, and an
+evidence summary. **`balanced`** (default) current recall blocks source-drifted/unverifiable records and
+keeps verified, sourced, and unsourced records labeled - "not detected stale" is not "proven safe."
+**`verified-only`** raises the current/automatic recall floor so only hash-verified memory is included
+(for hostile-repo threat models).
+
+MCP `memory_search` is project-scoped with `mode: "current"` by default. `mode: "historical"` deliberately
+returns only source-drifted or superseded records, framed with capture time and evidence;
+`mode: "all"` (or `include_drifted: true`) is the explicit current+history view. `all_projects: true`
+checks each hit against its own known checkout; if that checkout is unavailable, the hit is labeled
+`unverifiable` and is not included as current context. Historical/all inspection bypasses the current
+inclusion floor, never classification or labels. Recalled content is always framed and delimited as
+untrusted **data**, with embedded delimiters defanged so stored text can't break out.
 
 ```console
 $ memwarden doctor .

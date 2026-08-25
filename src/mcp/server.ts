@@ -39,12 +39,9 @@ const SERVER_VERSION = (() => {
   }
 })();
 
-// Fallback sessionId for memory_remember calls that name none. It must be
-// derived from project identity: a session's project metadata is fixed at
-// creation, so a shared literal "mcp" session created under project A would
-// make every later default remember from project B searchable under A and
-// invisible to B. Hashing the canonical project path gives each project its
-// own long-lived MCP session without touching the observe path.
+// Backward-compatible session metadata for memory_remember calls that name
+// none. Hashing the canonical project path keeps the metadata project-scoped
+// instead of reintroducing the old shared literal "mcp" session id.
 export function projectScopedSessionId(prefix: string, project: string): string {
   const hash = createHash("sha256")
     .update(canonicalizePath(project))
@@ -186,11 +183,38 @@ export function createMcpServer(opts: McpServerOptions) {
     {
       name: "memory_remember",
       description:
-        "Save a memory so any agent can recall it later. Persisted to the local memwarden store.",
+        "Explicitly save a durable manual memory for this project. It survives ordinary retention without needing to be recalled. Supplied files are hashed now for Verified Recall; file-less saves remain honestly labeled sourced but unverified.",
       inputSchema: {
         type: "object",
         properties: {
           text: { type: "string", description: "The content to remember" },
+          title: {
+            type: "string",
+            description: "Optional human title. Defaults to the first content line.",
+          },
+          kind: {
+            type: "string",
+            enum: ["fact", "preference", "pattern", "architecture", "bug", "workflow"],
+            description: "Memory kind (default fact).",
+          },
+          files: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Optional files under the current project to hash as source evidence.",
+          },
+          expires_at: {
+            anyOf: [{ type: "string", format: "date-time" }, { type: "null" }],
+            description: "Optional explicit expiry. Null or omitted means durable.",
+          },
+          expiry: {
+            anyOf: [{ type: "string", format: "date-time" }, { type: "null" }],
+            description: "Alias for expires_at.",
+          },
+          supersedes: {
+            type: "string",
+            description: "Optional memory id this save replaces and archives.",
+          },
           sessionId: { type: "string", description: "Optional session id" },
           project: {
             type: "string",
@@ -200,54 +224,105 @@ export function createMcpServer(opts: McpServerOptions) {
         },
         required: ["text"],
       },
-      // Scope to the server's launch directory by default — a memory saved
-      // under a literal "mcp" project would never be found by memory_resume
-      // running from the real repository. The fallback sessionId is scoped
-      // to the same project (see projectScopedSessionId) so remembers from
-      // two projects never share one session.
+      // Scope to the server's launch directory by default. The fallback
+      // session remains project-specific for backward-compatible metadata,
+      // while the manual memory itself is stored directly in KV.memories.
       call: (a) => {
         const project = str(a["project"], serverCwd);
-        return api("POST", "/memwarden/observe", {
-          hookType: "post_tool_use",
+        const hasExpiresAt = Object.prototype.hasOwnProperty.call(a, "expires_at");
+        const hasExpiry = Object.prototype.hasOwnProperty.call(a, "expiry");
+        const expiry = hasExpiresAt ? a["expires_at"] : hasExpiry ? a["expiry"] : undefined;
+        return api("POST", "/memwarden/remember", {
+          text: typeof a["text"] === "string" ? a["text"] : "",
           sessionId: str(a["sessionId"], projectScopedSessionId("mcp", project)),
           project,
-          cwd: project,
-          timestamp: new Date().toISOString(),
-          data: {
-            tool_name: "memory_remember",
-            tool_input: { text: str(a["text"]) },
-            tool_output: str(a["text"]),
-          },
+          agent: "mcp",
+          ...(typeof a["title"] === "string" ? { title: a["title"] } : {}),
+          ...(typeof a["kind"] === "string" ? { kind: a["kind"] } : {}),
+          ...(a["files"] !== undefined ? { files: a["files"] } : {}),
+          ...(hasExpiresAt || hasExpiry ? { expires_at: expiry } : {}),
+          ...(typeof a["supersedes"] === "string"
+            ? { supersedes: a["supersedes"] }
+            : {}),
         });
       },
     },
     {
       name: "memory_search",
       description:
-        "Search memories by meaning and keywords (TurboQuant vector + BM25 hybrid). Returns ranked matches. " +
-        "Scoped to the current project unless all_projects is true.",
+        "Search memories by meaning and keywords (TurboQuant vector + BM25 hybrid). " +
+        "Every result is trust/source-labeled. Defaults to current, firewalled memory in this project; " +
+        "source-drifted or superseded records require mode='historical'/'all' (or include_drifted=true).",
       inputSchema: {
         type: "object",
         properties: {
           query: { type: "string", description: "What to look for" },
           limit: { type: "number", description: "Max results (default 10)" },
+          mode: {
+            type: "string",
+            enum: ["current", "historical", "all"],
+            description:
+              "Inclusion policy: current (default, safe), historical (only source-drifted/superseded), or all (both). Classification and labels always run.",
+          },
+          include_drifted: {
+            type: "boolean",
+            description:
+              "Compatibility shorthand: true means mode='all'; false means mode='current'.",
+          },
+          trust: {
+            type: "array",
+            items: {
+              type: "string",
+              enum: [
+                "source-verified",
+                "sourced",
+                "unsourced",
+                "source-drifted",
+                "unverifiable",
+              ],
+            },
+            description: "Optional source-status allowlist applied after classification.",
+          },
+          format: {
+            type: "string",
+            enum: ["full", "compact", "narrative"],
+            description: "Result shape (default full); every shape carries source status.",
+          },
           all_projects: {
             type: "boolean",
             description:
-              "Search across every project instead of just this one (deliberate cross-repo lookup).",
+              "Search across every project instead of just this one. Each hit is checked against its own known checkout; unavailable checkouts are labeled unverifiable and excluded from current mode.",
           },
         },
         required: ["query"],
       },
-      // Project-scoped by default: an unscoped search silently mixes other
-      // repositories' memories into results. all_projects stays available
-      // as the explicit escape hatch for deliberate cross-repo lookups.
-      call: (a) =>
-        api("POST", "/memwarden/search", {
+      // Project-scoped and current by default. all_projects is an explicit
+      // cross-repo lookup, but it never verifies a hit against this server's
+      // unrelated cwd; the daemon classifies against each hit's own checkout.
+      call: (a) => {
+        const requestedMode =
+          typeof a["mode"] === "string" ? a["mode"].trim().toLowerCase() : undefined;
+        const aliasMode =
+          a["include_drifted"] === true
+            ? "all"
+            : a["include_drifted"] === false
+              ? "current"
+              : undefined;
+        if (requestedMode && aliasMode && requestedMode !== aliasMode) {
+          throw new Error(
+            "memory_search: mode conflicts with include_drifted (true means all; false means current)",
+          );
+        }
+        const mode = requestedMode ?? aliasMode ?? "current";
+        return api("POST", "/memwarden/search", {
           query: str(a["query"]),
           limit: typeof a["limit"] === "number" ? a["limit"] : 10,
+          mode,
+          ...(typeof a["format"] === "string" ? { format: a["format"] } : {}),
+          ...(Array.isArray(a["trust"]) ? { trust: a["trust"] } : {}),
           ...(a["all_projects"] === true ? {} : { cwd: serverCwd }),
-        }),
+        });
+      },
     },
     {
       name: "memory_context",
