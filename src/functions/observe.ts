@@ -33,6 +33,7 @@ import { buildSessionHandoff, MAX_STORED_PROMPT_CHARS } from "./handoff.js";
 import { extractProvenance } from "./provenance.js";
 import { recordFleetActivity } from "./fleet.js";
 import { hashFileCommitments } from "./verify.js";
+import { captureFineGrainedEvidence } from "./anchors.js";
 import { recordFix, looksLikeResolvedFix } from "./dejafix.js";
 import { getSearchIndex, vectorIndexAddGuarded, vectorIndexRemove } from "./search.js";
 import { logger } from "./logger.js";
@@ -527,6 +528,8 @@ export function registerObserveFunction(
         });
       } else {
         const synthetic = buildSyntheticCompression(raw);
+        const { toolOutput: _hostOutput, ...operationOnlyRaw } = raw;
+        const operationOnlySynthetic = buildSyntheticCompression(operationOnlyRaw);
         // Attach the evidence trail so the doctor and Verified Recall can later
         // judge whether this memory is sourced and still valid. Commit both
         // raw bytes and normalized UTF-8 text now so semantic drift is detected
@@ -538,6 +541,8 @@ export function registerObserveFunction(
         // content-anchored, so we keep the file references but never hash them
         // — classifyProvenance then caps them at `sourced_unverified`.
         if (!payload.adopted && prov.files && prov.files.length > 0 && payload.cwd) {
+          // Raw and normalized whole-file commitments come from one read per
+          // source, preserving the #71/#72 snapshot-consistency guarantee.
           const commitments = hashFileCommitments(prov.files, payload.cwd);
           if (Object.keys(commitments.fileHashes).length > 0) {
             prov.fileHashes = commitments.fileHashes;
@@ -545,6 +550,32 @@ export function registerObserveFunction(
           if (Object.keys(commitments.fileHashesNormalized).length > 0) {
             prov.fileHashesNormalized = commitments.fileHashesNormalized;
           }
+
+          // Fine-grained capture reads the successful post-tool live file and
+          // stores hashes/locations only. It intentionally inspects the
+          // pre-redaction payload transiently so a secret-bearing replacement
+          // can be committed without retaining that source payload.
+          const originalData =
+            typeof payload.data === "object" && payload.data !== null
+              ? (payload.data as Record<string, unknown>)
+              : {};
+          const anchors = captureFineGrainedEvidence({
+            hookType: payload.hookType,
+            ...(typeof originalData["tool_name"] === "string"
+              ? { toolName: originalData["tool_name"] }
+              : raw.toolName
+                ? { toolName: raw.toolName }
+                : {}),
+            toolInput: originalData["tool_input"],
+            toolOutput:
+              originalData["tool_output"] ?? originalData["error"],
+            cwd: payload.cwd,
+            referencedFiles: prov.files,
+            mixedTrust: prov.mixedTrust === true,
+            observation: synthetic,
+            operationOnlyObservation: operationOnlySynthetic,
+          });
+          if (anchors) prov.anchors = anchors;
         }
         synthetic.provenance = prov;
         metrics.recordObserve(JSON.stringify(raw), JSON.stringify(synthetic));

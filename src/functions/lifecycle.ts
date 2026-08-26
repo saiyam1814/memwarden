@@ -45,6 +45,7 @@ import {
   vectorIndexRemove,
 } from "./search.js";
 import { withKeyedLock } from "./keyed-mutex.js";
+import { fineGrainedClaimForMemory } from "./anchors.js";
 
 export interface TransitionMemoryLifecycleInput {
   memoryId: string;
@@ -151,6 +152,7 @@ function effectiveLifecycleAtRoot(
   const observation = memoryToObservation(memory, identity);
   const verdict = classifyProvenance(observation.provenance, checkout, {
     verifyAgainstRoot: true,
+    fineGrainedClaim: fineGrainedClaimForMemory(memory),
   });
   return {
     effective: lifecycleProjection(
@@ -277,6 +279,7 @@ function revalidatedSuccessor(args: {
   const {
     canon: _priorCanon,
     fileHashesNormalized: _priorNormalizedHashes,
+    anchors: _priorAnchors,
     ...priorProvenance
   } = memory.provenance ?? {};
   const provenance = {
@@ -356,7 +359,10 @@ async function revalidateMemory(
   const verdict = classifyProvenance(
     provenance ?? { files, command: "memory" },
     root,
-    { verifyAgainstRoot: true },
+    {
+      verifyAgainstRoot: true,
+      fineGrainedClaim: fineGrainedClaimForMemory(memory),
+    },
   );
   const projection = lifecycleProjection(
     memory,

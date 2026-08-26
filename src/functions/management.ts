@@ -23,6 +23,12 @@ import { canonicalize } from "../state/store.js";
 import { canonicalizePath } from "./paths.js";
 import { projectKey as computeProjectKey } from "./git-identity.js";
 import {
+  cloneFineGrainedEvidence,
+  fineGrainedClaimForMemory,
+  type FineGrainedAnchorStatus,
+  type FineGrainedVerification,
+} from "./anchors.js";
+import {
   hasProjectIdentity,
   projectIdentityMatchesPath,
   resolveMemoryIdentity,
@@ -41,6 +47,7 @@ import {
   classifyProvenance,
   type EvidenceTrust,
   type LiveSourceStatus,
+  type Verdict,
   type VerifyStatus,
 } from "./verify.js";
 import {
@@ -79,6 +86,20 @@ const CURSOR_KEY = "management-cursor-hmac-v1";
 const CURSOR_VERSION = 1;
 
 export type ManagementStatus = VerifyStatus | "unverifiable";
+export type ManagedAnchorStatus =
+  | FineGrainedAnchorStatus
+  | "absent"
+  | "malformed"
+  | "unavailable";
+
+export interface ManagedAnchorSummary {
+  present: boolean;
+  count: number;
+  recomputed: boolean;
+  actionable: boolean;
+  status: ManagedAnchorStatus;
+  reason: string;
+}
 
 export class ManagementError extends Error {
   constructor(
@@ -110,6 +131,7 @@ export interface ManagedMemorySummary {
   status: ManagementStatus;
   evidence: { trust: EvidenceTrust; reason: string };
   source: { status: LiveSourceStatus; reason: string };
+  anchors: ManagedAnchorSummary;
   lifecycle: {
     persisted: MemoryLifecycleState;
     effective: MemoryLifecycleState;
@@ -171,7 +193,10 @@ interface ManagementVerdict {
   evidenceReason: string;
   sourceStatus: LiveSourceStatus;
   sourceReason: string;
+  anchors: ManagedAnchorSummary;
 }
+
+type ManagementVerdictBase = Omit<ManagementVerdict, "anchors">;
 
 interface NormalizedListInput {
   root?: string;
@@ -683,6 +708,10 @@ function boundedProvenance(
     authoredBy === "user_or_agent"
       ? authoredBy
       : undefined;
+  // Clone only #62's validated bounded fields. Caller-decorated status words,
+  // source snippets, and unknown additive payloads never reach verification or
+  // management output.
+  const anchors = cloneFineGrainedEvidence(source.anchors);
   return {
     files,
     ...(Object.keys(hashes).length > 0 ? { fileHashes: hashes } : {}),
@@ -705,13 +734,73 @@ function boundedProvenance(
       : {}),
     ...(source.userConfirmed === true ? { userConfirmed: true } : {}),
     ...(safeAuthoredBy ? { authoredBy: safeAuthoredBy } : {}),
+    ...(anchors ? { anchors } : {}),
     ...(source.mixedTrust === true || evidenceTruncated
       ? { mixedTrust: true }
       : {}),
   };
 }
 
-function unavailableVerdict(provenance: Provenance | undefined): ManagementVerdict {
+function managedAnchorSummary(
+  memory: Memory,
+  provenance: Provenance | undefined,
+  verification?: FineGrainedVerification,
+): ManagedAnchorSummary {
+  const present = memory.provenance?.anchors !== undefined;
+  if (!present) {
+    return {
+      present: false,
+      count: 0,
+      recomputed: false,
+      actionable: false,
+      status: "absent",
+      reason: "no fine-grained anchor metadata is stored",
+    };
+  }
+  const safeEvidence = provenance?.anchors;
+  if (!safeEvidence) {
+    return {
+      present: true,
+      count: 0,
+      recomputed: false,
+      actionable: false,
+      status: "malformed",
+      reason: "persisted anchor metadata is malformed; no stored status was trusted",
+    };
+  }
+  if (!verification) {
+    return {
+      present: true,
+      count: safeEvidence.anchors.length,
+      recomputed: false,
+      actionable: false,
+      status: "unavailable",
+      reason: "fine-grained anchors could not be recomputed in an available checkout",
+    };
+  }
+  return {
+    present: true,
+    count: safeEvidence.anchors.length,
+    recomputed: true,
+    actionable: verification.actionable,
+    status: verification.status,
+    reason: clipped(verification.reason, 1_000),
+  };
+}
+
+function attachAnchorSummary(
+  memory: Memory,
+  provenance: Provenance | undefined,
+  verdict: ManagementVerdictBase,
+  verification?: FineGrainedVerification,
+): ManagementVerdict {
+  return {
+    ...verdict,
+    anchors: managedAnchorSummary(memory, provenance, verification),
+  };
+}
+
+function unavailableVerdict(provenance: Provenance | undefined): ManagementVerdictBase {
   const evidenceTrust = evidenceTrustOf(provenance);
   const reason =
     "the source checkout is unavailable, so capture-time file evidence cannot be checked";
@@ -737,19 +826,40 @@ function managementVerdict(
 ): ManagementVerdict {
   const provenance = boundedProvenance(memory, identity);
   const files = provenance?.files ?? [];
-  if (files.length === 0) return classifyProvenance(provenance, scopedRoot ?? "/");
-
-  if (scopedRoot) {
-    return classifyProvenance(provenance, scopedRoot, { verifyAgainstRoot: true });
+  let fineGrainedClaim: ReturnType<typeof fineGrainedClaimForMemory> | undefined;
+  try {
+    fineGrainedClaim = fineGrainedClaimForMemory(memory);
+  } catch {
+    // Malformed legacy claim fields make anchors non-actionable; whole-file
+    // evidence still classifies through the established conservative path.
   }
+  const classifyAt = (root: string, verifyAgainstRoot = false): ManagementVerdict => {
+    const verdict: Verdict = classifyProvenance(provenance, root, {
+      ...(verifyAgainstRoot ? { verifyAgainstRoot: true } : {}),
+      ...(fineGrainedClaim ? { fineGrainedClaim } : {}),
+    });
+    return attachAnchorSummary(
+      memory,
+      provenance,
+      verdict,
+      verdict.fineGrained,
+    );
+  };
+  if (files.length === 0) return classifyAt(scopedRoot ?? "/");
+
+  if (scopedRoot) return classifyAt(scopedRoot, true);
   const ownRoot =
     usableRoot(provenance?.cwd) ??
     usableRoot(identity.captureCwd) ??
     usableRoot(identity.projectPath);
-  if (!ownRoot) return unavailableVerdict(provenance);
-  return classifyProvenance(provenance, ownRoot, {
-    verifyAgainstRoot: ownRoot !== usableRoot(provenance?.cwd),
-  });
+  if (!ownRoot) {
+    return attachAnchorSummary(
+      memory,
+      provenance,
+      unavailableVerdict(provenance),
+    );
+  }
+  return classifyAt(ownRoot, ownRoot !== usableRoot(provenance?.cwd));
 }
 
 function safeScalarId(value: unknown): string | undefined {
@@ -834,6 +944,7 @@ function summaryFrom(
       status: verdict.sourceStatus,
       reason: clipped(verdict.sourceReason, 2_000),
     },
+    anchors: verdict.anchors,
     lifecycle: {
       persisted: projection.persisted,
       effective: projection.effective,
@@ -1502,6 +1613,12 @@ export interface ProjectAggregate {
     source: CountMap<LiveSourceStatus>;
     status: CountMap<ManagementStatus>;
     lifecycle: CountMap<MemoryLifecycleState>;
+    anchors: {
+      present: number;
+      recomputed: number;
+      actionable: number;
+      status: CountMap<ManagedAnchorStatus>;
+    };
   };
   lastActivity: string | null;
   footprint: { records: number; estimatedBytes: number };
@@ -1556,6 +1673,23 @@ function emptyProject(sortKey: string, identity: ResolvedMemoryIdentity): Mutabl
         ] as const,
       ),
       lifecycle: zeroCounts(MEMORY_LIFECYCLE_STATES),
+      anchors: {
+        present: 0,
+        recomputed: 0,
+        actionable: 0,
+        status: zeroCounts(
+          [
+            "raw_match",
+            "cosmetic_match",
+            "drifted",
+            "missing",
+            "ambiguous",
+            "absent",
+            "malformed",
+            "unavailable",
+          ] as const,
+        ),
+      },
     },
     lastActivity: null,
     lastActivityMs: -Infinity,
@@ -1630,6 +1764,10 @@ export async function listManagedProjects(
       aggregate.counts.source[summary.source.status]++;
       aggregate.counts.status[summary.status]++;
       aggregate.counts.lifecycle[summary.lifecycle.persisted]++;
+      if (summary.anchors.present) aggregate.counts.anchors.present++;
+      if (summary.anchors.recomputed) aggregate.counts.anchors.recomputed++;
+      if (summary.anchors.actionable) aggregate.counts.anchors.actionable++;
+      aggregate.counts.anchors.status[summary.anchors.status]++;
       aggregate.footprint.records++;
       try {
         aggregate.footprint.estimatedBytes += Buffer.byteLength(JSON.stringify(memory));

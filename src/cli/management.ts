@@ -129,7 +129,10 @@ function renderMemoryLine(memory: ManagedMemorySummary): string {
     memory.lifecycle.effective === "active"
       ? ""
       : ` [${memory.lifecycle.effective}]`;
-  return `  [${memory.status}]${lifecycle} ${memory.kind} v${memory.version} ${cleanLine(memory.id)}  ${cleanLine(memory.title)}`;
+  const anchors = memory.anchors.present
+    ? ` anchor:${memory.anchors.status}${memory.anchors.actionable ? ":actionable" : ""}`
+    : "";
+  return `  [${memory.status}]${lifecycle}${anchors} ${memory.kind} v${memory.version} ${cleanLine(memory.id)}  ${cleanLine(memory.title)}`;
 }
 
 function memoriesUsage(): string {
@@ -300,6 +303,9 @@ async function memoriesShow(args: string[], deps: ManagementCliDeps): Promise<vo
   );
   console.log(
     `  source      ${memory.source.status} — ${cleanLine(memory.source.reason, 2_000)}`,
+  );
+  console.log(
+    `  anchors     ${memory.anchors.present ? `${memory.anchors.count} · ${memory.anchors.status} · ${memory.anchors.recomputed ? "locally recomputed" : "not recomputed"} · ${memory.anchors.actionable ? "actionable" : "not actionable"}` : "none"}`,
   );
   console.log(
     `  lifecycle   persisted ${memory.lifecycle.persisted} · effective ${memory.lifecycle.effective}`,
@@ -512,6 +518,9 @@ export async function runProjectsCommand(
     );
     console.log(
       `    lifecycle   active ${project.counts.lifecycle.active} · needs_revalidation ${project.counts.lifecycle.needs_revalidation} · disputed ${project.counts.lifecycle.disputed} · archived ${project.counts.lifecycle.archived} · revoked ${project.counts.lifecycle.revoked} · superseded ${project.counts.lifecycle.superseded}`,
+    );
+    console.log(
+      `    anchors     present ${project.counts.anchors.present} · recomputed ${project.counts.anchors.recomputed} · actionable ${project.counts.anchors.actionable} · raw ${project.counts.anchors.status.raw_match} · cosmetic ${project.counts.anchors.status.cosmetic_match} · drifted ${project.counts.anchors.status.drifted} · ambiguous ${project.counts.anchors.status.ambiguous}`,
     );
     console.log(
       `    activity    ${project.lastActivity ?? "unknown"} · footprint ${humanBytes(project.footprint.estimatedBytes)} estimated`,
