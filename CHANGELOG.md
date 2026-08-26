@@ -3,6 +3,59 @@
 All notable changes to memwarden. Dates are release dates; the format loosely follows
 [Keep a Changelog](https://keepachangelog.com/).
 
+## 0.1.0 - 2026-08-26
+
+The first public beta. Everything below was found by running the tool against a
+real install rather than a fixture, which is why the version moved from 0.0.x.
+
+### Fixed
+- **Canon push/pull actually round-trips.** Export/import is authenticated and
+  project-scoped, preserving hashes, identity, title/content and attestation
+  with safe merge semantics ([#65](https://github.com/saiyam1814/memwarden/pull/65)).
+- **Explicit saves survive retention.** A first-class durable `mem::remember`
+  path with honest authorship, optional file evidence, supersession, deletion
+  receipts, and path normalization hardened against traversal, null bytes and
+  symlink escapes ([#66](https://github.com/saiyam1814/memwarden/pull/66)).
+- **MCP search is firewalled and labeled.** Trust classification now runs
+  independently of the inclusion policy, search defaults to project-scoped
+  current recall, and drift/superseded history is exposed with temporal framing
+  ([#67](https://github.com/saiyam1814/memwarden/pull/67)).
+- **Consolidation preserves distinct same-file claims** instead of folding two
+  different decisions about one file into a single memory
+  ([#68](https://github.com/saiyam1814/memwarden/pull/68)).
+- **Project identity is separate from checkout path**, so worktrees of one repo
+  stop confusing scoping across search, doctor, why, consolidation, Canon,
+  bundles and fleet ([#69](https://github.com/saiyam1814/memwarden/pull/69)).
+- **The half-life study's median was wrong.** The quantile helper took the
+  upper-middle value for even samples instead of averaging the two middle ones,
+  which biased every median high. The 180-day figure is **61.8%**, not the
+  previously published 78.1%. Worse, the bug masked the sensitivity analysis:
+  fastapi's 180-day rate is 11.8% with localized docs excluded and 71.5% with
+  them included, but both orderings put 78.1% at the same index, so the two runs
+  looked identical and were reported as evidence of robustness. They were not.
+  Fixed with tested R-7 quantiles, a pinned four-repository manifest, both
+  control arms, microdata and hashes ([#70](https://github.com/saiyam1814/memwarden/pull/70)).
+
+### Added
+- **The release is gated on the packed npm artifact**, not the repo. The exact
+  `npm pack` output is installed under an isolated HOME and driven through real
+  CLI, daemon, MCP, authenticated HTTP, persistence, Canon, erasure and clean
+  shutdown, on Linux, macOS and Windows. This is the check that would have
+  caught the 0.0.5 defect where `consolidate.js` was simply absent from the
+  published tarball ([#71](https://github.com/saiyam1814/memwarden/pull/71)).
+- **A `cosmetic` trust state.** A file that was reformatted but whose normalized
+  content is unchanged is labeled `source-cosmetic` — current, but explicitly
+  not byte-identical — and is admitted under `verified-only`. Two eval gates
+  bound it: `cosmetic-admitted` (reformatted memory flows under strict policy)
+  and `cosmetic-bounded` (genuinely drifted memory is still refused). The pair
+  matters; alone, the first would let "cosmetic is allowed" drift into "any
+  change is allowed" without the eval noticing.
+
+### Note for existing installs
+Memories captured before 0.0.8 keep their old shape and age out through normal
+retention. `npm run inspect` grades your store; `memwarden doctor . --fix-stale`
+clears stale records now.
+
 ## 0.0.9 - 2026-08-24
 
 Caught by inspecting the store the day 0.0.8 shipped, which is the point.
