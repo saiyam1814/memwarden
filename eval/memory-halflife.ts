@@ -63,15 +63,21 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, writeFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  QUANTILE_METHOD,
+  sampleMedian,
+  sampleQuantileR7,
+} from "./memory-halflife-statistics.js";
 
 /** Capture points, in days before HEAD. */
-const WINDOWS = [7, 30, 90, 180, 365];
+export const WINDOWS = [7, 30, 90, 180, 365] as const;
 
 /** How far back from a capture point counts as "recent activity an agent saw". */
-const ACTIVITY_WINDOW_DAYS = 14;
+export const ACTIVITY_WINDOW_DAYS = 14;
 
 /** Cap per capture point so one enormous repo cannot dominate runtime. */
-const MAX_FILES_PER_POINT = 400;
+export const MAX_FILES_PER_POINT = 400;
 
 /**
  * Arms smaller than this are reported but EXCLUDED from medians and spreads.
@@ -79,7 +85,11 @@ const MAX_FILES_PER_POINT = 400;
  * 100%, which then set the upper bound of the pooled IQR. A rate from four
  * files is not a measurement.
  */
-const MIN_SAMPLE = 30;
+export const MIN_SAMPLE = 30;
+
+export const NON_SOURCE_EXCLUSION_POLICY =
+  "generated-vendored-lockfiles-binaries-fixtures-v1";
+export const SWEEP_EXCLUSION_POLICY = "format-or-large-tree-rewrite-v1";
 
 /**
  * Localized documentation. Translation-sync commits rewrite hundreds of these
@@ -109,11 +119,22 @@ const EXCLUDE_PATTERNS: RegExp[] = [
   /(^|\/)\.git/,
 ];
 
-let includeI18n = false;
+type ExclusionReason = "i18n" | "nonSource";
 
-function excluded(path: string): boolean {
-  if (!includeI18n && I18N_DOCS.test(path)) return true;
-  return EXCLUDE_PATTERNS.some((re) => re.test(path));
+function exclusionReason(path: string, includeI18n: boolean): ExclusionReason | null {
+  if (!includeI18n && I18N_DOCS.test(path)) return "i18n";
+  if (EXCLUDE_PATTERNS.some((re) => re.test(path))) return "nonSource";
+  return null;
+}
+
+export interface CandidateExclusions {
+  i18n: number;
+  nonSource: number;
+}
+
+interface FileSelection {
+  files: string[];
+  exclusions: CandidateExclusions;
 }
 
 function git(repo: string, args: string[]): string {
@@ -148,9 +169,10 @@ function hashes(content: string): { raw: string; norm: string } {
   };
 }
 
-type Fate = "identical" | "reformatted" | "modified" | "renamed" | "deleted";
+export type Fate = "identical" | "reformatted" | "modified" | "renamed" | "deleted";
+export type StudyArm = "touched" | "random";
 
-interface ArmResult {
+export interface ArmResult {
   sampled: number;
   fates: Record<Fate, number>;
   /** Share of sampled files whose recorded path or content no longer matches. */
@@ -159,8 +181,9 @@ interface ArmResult {
   substantiveRate: number;
 }
 
-interface PointResult {
+export interface PointResult {
   days: number;
+  /** Full SHA: abbreviated capture identities are not reproducible contracts. */
   captureCommit: string;
   captureDate: string;
   /** Files an agent plausibly had facts about (touched near T). Selects on the
@@ -168,17 +191,42 @@ interface PointResult {
   touched: ArmResult;
   /** Uniform-random files existing at T: repo-wide turnover, no attention bias. */
   random: ArmResult;
-  /** Files dropped because a formatter/license sweep rewrote them. */
-  sweepExcluded: number;
-  sweepCommits: number;
+  exclusions: {
+    candidates: Record<StudyArm, CandidateExclusions>;
+    sweeps: {
+      commits: number;
+      touchedFiles: number;
+      randomFiles: number;
+    };
+  };
 }
 
-interface RepoResult {
+export interface RepoResult {
   repo: string;
+  repoUrl: string;
+  /** Full SHA: published runs must name the exact evaluated tree. */
   head: string;
   headDate: string;
   points: PointResult[];
   skipped?: string;
+}
+
+export interface PinnedCapture {
+  days: number;
+  sha: string;
+}
+
+export interface ExpectedRepositoryIdentity {
+  name: string;
+  url: string;
+  headSha: string;
+}
+
+export interface AnalyzeOptions {
+  includeI18n?: boolean;
+  captures?: readonly PinnedCapture[];
+  expectedRepository?: ExpectedRepositoryIdentity;
+  csvRows?: CsvRow[];
 }
 
 /**
@@ -186,13 +234,13 @@ interface RepoResult {
  * Without --first-parent, `rev-list` can land mid-feature-branch, and "the
  * state of the world at T" is then a tree that never existed on main.
  */
-function commitBeforeDays(repo: string, days: number): string | null {
+function commitBeforeDays(repo: string, head: string, days: number): string | null {
   const out = gitOk(repo, [
     "rev-list",
     "-1",
     "--first-parent",
     `--before=${days} days ago`,
-    "HEAD",
+    head,
   ]);
   const sha = out?.trim();
   return sha && sha.length >= 7 ? sha : null;
@@ -214,11 +262,11 @@ interface SweepInfo {
   sweepCommits: number;
 }
 
-function detectSweeps(repo: string, sha: string): SweepInfo {
+function detectSweeps(repo: string, sha: string, head: string): SweepInfo {
   const excludedFiles = new Set<string>();
   let sweepCommits = 0;
-  // Tracked-file count at HEAD is a good enough denominator for "large share".
-  const treeCount = (gitOk(repo, ["ls-tree", "-r", "--name-only", "HEAD"]) ?? "")
+  // Tracked-file count at the pinned head is a good enough denominator for "large share".
+  const treeCount = (gitOk(repo, ["ls-tree", "-r", "--name-only", head]) ?? "")
     .split("\n")
     .filter(Boolean).length;
   if (treeCount === 0) return { excludedFiles, sweepCommits };
@@ -231,7 +279,7 @@ function detectSweeps(repo: string, sha: string): SweepInfo {
     "--no-merges",
     "--name-only",
     "--pretty=format:%x00%H%x1f%s",
-    `${sha}..HEAD`,
+    `${sha}..${head}`,
   ]);
   if (!out) return { excludedFiles, sweepCommits };
   for (const chunk of out.split("\u0000")) {
@@ -262,12 +310,26 @@ function mulberry32(seed: number): () => number {
   };
 }
 
+function emptyCandidateExclusions(): CandidateExclusions {
+  return { i18n: 0, nonSource: 0 };
+}
+
 /** Uniform-random sample of files that existed at T — the control arm. */
-function randomFilesAt(repo: string, sha: string, seed: number): string[] {
-  const all = (gitOk(repo, ["ls-tree", "-r", "--name-only", sha]) ?? "")
-    .split("\n")
-    .map((s) => s.trim())
-    .filter((p) => p && !excluded(p));
+function randomFilesAt(
+  repo: string,
+  sha: string,
+  seed: number,
+  includeI18n: boolean,
+): FileSelection {
+  const all: string[] = [];
+  const exclusions = emptyCandidateExclusions();
+  for (const line of (gitOk(repo, ["ls-tree", "-r", "--name-only", sha]) ?? "").split("\n")) {
+    const path = line.trim();
+    if (!path) continue;
+    const reason = exclusionReason(path, includeI18n);
+    if (reason) exclusions[reason]++;
+    else all.push(path);
+  }
   const rnd = mulberry32(seed);
   // Fisher-Yates prefix: unbiased sample without shuffling the whole list.
   const n = Math.min(MAX_FILES_PER_POINT, all.length);
@@ -277,7 +339,7 @@ function randomFilesAt(repo: string, sha: string, seed: number): string[] {
     all[i] = all[j]!;
     all[j] = tmp;
   }
-  return all.slice(0, n);
+  return { files: all.slice(0, n), exclusions };
 }
 
 function commitDate(repo: string, sha: string): string {
@@ -290,10 +352,11 @@ function commitDate(repo: string, sha: string): string {
  *  The window must be relative to T's OWN date, not to now: `--since=14 days
  *  ago` on a commit from six months back selects nothing, which silently
  *  produced zero samples for every window. */
-function activeFilesAt(repo: string, sha: string): string[] {
+function activeFilesAt(repo: string, sha: string, includeI18n: boolean): FileSelection {
+  const exclusions = emptyCandidateExclusions();
   const iso = commitDate(repo, sha);
   const at = Date.parse(iso);
-  if (!Number.isFinite(at)) return [];
+  if (!Number.isFinite(at)) return { files: [], exclusions };
   const from = new Date(at - ACTIVITY_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
   const out = gitOk(repo, [
     "log",
@@ -303,29 +366,36 @@ function activeFilesAt(repo: string, sha: string): string[] {
     "--pretty=format:",
     sha,
   ]);
-  if (!out) return [];
+  if (!out) return { files: [], exclusions };
   const seen = new Set<string>();
+  const excludedSeen = new Set<string>();
   for (const line of out.split("\n")) {
-    const p = line.trim();
-    if (!p || excluded(p)) continue;
-    seen.add(p);
+    const path = line.trim();
+    if (!path) continue;
+    const reason = exclusionReason(path, includeI18n);
+    if (reason) {
+      if (!excludedSeen.has(path)) exclusions[reason]++;
+      excludedSeen.add(path);
+      continue;
+    }
+    seen.add(path);
     if (seen.size >= MAX_FILES_PER_POINT * 3) break;
   }
   // Keep only files that actually existed at T (a rename in the window can
   // list a path that is not present in that tree).
   const present: string[] = [];
-  for (const p of seen) {
-    if (gitOk(repo, ["cat-file", "-e", `${sha}:${p}`]) !== null) present.push(p);
+  for (const path of seen) {
+    if (gitOk(repo, ["cat-file", "-e", `${sha}:${path}`]) !== null) present.push(path);
     if (present.length >= MAX_FILES_PER_POINT) break;
   }
-  return present;
+  return { files: present, exclusions };
 }
 
-/** old-path -> status for everything that changed between T and HEAD. One call. */
-function changeMap(repo: string, sha: string): Map<string, "M" | "D" | "R"> {
+/** old-path -> status for everything that changed between T and the pinned head. */
+function changeMap(repo: string, sha: string, head: string): Map<string, "M" | "D" | "R"> {
   const map = new Map<string, "M" | "D" | "R">();
   // -M enables rename detection so a moved file is not miscounted as deleted.
-  const out = gitOk(repo, ["diff", "--name-status", "-M", sha, "HEAD"]);
+  const out = gitOk(repo, ["diff", "--name-status", "-M", sha, head]);
   if (!out) return map;
   for (const line of out.split("\n")) {
     if (!line.trim()) continue;
@@ -351,20 +421,30 @@ function blob(repo: string, ref: string, path: string): string | null {
   return gitOk(repo, ["cat-file", "blob", `${ref}:${path}`]);
 }
 
-type CsvRow = {
+export interface CsvRow {
   repo: string;
   days: number;
-  arm: "touched" | "random";
+  arm: StudyArm;
   path: string;
   fate: Fate;
-};
+}
 
-const csvRows: CsvRow[] = [];
+export function renderCsv(rows: readonly CsvRow[]): string {
+  const header = "repo,days,arm,fate,path\n";
+  const body = rows
+    .map(
+      (row) =>
+        `${row.repo},${row.days},${row.arm},${row.fate},"${row.path.replace(/"/g, '""')}"`,
+    )
+    .join("\n");
+  return header + body + "\n";
+}
 
-/** Classify one sampled file's fate between T and HEAD. */
+/** Classify one sampled file's fate between T and the pinned head. */
 function fateOf(
   repo: string,
   sha: string,
+  head: string,
   path: string,
   changed: Map<string, "M" | "D" | "R">,
 ): Fate {
@@ -373,7 +453,7 @@ function fateOf(
   if (status === "D") return "deleted";
   if (status === "R") return "renamed";
   const before = blob(repo, sha, path);
-  const after = blob(repo, "HEAD", path);
+  const after = blob(repo, head, path);
   if (before === null || after === null) return "modified";
   const b = hashes(before);
   const a = hashes(after);
@@ -386,10 +466,12 @@ function runArm(
   repo: string,
   repoName: string,
   days: number,
-  arm: "touched" | "random",
+  arm: StudyArm,
   sha: string,
+  head: string,
   files: string[],
   changed: Map<string, "M" | "D" | "R">,
+  csvRows: CsvRow[],
 ): ArmResult {
   const fates: Record<Fate, number> = {
     identical: 0,
@@ -399,100 +481,165 @@ function runArm(
     deleted: 0,
   };
   for (const path of files) {
-    const fate = fateOf(repo, sha, path, changed);
+    const fate = fateOf(repo, sha, head, path, changed);
     fates[fate]++;
     csvRows.push({ repo: repoName, days, arm, path, fate });
   }
-  const sampled = files.length || 1;
+  const denominator = files.length || 1;
   const drifted = files.length - fates.identical;
   const substantive = fates.modified + fates.renamed + fates.deleted;
   return {
     sampled: files.length,
     fates,
-    driftRate: drifted / sampled,
-    substantiveRate: substantive / sampled,
+    driftRate: drifted / denominator,
+    substantiveRate: substantive / denominator,
   };
 }
 
 function analyzePoint(
   repo: string,
   repoName: string,
+  head: string,
   days: number,
+  sha: string,
+  includeI18n: boolean,
+  csvRows: CsvRow[],
 ): PointResult | null {
-  const sha = commitBeforeDays(repo, days);
-  if (!sha) return null;
-
   // Formatter/license sweeps are excluded from BOTH arms and reported, so one
   // Prettier run cannot masquerade as knowledge going stale.
-  const sweep = detectSweeps(repo, sha);
-  const keep = (p: string): boolean => !sweep.excludedFiles.has(p);
+  const sweep = detectSweeps(repo, sha, head);
+  const keep = (path: string): boolean => !sweep.excludedFiles.has(path);
 
-  const touchedAll = activeFilesAt(repo, sha);
-  const touched = touchedAll.filter(keep);
+  const touchedSelection = activeFilesAt(repo, sha, includeI18n);
+  const touched = touchedSelection.files.filter(keep);
   // Seed from the capture commit so a rerun samples identically.
   const seed = parseInt(sha.slice(0, 8), 16);
-  const randomAll = randomFilesAt(repo, sha, seed);
-  const random = randomAll.filter(keep);
+  const randomSelection = randomFilesAt(repo, sha, seed, includeI18n);
+  const random = randomSelection.files.filter(keep);
   if (touched.length === 0 && random.length === 0) return null;
 
-  const changed = changeMap(repo, sha);
+  const changed = changeMap(repo, sha, head);
   return {
     days,
-    captureCommit: sha.slice(0, 12),
+    captureCommit: sha,
     captureDate: commitDate(repo, sha).slice(0, 10),
-    touched: runArm(repo, repoName, days, "touched", sha, touched, changed),
-    random: runArm(repo, repoName, days, "random", sha, random, changed),
-    sweepExcluded:
-      touchedAll.length - touched.length + (randomAll.length - random.length),
-    sweepCommits: sweep.sweepCommits,
+    touched: runArm(repo, repoName, days, "touched", sha, head, touched, changed, csvRows),
+    random: runArm(repo, repoName, days, "random", sha, head, random, changed, csvRows),
+    exclusions: {
+      candidates: {
+        touched: touchedSelection.exclusions,
+        random: randomSelection.exclusions,
+      },
+      sweeps: {
+        commits: sweep.sweepCommits,
+        touchedFiles: touchedSelection.files.length - touched.length,
+        randomFiles: randomSelection.files.length - random.length,
+      },
+    },
   };
 }
 
-function analyzeRepo(repoPath: string): RepoResult {
+function skippedRepo(name: string, reason: string, head = "", headDate = "", repoUrl = ""): RepoResult {
+  return { repo: name, repoUrl, head, headDate, points: [], skipped: reason };
+}
+
+export function analyzeRepo(repoPath: string, options: AnalyzeOptions = {}): RepoResult {
   const repo = resolve(repoPath);
-  const name = basename(repo);
-  if (!existsSync(repo)) {
-    return { repo: name, head: "", headDate: "", points: [], skipped: "path does not exist" };
-  }
+  const name = options.expectedRepository?.name ?? basename(repo);
+  const includeI18n = options.includeI18n ?? false;
+  const csvRows = options.csvRows ?? [];
+  if (!existsSync(repo)) return skippedRepo(name, "path does not exist");
   if (gitOk(repo, ["rev-parse", "--git-dir"]) === null) {
-    return { repo: name, head: "", headDate: "", points: [], skipped: "not a git repository" };
+    return skippedRepo(name, "not a git repository");
   }
-  const head = (gitOk(repo, ["rev-parse", "HEAD"]) ?? "").trim().slice(0, 12);
-  const headDate = commitDate(repo, "HEAD").slice(0, 10);
+
+  const head = (gitOk(repo, ["rev-parse", "HEAD"]) ?? "").trim();
+  const repoUrl = (gitOk(repo, ["remote", "get-url", "origin"]) ?? "").trim();
+  const headDate = commitDate(repo, head).slice(0, 10);
+  const expected = options.expectedRepository;
+  if (expected && head !== expected.headSha) {
+    return skippedRepo(
+      name,
+      `HEAD mismatch — expected ${expected.headSha}, found ${head || "no commit"}`,
+      head,
+      headDate,
+      repoUrl,
+    );
+  }
+  if (expected && repoUrl !== expected.url) {
+    return skippedRepo(
+      name,
+      `origin URL mismatch — expected ${expected.url}, found ${repoUrl || "no origin"}`,
+      head,
+      headDate,
+      repoUrl,
+    );
+  }
+
   // A shallow clone silently truncates history and would fabricate low drift
   // for old windows. Refuse rather than under-report.
   const shallow = gitOk(repo, ["rev-parse", "--is-shallow-repository"])?.trim();
   if (shallow === "true") {
-    return {
-      repo: name,
+    return skippedRepo(
+      name,
+      "shallow clone — history is truncated, so old windows would under-report drift. Re-clone without --depth.",
       head,
       headDate,
-      points: [],
-      skipped: "shallow clone — history is truncated, so old windows would under-report drift. Re-clone without --depth.",
-    };
+      repoUrl,
+    );
+  }
+
+  let captures: PinnedCapture[];
+  if (options.captures) {
+    const firstParent = new Set(
+      (gitOk(repo, ["rev-list", "--first-parent", head]) ?? "").split("\n").filter(Boolean),
+    );
+    captures = options.captures.map((capture) => ({ ...capture }));
+    for (const capture of captures) {
+      if (!/^[0-9a-f]{40}$/.test(capture.sha) || !firstParent.has(capture.sha)) {
+        return skippedRepo(
+          name,
+          `pinned capture ${capture.sha} at ${capture.days} days is not on ${head}'s first-parent chain`,
+          head,
+          headDate,
+          repoUrl,
+        );
+      }
+    }
+  } else {
+    captures = WINDOWS.flatMap((days) => {
+      const sha = commitBeforeDays(repo, head, days);
+      return sha ? [{ days, sha }] : [];
+    });
   }
 
   // A sparse history makes several windows resolve to the SAME commit, which
   // would print the same measurement under different ages and read as
-  // corroboration. Keep the first window that reaches each capture commit and
-  // drop the duplicates.
+  // corroboration. Keep the first window that reaches each capture commit.
   const points: PointResult[] = [];
   const seenCommits = new Set<string>();
-  for (const days of WINDOWS) {
-    const r = analyzePoint(repo, name, days);
-    if (!r) continue;
-    if (seenCommits.has(r.captureCommit)) continue;
-    seenCommits.add(r.captureCommit);
-    points.push(r);
+  for (const capture of captures) {
+    if (seenCommits.has(capture.sha)) continue;
+    seenCommits.add(capture.sha);
+    const point = analyzePoint(
+      repo,
+      name,
+      head,
+      capture.days,
+      capture.sha,
+      includeI18n,
+      csvRows,
+    );
+    if (point) points.push(point);
   }
-  return { repo: name, head, headDate, points };
+  return { repo: name, repoUrl, head, headDate, points };
 }
 
 function pct(x: number): string {
   return `${(x * 100).toFixed(1)}%`;
 }
 
-function render(results: RepoResult[]): void {
+export function render(results: RepoResult[], includeI18n = false): void {
   console.log(
     `\n  memory half-life — how fast the code a stored fact points at stops matching\n`,
   );
@@ -501,7 +648,8 @@ function render(results: RepoResult[]): void {
       console.log(`  ${r.repo}: skipped — ${r.skipped}\n`);
       continue;
     }
-    console.log(`  ${r.repo}  @ ${r.head} (${r.headDate})`);
+    console.log(`  ${r.repo}  ${r.repoUrl || "(no origin URL)"}`);
+    console.log(`    @ ${r.head} (${r.headDate})`);
     console.log(
       `    age    arm       n   identical  reformat  modified  renamed  deleted   changed`,
     );
@@ -530,8 +678,8 @@ function render(results: RepoResult[]): void {
         const gap = p.touched.substantiveRate - p.random.substantiveRate;
         console.log(
           `          gap ${gap >= 0 ? "+" : ""}${pct(gap)} (recently-touched vs repo-wide)` +
-            (p.sweepCommits > 0
-              ? `  ·  excluded ${p.sweepExcluded} files from ${p.sweepCommits} sweep commit(s)`
+            (p.exclusions.sweeps.commits > 0
+              ? `  ·  excluded ${p.exclusions.sweeps.touchedFiles + p.exclusions.sweeps.randomFiles} files from ${p.exclusions.sweeps.commits} sweep commit(s)`
               : ""),
         );
       }
@@ -539,26 +687,33 @@ function render(results: RepoResult[]): void {
     console.log("");
   }
 
-  const withPoints = results.filter((r) => !r.skipped && r.points.length > 0);
+  const withPoints = results.filter((result) => !result.skipped && result.points.length > 0);
   if (withPoints.length > 0) {
-    console.log(`  Across ${withPoints.length} repo(s), files whose content genuinely changed:`);
+    console.log(
+      `  Across ${withPoints.length} repo(s), substantive source drift exposure` +
+        ` (${QUANTILE_METHOD}; even-n median averages the two middle values):`,
+    );
     for (const days of WINDOWS) {
-      const vals = withPoints
-        .map((r) => r.points.find((p) => p.days === days))
-        .filter((p): p is PointResult => !!p && p.touched.sampled >= MIN_SAMPLE)
-        .map((p) => p.touched.substantiveRate)
-        .sort((a, b) => a - b);
-      if (vals.length === 0) continue;
-      const q = (f: number): number => vals[Math.min(vals.length - 1, Math.floor(f * vals.length))]!;
-      // Median with IQR, never a naked average: refactors change many files at
-      // once, so file outcomes are not independent and a point estimate would
-      // fake precision this design does not have.
-      console.log(
-        `    ${String(days).padStart(3)}d  median ${pct(q(0.5)).padStart(6)}` +
-          (vals.length >= 4
-            ? `   IQR ${pct(q(0.25))}–${pct(q(0.75))}  (n=${vals.length} repos)`
-            : `   (n=${vals.length} repo${vals.length === 1 ? "" : "s"} — too few for a spread)`),
-      );
+      for (const armName of ["touched", "random"] as const) {
+        const values = withPoints
+          .map((result) => result.points.find((point) => point.days === days))
+          .filter(
+            (point): point is PointResult =>
+              !!point && point[armName].sampled >= MIN_SAMPLE,
+          )
+          .map((point) => point[armName].substantiveRate);
+        if (values.length === 0) continue;
+        // Median with IQR, never a naked average: refactors change many files at
+        // once, so file outcomes are not independent and a point estimate would
+        // fake precision this design does not have.
+        console.log(
+          `    ${String(days).padStart(3)}d  ${armName.padEnd(7)} median ${pct(sampleMedian(values)).padStart(6)}` +
+            (values.length >= 4
+              ? `   IQR ${pct(sampleQuantileR7(values, 0.25))}–${pct(sampleQuantileR7(values, 0.75))}` +
+                `  (n=${values.length} repos)`
+              : `   (n=${values.length} repo${values.length === 1 ? "" : "s"} — too few for a spread)`),
+        );
+      }
     }
     console.log("");
   }
@@ -593,54 +748,63 @@ function render(results: RepoResult[]): void {
   );
 }
 
-function main(): void {
+export function main(): void {
   const args = process.argv.slice(2);
   const asJson = args.includes("--json");
-  includeI18n = args.includes("--include-i18n");
+  const includeI18n = args.includes("--include-i18n");
   const csvIdx = args.indexOf("--csv");
   const csvPath = csvIdx !== -1 ? args[csvIdx + 1] : undefined;
+  if (csvIdx !== -1 && (!csvPath || csvPath.startsWith("--"))) {
+    console.error("--csv requires an output path");
+    process.exitCode = 1;
+    return;
+  }
   // Guard the -1 case: without --csv, `csvIdx + 1` is 0 and would swallow the
   // first repo path.
   const csvValueIdx = csvIdx === -1 ? -1 : csvIdx + 1;
-  const paths = args.filter(
-    (a, i) => !a.startsWith("--") && i !== csvValueIdx,
-  );
+  const paths = args.filter((argument, index) => {
+    return !argument.startsWith("--") && index !== csvValueIdx;
+  });
   if (paths.length === 0) {
     console.error(
-      "usage: npx tsx eval/memory-halflife.ts [--json] [--csv out.csv] <repo-path> [more...]\n\n" +
-        "Clone the repos yourself (FULL clones — shallow ones are refused, because\n" +
-        "truncated history silently under-reports drift). Nothing is downloaded\n" +
-        "here, no memory store is read, and no repo is modified.",
+      "usage: npx tsx eval/memory-halflife.ts [--json] [--include-i18n] [--csv out.csv] <repo-path> [more...]\n\n" +
+        "Use FULL clones — shallow ones are refused because truncated history\n" +
+        "silently under-reports drift. Nothing is downloaded here, no memory\n" +
+        "store is read, and no repo is modified. Published runs should use the\n" +
+        "pinned artifact command instead of moving HEADs.",
     );
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
-  const results = paths.map(analyzeRepo);
+  const csvRows: CsvRow[] = [];
+  const results = paths.map((path) => analyzeRepo(path, { includeI18n, csvRows }));
 
   // Per-file microdata, so anyone can re-cut or re-weight the sample. Hidden
   // weighting is the attack this forecloses.
   if (csvPath) {
-    const header = "repo,days,arm,fate,path\n";
-    const body = csvRows
-      .map(
-        (r) =>
-          `${r.repo},${r.days},${r.arm},${r.fate},"${r.path.replace(/"/g, '""')}"`,
-      )
-      .join("\n");
-    writeFileSync(csvPath, header + body + "\n", "utf8");
+    writeFileSync(csvPath, renderCsv(csvRows), "utf8");
     console.log(`\n  wrote ${csvRows.length} rows of microdata to ${csvPath}`);
   }
 
   if (asJson) {
     console.log(
       JSON.stringify(
-        { windows: WINDOWS, activityWindowDays: ACTIVITY_WINDOW_DAYS, results },
+        {
+          windows: WINDOWS,
+          activityWindowDays: ACTIVITY_WINDOW_DAYS,
+          quantileMethod: QUANTILE_METHOD,
+          includeI18n,
+          results,
+        },
         null,
         2,
       ),
     );
     return;
   }
-  render(results);
+  render(results, includeI18n);
 }
 
-main();
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
+}
