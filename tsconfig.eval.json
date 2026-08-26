@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist-eval",
+    "declaration": false,
+    "noEmit": true
+  },
+  "include": ["eval/**/*.ts"],
+  "exclude": ["node_modules", "dist", "dist-eval", "test"]
+}
