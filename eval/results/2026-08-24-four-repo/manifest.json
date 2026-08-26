@@ -1,0 +1,185 @@
+{
+  "schemaVersion": 1,
+  "kind": "memwarden-memory-halflife-manifest",
+  "runId": "2026-08-24-four-repo",
+  "createdAt": "2026-08-24T19:27:59.397Z",
+  "parameters": {
+    "windows": [
+      7,
+      30,
+      90,
+      180,
+      365
+    ],
+    "activityWindowDays": 14,
+    "maxFilesPerPoint": 400,
+    "minimumArmSample": 30,
+    "quantileMethod": "R7_LINEAR_INTERPOLATION",
+    "analyses": [
+      {
+        "id": "primary",
+        "role": "primary",
+        "includeI18n": false
+      },
+      {
+        "id": "include-i18n",
+        "role": "sensitivity",
+        "includeI18n": true
+      }
+    ],
+    "exclusionPolicy": {
+      "nonSourcePaths": "generated-vendored-lockfiles-binaries-fixtures-v1",
+      "sweeps": "format-or-large-tree-rewrite-v1"
+    }
+  },
+  "repositories": [
+    {
+      "name": "django",
+      "url": "https://github.com/django/django.git",
+      "checkout": "django",
+      "headSha": "0b40210e4808937a7c0922e8b7502bff4752faa3",
+      "captures": [
+        {
+          "days": 7,
+          "sha": "c72f5fb4793f2cac66d76e3cbd590499ad85b89e"
+        },
+        {
+          "days": 30,
+          "sha": "957d0cee7167757ae221ffde59d2cf0a322e89c7"
+        },
+        {
+          "days": 90,
+          "sha": "032549216074d25628a9d63f44767fa1ed801286"
+        },
+        {
+          "days": 180,
+          "sha": "169152f8f5ac586e19779faf9943086fe0f416e9"
+        },
+        {
+          "days": 365,
+          "sha": "165ad74c578f94f962624a40dff14e1b2e23a1f8"
+        }
+      ]
+    },
+    {
+      "name": "fastapi",
+      "url": "https://github.com/fastapi/fastapi.git",
+      "checkout": "fastapi",
+      "headSha": "c3f316b7e814667e8ee81e03a7330d00ee61e45c",
+      "captures": [
+        {
+          "days": 7,
+          "sha": "a1fa70d4237d50aae6586a0d9b229df583463d21"
+        },
+        {
+          "days": 30,
+          "sha": "255b912928904e3ba5980425a54d6837c8bd1a1c"
+        },
+        {
+          "days": 90,
+          "sha": "6cbdde231589f14df19034e528f47216b52eb755"
+        },
+        {
+          "days": 180,
+          "sha": "2b476737b8ed6aa8a42acd5a8e912656d08f15de"
+        },
+        {
+          "days": 365,
+          "sha": "9cf7b70d7b282b0671dbb1a93a4cbc31aac58abe"
+        }
+      ]
+    },
+    {
+      "name": "react",
+      "url": "https://github.com/facebook/react.git",
+      "checkout": "react",
+      "headSha": "bd6ea412c6732b3b946a2827fcaac3a1c8f2e863",
+      "captures": [
+        {
+          "days": 7,
+          "sha": "eb8feb71096eec5c885b2a4c7d8d030d3622f265"
+        },
+        {
+          "days": 30,
+          "sha": "b685b40d870b90a975da28c8d22ecf0ba910b1a1"
+        },
+        {
+          "days": 90,
+          "sha": "75b0945b18f4a60c80c931fd8067d9c715957879"
+        },
+        {
+          "days": 180,
+          "sha": "e33071c6142ae5212483a63b87d5d962860e535a"
+        },
+        {
+          "days": 365,
+          "sha": "090777d78a4d61462dc984b9bba169edd3e7c088"
+        }
+      ]
+    },
+    {
+      "name": "vite",
+      "url": "https://github.com/vitejs/vite.git",
+      "checkout": "vite",
+      "headSha": "c32e784c95b51f7969cebc7522a5037f14fb6606",
+      "captures": [
+        {
+          "days": 7,
+          "sha": "83ecb2c8059e8ce946a7cc835d4c14ef78aef4fd"
+        },
+        {
+          "days": 30,
+          "sha": "3ac77d9dd742968961af38a5a91ed6b061ceda7d"
+        },
+        {
+          "days": 90,
+          "sha": "b089c2bab9a92543678e07af6997435542d738c5"
+        },
+        {
+          "days": 180,
+          "sha": "521fdc0ced51ddee7f728e6f891f36ebc6c0e1ce"
+        },
+        {
+          "days": 365,
+          "sha": "e899bc7c73a27cdf327875e5d696c50d396a7fc2"
+        }
+      ]
+    }
+  ],
+  "artifacts": {
+    "summary": {
+      "storage": "committed",
+      "path": "summary.json",
+      "sha256": "741f41580d1ace11c0361d97e964e790a7e35ad844b01b5ac69b1237ddb05407",
+      "bytes": 75238
+    },
+    "report": {
+      "storage": "committed",
+      "path": "REPORT.md",
+      "sha256": "31c51927978fc535bf47978f89769d84dc52176aacc0b9d8da1897f586bd5aae",
+      "bytes": 9737
+    },
+    "microdata": [
+      {
+        "storage": "committed",
+        "path": "microdata.csv",
+        "sha256": "b387c9b977afa74bae93f47dd85414c37e3b655aeaeb65e430fe0eee1ffbdc08",
+        "bytes": 801784,
+        "analysis": "primary",
+        "rowCount": 10192
+      },
+      {
+        "storage": "committed",
+        "path": "include-i18n-microdata.csv",
+        "sha256": "8cb801ae1ce4c867e3c02fc37d8f2c2f8793de2faf49ada9b37db28cb9885abb",
+        "bytes": 812738,
+        "analysis": "include-i18n",
+        "rowCount": 10520
+      }
+    ]
+  },
+  "reproduction": {
+    "command": "npm run eval:halflife:artifact -- reproduce eval/results/2026-08-24-four-repo/manifest.json --corpus-root /path/to/halflife-corpus",
+    "requiresFullClones": true
+  }
+}
