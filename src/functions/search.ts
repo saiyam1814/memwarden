@@ -65,6 +65,11 @@ import { recordAccessBatch } from "./access-tracker.js";
 import { loadVectorIndex, persistVectorIndex } from "./vector-persistence.js";
 import { logger } from "./logger.js";
 import { metrics } from "../observability/metrics.js";
+import {
+  fineGrainedClaimForMemory,
+  fineGrainedClaimForObservation,
+  type FineGrainedAnchorStatus,
+} from "./anchors.js";
 
 let index: SearchIndex | null = null;
 let vectorIndex: VectorIndexLike | null = null;
@@ -577,6 +582,8 @@ interface RecallClassificationFields {
   evidence_reason: string;
   live_source_status: LiveSourceStatus;
   live_source_reason: string;
+  fine_grained_anchor_status?: FineGrainedAnchorStatus;
+  fine_grained_anchor_actionable?: boolean;
   persisted_lifecycle: MemoryLifecycleState;
   effective_lifecycle: MemoryLifecycleState;
   transition_reason: string;
@@ -642,6 +649,12 @@ function classificationFields(
     evidence_reason: verdict.evidenceReason,
     live_source_status: verdict.sourceStatus,
     live_source_reason: verdict.sourceReason,
+    ...(verdict.status !== "unverifiable" && verdict.fineGrained
+      ? {
+          fine_grained_anchor_status: verdict.fineGrained.status,
+          fine_grained_anchor_actionable: verdict.fineGrained.actionable,
+        }
+      : {}),
     persisted_lifecycle: lifecycle.projection.persisted,
     effective_lifecycle: lifecycle.projection.effective,
     transition_reason: lifecycle.projection.persistedReason,
@@ -1292,14 +1305,22 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       const classifyForSearch = async (
         obs: CompressedObservation,
         identity: ProjectIdentity,
+        memory: Memory | null,
       ): Promise<SearchVerdict> => {
         const files = obs.provenance?.files ?? [];
+        const fineGrainedClaim = memory
+          ? fineGrainedClaimForMemory(memory)
+          : fineGrainedClaimForObservation(obs);
         const needsRelativeRoot = files.some((file) => !isAbsolute(file));
 
         // File-less provenance (command/user confirmation/none) does not need a
         // checkout. The classifier can determine sourced vs unsourced directly.
         if (files.length === 0) {
-          return classifyProvenance(obs.provenance, cwdFilter ?? projectFilter ?? "/");
+          return classifyProvenance(
+            obs.provenance,
+            cwdFilter ?? projectFilter ?? "/",
+            { fineGrainedClaim },
+          );
         }
 
         const scopedFilter = cwdFilter ?? projectFilter;
@@ -1313,6 +1334,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           if (callerRoot && sameProject && mustUseCallerCheckout) {
             return classifyProvenance(obs.provenance, callerRoot, {
               verifyAgainstRoot: true,
+              fineGrainedClaim,
             });
           }
           if (!callerRoot && sameProject && mustUseCallerCheckout) {
@@ -1324,7 +1346,9 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         // checkout, never the caller's unrelated cwd.
         const provenanceRoot = usableCheckoutRoot(obs.provenance?.cwd);
         if (provenanceRoot) {
-          return classifyProvenance(obs.provenance, provenanceRoot);
+          return classifyProvenance(obs.provenance, provenanceRoot, {
+            fineGrainedClaim,
+          });
         }
 
         const directRoot =
@@ -1333,6 +1357,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         if (directRoot) {
           return classifyProvenance(obs.provenance, directRoot, {
             verifyAgainstRoot: true,
+            fineGrainedClaim,
           });
         }
 
@@ -1355,6 +1380,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           if (alternateRoot) {
             return classifyProvenance(obs.provenance, alternateRoot, {
               verifyAgainstRoot: true,
+              fineGrainedClaim,
             });
           }
         }
@@ -1369,7 +1395,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         // and can still be checked directly. Relative evidence cannot.
         return needsRelativeRoot
           ? unverifiable(obs.provenance)
-          : classifyProvenance(obs.provenance, "/");
+          : classifyProvenance(obs.provenance, "/", { fineGrainedClaim });
       };
 
       // Scope, classify, THEN apply inclusion policy while filling. Every item
@@ -1453,7 +1479,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           );
           if (![...fileFilter].every((file) => candidateFiles.has(file))) continue;
         }
-        const verdict = await classifyForSearch(obs, identity);
+        const verdict = await classifyForSearch(obs, identity, source.memory);
         const sourceStatus = sourceStatusOf(verdict);
         const projection = lifecycleProjection(
           source.memory,

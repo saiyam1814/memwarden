@@ -28,8 +28,9 @@ npm install -g memwarden && memwarden up    # persistent: wire every agent, one 
 memwarden is **self-custodied, verified memory** shared across every coding agent you use - Claude
 Code, Codex, Cursor, Gemini CLI, Kiro, OpenCode, and more. The point isn't to remember *more*. It's
 that a coding agent can settle a question general-purpose memory can't: **is this memory still true?**
-Every code-backed memory is tied to a SHA-256 hash of the files it references; on recall the live repo
-is re-hashed, and anything that no longer checks out is refused before the model ever sees it.
+Every code-backed memory carries capture-time SHA-256 commitments. Whole-file hashes are the safe
+fallback; a bounded, capture-complete source-unit anchor can ignore unrelated same-file edits. Recall
+re-hashes the live repo, and anything that no longer checks out is refused before the model sees it.
 
 ## 🚀 Quick start
 
@@ -85,10 +86,10 @@ Every search hit is classified against its source before an inclusion policy dec
 
 | State | Meaning | Firewall |
 | --- | --- | --- |
-| 🟢 `verified` | captured raw bytes still match exactly - code-backed and current | **injected** (only byte-identical memory earns this label) |
-| `cosmetic` / `source-cosmetic` | captured normalized text still matches; only CRLF/LF or trailing whitespace differs | **current and injected**, but never mislabeled byte-verified |
-| 🔵 `sourced` | has a source (command, or files present but not hashable), no content hash to re-check | injected, **labeled** |
-| 🟠 `stale` / `source-drifted` | a referenced file was deleted or its content changed since capture | **blocked from current recall**; explicit history only |
+| 🟢 `verified` | every complete source commitment (whole file or fine-grained unit) raw-hash-matches live content | **injected** (only byte-identical complete evidence earns this label) |
+| `cosmetic` / `source-cosmetic` | every complete dependency matches its explicit normalized commitment; raw bytes differ only cosmetically | **current and injected**, but never mislabeled byte-verified |
+| 🔵 `sourced` | has a source but no complete current content match | injected, **labeled** |
+| 🟠 `stale` / `source-drifted` | a complete anchored unit changed/disappeared, or conservative whole-file fallback drifted | **blocked from current recall**; explicit history only |
 | ⚪ `unsourced` | no provenance at all | included by balanced recall, always **labeled** (unverified ≠ dangerous) |
 
 Classification always runs; policy controls **inclusion**, not whether a result gets a verdict. Every
@@ -184,6 +185,16 @@ lines; it does not start an unbounded follow process.
 terminal controls removed, and a 200,000-character response cap. Stale, unsourced, and unverifiable
 records retain their status label in both human and JSON output.
 
+When a Memory carries #62 fine-grained evidence, list/show/history JSON exposes only a bounded
+anchor summary (`present`, validated count, locally `recomputed`, `actionable`, aggregate `status`,
+and a bounded reason); project output aggregates those fields. Management re-hashes anchors against
+the selected checkout and recomputes the exact stored claim commitment—persisted caller status words
+and unknown payload fields are discarded, and no anchor hashes, locations, or source snippets are
+returned. `memories edit` never copies predecessor anchors into successor prose: the new version keeps
+only explicitly recaptured whole-file evidence unless a deterministic operation independently creates
+new anchors. Revalidation remains the #61/#62 lifecycle boundary and likewise never carries old
+anchors forward as fresh support.
+
 Stable `--json` envelopes are versioned by their `format`/`contract` field:
 
 | Command | JSON contract |
@@ -278,9 +289,9 @@ vector runtime, then the native backend when `@memwarden/turbovec` is available 
 Daemon and command logs are printed and archived on failure. Windows is intentionally the supported
 smoke subset, not a claim that service-manager or every full-release journey is implemented there.
 
-The gate proves today's conservative source-validity contract. Versioned claim supersession,
-fine-grained revalidation anchors, and richer daily memory management remain follow-up work in
-issues #61, #62, and #63 rather than hidden beta claims.
+The gate proves the conservative packed source-validity contract. This stacked feature line layers
+explicit lifecycle history (#61), bounded fine-grained anchors (#62), and daily management (#63) on
+top without weakening the packed gate or its whole-file fallback.
 
 ## 📚 Docs
 

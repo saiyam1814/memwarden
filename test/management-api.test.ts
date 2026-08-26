@@ -547,6 +547,173 @@ describe("show/edit/lifecycle/history", () => {
     expect(shown.content.framed).not.toContain("\u001b");
   });
 
+  it("recomputes bounded anchor diagnostics and never copies anchors into edited prose", async () => {
+    const path = "src/anchor-edit.ts";
+    writeFileSync(join(main, path), "export const TTL = 900;\n");
+    for (let index = 0; index < 3; index++) {
+      await sdk.trigger({
+        function_id: "mem::observe",
+        payload: {
+          hookType: "post_tool_use",
+          sessionId: `management-anchor-${index}`,
+          project: main,
+          cwd: main,
+          timestamp: `2025-01-0${index + 1}T00:00:00.000Z`,
+          data: {
+            tool_name: "Edit",
+            tool_input: {
+              file_path: path,
+              old_string: "export const TTL = 3600;",
+              new_string: "export const TTL = 900;",
+            },
+            tool_output: "ok",
+          },
+        },
+      });
+    }
+    await sdk.trigger({
+      function_id: "mem::consolidate-pipeline",
+      payload: { now: Date.parse(T2) },
+    });
+    const [anchored] = await kv.list<Memory>(KV.memories);
+    expect(anchored?.provenance?.anchors?.anchors.length).toBeGreaterThan(0);
+
+    const callerDecorated: Memory = {
+      ...anchored!,
+      provenance: {
+        ...anchored!.provenance!,
+        anchors: {
+          ...anchored!.provenance!.anchors!,
+          status: "missing",
+          sourcePayload: "ANCHOR_SOURCE_PAYLOAD_MUST_NOT_LEAK",
+        } as unknown as NonNullable<
+          NonNullable<Memory["provenance"]>["anchors"]
+        >,
+      },
+    };
+    await kv.set(KV.memories, callerDecorated.id, callerDecorated);
+
+    const shown = (await (
+      await post("/memories/show", {
+        memory_id: callerDecorated.id,
+        project: main,
+      })
+    ).json()) as {
+      memory: {
+        anchors: {
+          present: boolean;
+          count: number;
+          recomputed: boolean;
+          actionable: boolean;
+          status: string;
+        };
+      };
+    };
+    expect(shown.memory.anchors).toMatchObject({
+      present: true,
+      recomputed: true,
+      actionable: true,
+      status: "raw_match",
+    });
+    expect(shown.memory.anchors.count).toBeGreaterThan(0);
+    const serialized = JSON.stringify(shown);
+    expect(serialized).not.toContain("ANCHOR_SOURCE_PAYLOAD_MUST_NOT_LEAK");
+    expect(serialized).not.toContain("rawHash");
+    expect(serialized).not.toContain("locatorHash");
+    expect(serialized).not.toContain("startByte");
+
+    const listed = (await (
+      await post("/memories/list", { project: main })
+    ).json()) as {
+      items: Array<{
+        id: string;
+        anchors: { status: string; actionable: boolean };
+      }>;
+    };
+    expect(listed.items.find((item) => item.id === callerDecorated.id)?.anchors).toEqual(
+      expect.objectContaining({ status: "raw_match", actionable: true }),
+    );
+
+    const edited = (await (
+      await post("/memories/edit", {
+        memory_id: callerDecorated.id,
+        project: main,
+        title: "Deployment cache policy",
+        text: "The deployment uses Redis for caching.",
+        authored_by: "user",
+        files: [path],
+      })
+    ).json()) as {
+      ok: boolean;
+      successor: { id: string; anchors: { present: boolean; status: string } };
+    };
+    expect(edited.ok).toBe(true);
+    expect(edited.successor.anchors).toMatchObject({
+      present: false,
+      status: "absent",
+    });
+    const storedSuccessor = await kv.get<Memory>(KV.memories, edited.successor.id);
+    expect(storedSuccessor?.provenance?.anchors).toBeUndefined();
+    expect(storedSuccessor?.provenance?.fileHashes?.[path]).toMatch(/^[a-f0-9]{64}$/);
+    expect((await kv.get<Memory>(KV.memories, callerDecorated.id))?.provenance?.anchors)
+      .toBeDefined();
+
+    const projects = (await (
+      await post("/projects", { limit: 10 })
+    ).json()) as {
+      projects: Array<{
+        key: string | null;
+        counts: {
+          anchors: {
+            present: number;
+            recomputed: number;
+            actionable: number;
+            status: Record<string, number>;
+          };
+        };
+      }>;
+    };
+    const project = projects.projects.find((item) => item.key === projectKey(main));
+    expect(project?.counts.anchors).toMatchObject({
+      present: 1,
+      recomputed: 1,
+      actionable: 1,
+      status: { raw_match: 1, absent: 1 },
+    });
+
+    const revalidationCopy: Memory = {
+      ...anchored!,
+      id: "anchor-revalidation-copy",
+      title: anchored!.title,
+      content: anchored!.content,
+      provenance: {
+        ...anchored!.provenance!,
+        anchors: anchored!.provenance!.anchors!,
+      },
+    };
+    await kv.set(KV.memories, revalidationCopy.id, revalidationCopy);
+    writeFileSync(join(main, path), "export const TTL = 600;\n");
+    const revalidated = await post("/memories/revalidate", {
+      memory_id: revalidationCopy.id,
+      project: main,
+      reason: "reviewed the changed anchored unit",
+      actor: "reviewer",
+      confirmed: true,
+    });
+    expect(revalidated.status).toBe(200);
+    const revalidatedBody = (await revalidated.json()) as {
+      successor: { id: string };
+    };
+    expect(
+      (await kv.get<Memory>(KV.memories, revalidationCopy.id))?.provenance
+        ?.anchors,
+    ).toBeDefined();
+    expect(
+      (await kv.get<Memory>(KV.memories, revalidatedBody.successor.id))
+        ?.provenance?.anchors,
+    ).toBeUndefined();
+  });
+
   it("rejects malformed edit fields at the HTTP boundary with stable 400 contracts", async () => {
     const predecessor = await remember({
       text: "HTTP edit validation predecessor",
