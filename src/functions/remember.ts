@@ -11,7 +11,7 @@ import {
   projectIdentityMatchesPath,
   resolveMemoryIdentity,
 } from "./memory-identity.js";
-import { hashFiles } from "./verify.js";
+import { hashFileCommitments } from "./verify.js";
 import {
   getSearchIndex,
   vectorIndexAddGuarded,
@@ -274,8 +274,13 @@ export async function rememberMemory(
     if (agent) provenance.agent = agent;
     if (files.length > 0) {
       provenance.files = files;
-      const hashes = hashFiles(files, projectPath);
-      if (Object.keys(hashes).length > 0) provenance.fileHashes = hashes;
+      const commitments = hashFileCommitments(files, projectPath);
+      if (Object.keys(commitments.fileHashes).length > 0) {
+        provenance.fileHashes = commitments.fileHashes;
+      }
+      if (Object.keys(commitments.fileHashesNormalized).length > 0) {
+        provenance.fileHashesNormalized = commitments.fileHashesNormalized;
+      }
     }
 
     const supersededIds = Array.from(
