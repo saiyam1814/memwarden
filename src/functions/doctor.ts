@@ -2,7 +2,8 @@
 // mem::doctor — the memory doctor / firewall. Audits stored memories for
 // trustworthiness against the live repo, not just integrity:
 //
-//   VERIFIED   code-backed memory still matches its capture-time hashes
+//   VERIFIED   code-backed memory is byte-identical to capture
+//   COSMETIC   normalized content matches; line endings/whitespace differ
 //   SOURCED    sourced, but not content-verified
 //   STALE      references files that no longer exist or changed under root
 //   UNSOURCED  no evidence (no files, no command, not confirmed)
@@ -68,8 +69,9 @@ export interface DoctorFootprint {
 }
 export interface DoctorReport {
   total: number;
-  safe: number; // verified + sourcedUnverified (everything injectable)
-  verified: number; // code-backed and current
+  safe: number; // verified + cosmetic + sourcedUnverified (injectable)
+  verified: number; // byte-identical code-backed memory
+  cosmetic: number; // normalized content current; bytes differ cosmetically
   sourcedUnverified: number; // sourced but not content-verified
   stale: DoctorEntry[];
   unsourced: DoctorEntry[];
@@ -95,6 +97,7 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
         total: 0,
         safe: 0,
         verified: 0,
+        cosmetic: 0,
         sourcedUnverified: 0,
         stale: [],
         unsourced: [],
@@ -123,6 +126,11 @@ export function registerDoctorFunction(sdk: ISdk, kv: StateKV): void {
         switch (verdict.status) {
           case "verified":
             report.verified++;
+            report.safe++;
+            conflictCandidates.push(obs);
+            break;
+          case "cosmetic":
+            report.cosmetic++;
             report.safe++;
             conflictCandidates.push(obs);
             break;

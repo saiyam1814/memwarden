@@ -21,7 +21,7 @@
 // In-process kernel (same wiring as the test suite) so the numbers are the
 // engine's, with no network noise.
 
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -37,6 +37,11 @@ import { MEMORY_TAG, frameMemoryBlock } from "../src/functions/injection-format.
 const PROJECTS = 5;
 const PER_PROJECT = 40; // 200 file-backed total
 const STALE_EVERY = 4; // every 4th memory's file gets drifted later
+// Every 7th (and not already drifted) file gets REFORMATTED instead: trailing
+// whitespace and line endings change, the code does not. `verified-only` now
+// admits these, so the eval has to prove that admission is bounded — otherwise
+// the strictest policy has an untested widening in it.
+const COSMETIC_EVERY = 7;
 const SOURCED_PER = 5; // command-backed (no file evidence) per project
 const UNSOURCED_PER = 5; // prompt-only (no evidence at all) per project
 
@@ -46,6 +51,7 @@ interface Fact {
   obsText: string;
   key: string; // unique needle for detection
   willGoStale: boolean;
+  willGoCosmetic: boolean;
 }
 
 const dirs: string[] = [];
@@ -108,6 +114,7 @@ async function main(): Promise<void> {
         obsText: `decided: module ${i} uses constant V_${i}=${i} (${key}) in ${file}`,
         key,
         willGoStale: i % STALE_EVERY === 0,
+        willGoCosmetic: i % STALE_EVERY !== 0 && i % COSMETIC_EVERY === 0,
       });
     }
   }
@@ -222,6 +229,18 @@ async function main(): Promise<void> {
     }
   }
 
+  // --- cosmetic events: REFORMAT every marked file ------------------------
+  // Trailing whitespace plus CRLF line endings. The raw hash changes; the
+  // normalized content does not, so the code these memories describe is
+  // untouched. This is the case that separates "the file moved" from "the
+  // meaning moved", and it is what the cosmetic gates below measure.
+  for (const f of facts) {
+    if (!f.willGoCosmetic) continue;
+    const path = join(f.project, f.file);
+    const original = readFileSync(path, "utf8");
+    writeFileSync(path, original.replace(/\n/g, "   \r\n"));
+  }
+
   // --- measure ------------------------------------------------------------
   let staleRetrievable = 0;
   let staleBlocked = 0;
@@ -258,7 +277,14 @@ async function main(): Promise<void> {
       if (hit) {
         freshKept++;
         labelChecked++;
-        if (hit.trust === "verified") labelCorrect++;
+        // A reformatted file is current but NOT byte-identical, so it must be
+        // labeled cosmetic rather than promoted to verified. Accepting only
+        // "verified" here is what made this gate report 180/200 the moment a
+        // cosmetic case existed — the label was added to the classifier without
+        // the gate learning it. The distinction is the whole point: the model
+        // is told "current, not byte-identical", not "proven unchanged".
+        const expected = f.willGoCosmetic ? "cosmetic" : "verified";
+        if (hit.trust === expected) labelCorrect++;
       }
       countLeaks(res, myProject);
     }
@@ -309,6 +335,10 @@ async function main(): Promise<void> {
   let strictRefusable = 0;
   let strictKept = 0;
   let strictKeepable = 0;
+  let cosmeticKept = 0;
+  let cosmeticKeepable = 0;
+  let cosmeticBoundRefused = 0;
+  let cosmeticBoundRefusable = 0;
   try {
     for (const { project, key } of [...sourcedKeys, ...unsourcedKeys]) {
       strictRefusable++;
@@ -325,6 +355,20 @@ async function main(): Promise<void> {
     for (const f of facts.filter((x) => !x.willGoStale && x.key.endsWith("_N1"))) {
       strictKeepable++;
       if (hitFor(await search(f.key, f.project), f.key)) strictKept++;
+    }
+    // Reformatted-but-unchanged memory is admitted under strict policy (the
+    // code did not move, only its bytes). Counted separately from raw-verified
+    // so a regression in either direction is visible.
+    for (const f of facts.filter((x) => x.willGoCosmetic)) {
+      cosmeticKeepable++;
+      if (hitFor(await search(f.key, f.project), f.key)) cosmeticKept++;
+    }
+    // ...and the widening must stop there: a file whose CONTENT changed is
+    // still refused under strict policy. Without this pair, "cosmetic is
+    // allowed" could quietly become "any drift is allowed".
+    for (const f of facts.filter((x) => x.willGoStale)) {
+      cosmeticBoundRefusable++;
+      if (!hitFor(await search(f.key, f.project), f.key)) cosmeticBoundRefused++;
     }
   } finally {
     delete process.env.MEMWARDEN_RECALL_POLICY;
@@ -391,6 +435,8 @@ async function main(): Promise<void> {
     ["label-accuracy", `${labelCorrect}/${labelChecked}`, pct(labelCorrect, labelChecked), labelCorrect === labelChecked && labeledEverything],
     ["handoff-trust", `${trapsNeverVerified}/${trapsSeen}`, trapsSeen === handoffTraps.length ? pct(trapsNeverVerified, trapsSeen) : "MISSING", trapsSeen === handoffTraps.length && trapsNeverVerified === trapsSeen],
     ["verified-only", `${strictRefused}/${strictRefusable} refused, ${strictKept}/${strictKeepable} kept`, pct(strictRefused + strictKept, strictRefusable + strictKeepable), strictRefused === strictRefusable && strictKept === strictKeepable],
+    ["cosmetic-admitted", `${cosmeticKept}/${cosmeticKeepable} kept under strict`, pct(cosmeticKept, cosmeticKeepable), cosmeticKept === cosmeticKeepable],
+    ["cosmetic-bounded", `${cosmeticBoundRefused}/${cosmeticBoundRefusable} real drift still refused`, pct(cosmeticBoundRefused, cosmeticBoundRefusable), cosmeticBoundRefused === cosmeticBoundRefusable],
     ["injection-contain", `${containOk}/${containSeen} contained`, containSeen === FORGERIES.length ? pct(containOk, containSeen) : "NOT RETRIEVED", containSeen === FORGERIES.length && containOk === containSeen],
   ];
 

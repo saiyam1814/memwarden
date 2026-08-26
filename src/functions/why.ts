@@ -49,8 +49,12 @@ function adviceFor(verdict: Verdict, injectable: boolean): string {
   switch (verdict.status) {
     case "verified":
       return injectable
-        ? "Code-backed and current — safe to auto-inject."
+        ? "Code-backed and byte-identical to capture — safe to auto-inject."
         : "Verified, but the current recall policy still withholds it.";
+    case "cosmetic":
+      return injectable
+        ? "Code-backed and normalized-content current — line endings or trailing whitespace differ, so it is labeled [source-cosmetic]."
+        : "Normalized content is current, but the current recall policy still withholds it.";
     case "sourced_unverified":
       return injectable
         ? "Sourced but not hash-verified — injected under balanced policy, labeled [sourced]."
@@ -111,7 +115,9 @@ export function registerWhyFunction(sdk: ISdk, kv: StateKV): void {
         const policy = getRecallPolicy();
         const injectable =
           verdict.status !== "stale" &&
-          (policy === "balanced" || verdict.status === "verified");
+          (policy === "balanced" ||
+            verdict.status === "verified" ||
+            verdict.status === "cosmetic");
         return {
           found: true,
           observationId,
@@ -150,7 +156,9 @@ export function registerWhyFunction(sdk: ISdk, kv: StateKV): void {
         const policy = getRecallPolicy();
         const injectable =
           verdict.status !== "stale" &&
-          (policy === "balanced" || verdict.status === "verified");
+          (policy === "balanced" ||
+            verdict.status === "verified" ||
+            verdict.status === "cosmetic");
         const sourceSession = identity.sourceSession;
         return {
           found: true,

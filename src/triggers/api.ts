@@ -4,11 +4,13 @@
 // that validates the request body and delegates to a mem::<x> business
 // handler via sdk.trigger (paths prefixed /memwarden, with the
 // middleware::api-auth chain). Scope: livez, observe, context, search,
-// verify, stats, doctor, Canon export/import, and Brain Bundle export/import.
+// verify, stats, doctor, bounded daemon shutdown, Canon export/import, and
+// Brain Bundle export/import.
 
 import type { ApiRequest, ISdk } from "../kernel/index.js";
 import type { HookPayload } from "../functions/types.js";
 import { getSecret, getQuantBits } from "../functions/config.js";
+import { canonicalizePath } from "../functions/paths.js";
 import {
   getVectorIndex,
   getEmbeddingProvider,
@@ -83,7 +85,18 @@ export interface HostHeartbeat {
   lastSeen: string;
 }
 
-export function registerApiTriggers(sdk: ISdk, secret?: string): void {
+/** Optional process lifecycle boundary. Library/in-process servers omit it, so
+ * the shutdown route cannot accidentally terminate their host process. */
+export interface ApiLifecycle {
+  dataDir: string;
+  requestShutdown(): void;
+}
+
+export function registerApiTriggers(
+  sdk: ISdk,
+  secret?: string,
+  lifecycle?: ApiLifecycle,
+): void {
   const resolvedSecret = secret ?? getSecret();
 
   // Liveness heartbeat: hook-driven observe/search calls carry an `agent`
@@ -139,6 +152,47 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
     function_id: "api::liveness",
     config: { api_path: "/memwarden/livez", http_method: "GET" },
   });
+
+  // --- POST /memwarden/shutdown -----------------------------------
+  // Registered only by the real daemon. The caller must authenticate and name
+  // the exact brain directory served by this process, which prevents `down`
+  // for an isolated/custom instance from stopping an unrelated daemon.
+  if (lifecycle) {
+    sdk.registerFunction(
+      "api::shutdown",
+      async (req: ApiRequest<{ data_dir?: string; dataDir?: string }>): Promise<Response> => {
+        const body = (req.body ?? {}) as {
+          data_dir?: unknown;
+          dataDir?: unknown;
+        };
+        const requested = asNonEmptyString(body.data_dir ?? body.dataDir);
+        if (!requested) {
+          return {
+            status_code: 400,
+            body: { error: "data_dir is required" },
+          };
+        }
+        if (canonicalizePath(requested) !== canonicalizePath(lifecycle.dataDir)) {
+          return {
+            status_code: 409,
+            body: { error: "data_dir does not match this daemon" },
+          };
+        }
+        const timer = setTimeout(() => lifecycle.requestShutdown(), 50);
+        timer.unref();
+        return { status_code: 202, body: { stopping: true } };
+      },
+    );
+    sdk.registerTrigger({
+      type: "http",
+      function_id: "api::shutdown",
+      config: {
+        api_path: "/memwarden/shutdown",
+        http_method: "POST",
+        middleware_function_ids: ["middleware::api-auth"],
+      },
+    });
+  }
 
   // --- POST /memwarden/observe ------------------------------------
   sdk.registerFunction(
@@ -446,6 +500,8 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
       const allowedTrust = new Set([
         "verified",
         "source-verified",
+        "cosmetic",
+        "source-cosmetic",
         "sourced",
         "sourced-unverified",
         "unsourced",
@@ -467,7 +523,7 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
           status_code: 400,
           body: {
             error:
-              "trust must be a non-empty array of source-verified, sourced, unsourced, source-drifted, or unverifiable",
+              "trust must be a non-empty array of source-verified, source-cosmetic, sourced, unsourced, source-drifted, or unverifiable",
           },
         };
       }
@@ -626,9 +682,10 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
   });
 
   // --- POST /memwarden/canon/import -------------------------------
-  // The core handler repeats local hash verification immediately before the
-  // write. The route validates shape for a useful 400, but API validation is
-  // never the trust boundary (in-process callers cannot bypass the core gate).
+  // The core handler repeats local raw/normalized commitment verification
+  // immediately before the write. The route validates shape for a useful 400,
+  // but API validation is never the trust boundary (in-process callers cannot
+  // bypass the core gate).
   sdk.registerFunction(
     "api::canon-import",
     async (
@@ -981,11 +1038,9 @@ export function registerApiTriggers(sdk: ISdk, secret?: string): void {
   });
 
   // --- POST /memwarden/dejafix/lookup -----------------------------
-  // Déjà Fix: surface verified fixes for an error any agent already solved.
-  // Returns only fixes whose referenced files still hash-match (Verified
-  // Recall) — a stale fix is never returned. cwd is required: it is both the
-  // project firewall (a fix learned in repo A never leaks to repo B) and the
-  // working tree the fix is verified against.
+  // Déjà Fix: surface source-current fixes for an error any agent already
+  // solved. Raw-verified and cosmetic-current fixes pass; stale fixes never do.
+  // cwd is both the project firewall and the checkout used for classification.
   sdk.registerFunction(
     "api::dejafix-lookup",
     async (

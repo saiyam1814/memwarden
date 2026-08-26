@@ -22,9 +22,10 @@
 //
 // Firewall safety: a memory contains exactly one evidence-equivalent claim and
 // inherits its newest supporting observation's provenance verbatim (files +
-// capture-time fileHashes). Different hashes, file sets, cwd/command/agent, or
-// mixedTrust state are different identities and can never be laundered through
-// the newest member. Adopted (hashless) observations stay hashless.
+// capture-time raw/normalized hashes). Different commitments, file sets,
+// cwd/command/agent, or mixedTrust state are different identities and can never
+// be laundered through the newest member. Adopted (hashless) observations stay
+// hashless.
 //
 // Conservative by construction: observations that are important (importance
 // above the floor), user-confirmed, or ever-accessed are NEVER folded or
@@ -168,6 +169,9 @@ function evidenceFingerprintFor(args: {
                 ? null
                 : canonicalExactStrings(provenance.files),
             fileHashes: canonicalFileHashes(provenance.fileHashes),
+            fileHashesNormalized: canonicalFileHashes(
+              provenance.fileHashesNormalized,
+            ),
             command: provenance.command ?? null,
             agent: provenance.agent ?? null,
             userConfirmed: provenance.userConfirmed ?? null,
