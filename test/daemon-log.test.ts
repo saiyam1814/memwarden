@@ -37,7 +37,10 @@ import {
   startDaemonLogMaintenance,
   type DaemonLogMaintenance,
 } from "../src/daemon/log.js";
-import { ensureDaemon } from "../src/daemon/ensure.js";
+import {
+  detachedLogLifecycle,
+  ensureDaemon,
+} from "../src/daemon/ensure.js";
 
 const roots: string[] = [];
 const posixIt = process.platform === "win32" ? it.skip : it;
@@ -287,9 +290,7 @@ describe("periodic daemon log lifecycle", () => {
     let maintenance: DaemonLogMaintenance | undefined;
     try {
       maintenance = startDaemonLogMaintenance(root, { intervalMs: 25 });
-      expect(maintenance.periodic).toBe(true);
-      expect(maintenance.timer).toBeDefined();
-      expect(maintenance.timer!.hasRef()).toBe(false);
+      expect(maintenance.timer.hasRef()).toBe(false);
       writeFileSync(logPath(root), oversized("PERIODIC-TAIL"));
 
       await vi.advanceTimersByTimeAsync(25);
@@ -310,32 +311,15 @@ describe("periodic daemon log lifecycle", () => {
     }
   });
 
-  it("bounds Windows logs at startup without retaining a timer-backed lifecycle", async () => {
-    vi.useFakeTimers();
-    const root = tempRoot();
-    writeFileSync(logPath(root), oversized("WINDOWS-STARTUP-TAIL"));
-    const baselineTimers = vi.getTimerCount();
-    const maintenance = startDaemonLogMaintenance(root, {
-      intervalMs: 25,
-      platform: "win32",
-    });
-    try {
-      expect(maintenance.periodic).toBe(false);
-      expect(maintenance.timer).toBeUndefined();
-      expect(vi.getTimerCount()).toBe(baselineTimers);
-      expect(statSync(logPath(root)).size).toBe(0);
-      expect(readFileSync(rotatedPath(root), "utf8")).toContain("WINDOWS-STARTUP-TAIL");
-
-      writeFileSync(logPath(root), oversized("NO-WINDOWS-PERIODIC-HANDLE"));
-      await vi.advanceTimersByTimeAsync(100);
-      expect(statSync(logPath(root)).size).toBeGreaterThan(DAEMON_LOG_MAX_BYTES);
-    } finally {
-      maintenance.stop();
-    }
-    expect(maintenance.stopped).toBe(true);
+  it("keeps Windows on the legacy spawn and disables all new maintenance handles", () => {
+    expect(detachedLogLifecycle("win32")).toBe("legacy-windows");
+    expect(daemonUsesFileLogging(DAEMON_LOG_MODE_FILE, "win32", true)).toBe(false);
+    expect(daemonUsesFileLogging(undefined, "win32", true)).toBe(false);
   });
 
-  it("selects files for detached/launchd and never infers them for journald", () => {
+  it("selects secure POSIX files and never infers them for journald", () => {
+    expect(detachedLogLifecycle("darwin")).toBe("secure-posix");
+    expect(detachedLogLifecycle("linux")).toBe("secure-posix");
     expect(daemonUsesFileLogging(DAEMON_LOG_MODE_FILE, "linux", true)).toBe(true);
     expect(daemonUsesFileLogging(DAEMON_LOG_MODE_JOURNALD, "darwin", true)).toBe(false);
     expect(daemonUsesFileLogging(undefined, "darwin", true)).toBe(true);

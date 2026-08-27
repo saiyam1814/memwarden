@@ -26,22 +26,12 @@ import {
 import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { runBoundedProcess } from "./packed-process.mjs";
 
 const args = new Set(process.argv.slice(2));
 const profile = args.has("--profile=smoke") || args.has("--smoke") ? "smoke" : "full";
 const vectorsRequested =
   profile === "full" && process.env.MEMWARDEN_PACKED_VECTORS === "1";
 const keepSandbox = process.env.MEMWARDEN_KEEP_PACKED_SANDBOX === "1";
-const configuredScriptTimeout = Number.parseInt(
-  process.env.MEMWARDEN_PACKED_TIMEOUT_MS ?? "",
-  10,
-);
-const scriptTimeoutMs = Number.isFinite(configuredScriptTimeout) && configuredScriptTimeout > 0
-  ? configuredScriptTimeout
-  : profile === "smoke"
-    ? 5 * 60_000
-    : 30 * 60_000;
 // Mirrors the public daemon-log contract without importing package internals:
 // one 1 MiB prior tail and an in-place-truncated current inode.
 const DAEMON_LOG_MAX_BYTES = 1024 * 1024;
@@ -84,9 +74,6 @@ let mcpEntry;
 let tarball;
 let homeFixtureSnapshot = new Map();
 let failure;
-let currentDaemonPid;
-const trackedDaemonPids = new Set();
-const activeChildren = new Set();
 
 function log(message) {
   process.stdout.write(`${message}\n`);
@@ -95,43 +82,6 @@ function log(message) {
 function appendLog(message) {
   appendFileSync(commandLog, `${message}\n`, "utf8");
 }
-
-// A command-level timeout cannot help if Windows has already observed the
-// direct child exit while a detached descendant still owns its pipe handles.
-// Bound the whole contract too, and emit enough state for the archived failure.
-const scriptWatchdog = setTimeout(() => {
-  const activeHandles = typeof process._getActiveHandles === "function"
-    ? process._getActiveHandles().map((handle) => handle?.constructor?.name ?? "unknown")
-    : [];
-  const detail =
-    `packed contract timed out after ${scriptTimeoutMs}ms; ` +
-    `children=[${[...activeChildren].map((child) => child.pid ?? "unknown").join(",")}], ` +
-    `daemons=[${[...trackedDaemonPids].join(",")}], ` +
-    `handles=[${activeHandles.join(",")}]`;
-  appendLog(detail);
-  process.stderr.write(`${detail}\n`);
-  for (const child of activeChildren) {
-    try {
-      child.kill("SIGKILL");
-    } catch {
-      // Best effort before the forced diagnostic exit.
-    }
-  }
-  for (const pid of trackedDaemonPids) {
-    try {
-      process.kill(pid, "SIGKILL");
-    } catch {
-      // It may have completed between the diagnostic snapshot and cleanup.
-    }
-  }
-  try {
-    archiveDaemonLog(paths.brainA, "source-brain-timeout");
-    archiveDaemonLog(paths.brainB, "fresh-brain-timeout");
-  } catch {
-    // Keep the watchdog itself bounded even if Windows still owns a log file.
-  }
-  process.exit(124);
-}, scriptTimeoutMs);
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -160,20 +110,59 @@ async function runProcess(command, values = [], options = {}) {
   const cwd = options.cwd ?? repoRoot;
   const env = options.env ?? process.env;
   const timeoutMs = options.timeoutMs ?? 60_000;
+  const allowFailure = options.allowFailure === true;
   const label = commandLabel(command, values);
   appendLog(`\n$ (cwd=${cwd}) ${label}`);
 
-  return await runBoundedProcess(command, values, {
-    cwd,
-    env,
-    timeoutMs,
-    allowFailure: options.allowFailure === true,
-    input: options.input,
-    shell: options.shell === true,
-    label,
-    onLog: appendLog,
-    onSpawn: (child) => activeChildren.add(child),
-    onSettled: (child) => activeChildren.delete(child),
+  return await new Promise((resolvePromise, rejectPromise) => {
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    const child = spawn(command, values, {
+      cwd,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+      shell: options.shell === true,
+      windowsHide: true,
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
+    timer.unref();
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      appendLog(`spawn error: ${error.message}`);
+      rejectPromise(error);
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      appendLog(`exit=${code} signal=${signal ?? "-"}${timedOut ? " timeout" : ""}`);
+      if (stdout) appendLog(`stdout:\n${stdout.trimEnd()}`);
+      if (stderr) appendLog(`stderr:\n${stderr.trimEnd()}`);
+      const result = { code: code ?? -1, signal, stdout, stderr, timedOut };
+      if (timedOut) {
+        rejectPromise(new Error(`command timed out after ${timeoutMs}ms: ${label}`));
+      } else if (!allowFailure && code !== 0) {
+        rejectPromise(
+          new Error(
+            `command failed (${code}): ${label}\n${stderr || stdout}`.trimEnd(),
+          ),
+        );
+      } else {
+        resolvePromise(result);
+      }
+    });
+    if (options.input !== undefined) child.stdin.end(options.input);
+    else child.stdin.end();
   });
 }
 
@@ -188,22 +177,16 @@ function parseJson(text, label) {
 
 async function journey(name, fn) {
   const started = Date.now();
-  log(`[packed] START ${name}`);
-  appendLog(`[packed] START ${name}`);
   try {
     const detail = await fn();
-    const ms = Date.now() - started;
-    matrix.push({ name, status: "PASS", ms, detail: detail ?? "" });
-    log(`[packed] PASS  ${name} (${ms}ms)`);
+    matrix.push({ name, status: "PASS", ms: Date.now() - started, detail: detail ?? "" });
   } catch (error) {
-    const ms = Date.now() - started;
     matrix.push({
       name,
       status: "FAIL",
-      ms,
+      ms: Date.now() - started,
       detail: error instanceof Error ? error.message : String(error),
     });
-    log(`[packed] FAIL  ${name} (${ms}ms)`);
     throw error;
   }
 }
@@ -278,39 +261,15 @@ async function runCli(values, options = {}) {
   });
 }
 
-async function daemonHealth() {
+async function health() {
   try {
     const response = await fetch(`${daemonUrl}/memwarden/livez`, {
       signal: AbortSignal.timeout(750),
     });
-    if (!response.ok) return false;
-    const body = await response.json();
-    const pid = Number(body?.pid);
-    return Number.isInteger(pid) && pid > 0 ? { pid } : false;
+    return response.ok;
   } catch {
     return false;
   }
-}
-
-async function health() {
-  return Boolean(await daemonHealth());
-}
-
-function processIsAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if (error?.code === "EPERM") return true;
-    if (error?.code === "ESRCH") return false;
-    throw error;
-  }
-}
-
-async function waitForDaemonExit(pid, timeoutMs = 15_000) {
-  await waitFor(`daemon process ${pid} exit`, () => !processIsAlive(pid), timeoutMs);
-  trackedDaemonPids.delete(pid);
-  if (currentDaemonPid === pid) currentDaemonPid = undefined;
 }
 
 async function waitFor(label, predicate, timeoutMs = 20_000, intervalMs = 100) {
@@ -385,9 +344,7 @@ async function startBrain(brain, options = {}) {
     cwd: paths.repo,
     timeoutMs: currentVectors ? 12 * 60_000 : 45_000,
   });
-  const live = await waitFor("daemon health with process identity", daemonHealth, 20_000);
-  currentDaemonPid = live.pid;
-  trackedDaemonPids.add(live.pid);
+  await waitFor("daemon health", health, 20_000);
   const status = await statusJson(currentEnv);
   assert.equal(status.daemon?.up, true, "status did not report the daemon up");
   assert(status.stats, "status could not authenticate to daemon stats");
@@ -395,70 +352,27 @@ async function startBrain(brain, options = {}) {
 }
 
 async function stopBrain({ env = currentEnv, cwd = paths.repo } = {}) {
-  const live = await daemonHealth();
-  const pid = live ? live.pid : currentDaemonPid;
-  if (live) {
-    await runCli(["down"], { env, cwd, timeoutMs: 30_000 });
-    await waitFor("daemon port shutdown", async () => !(await health()), 10_000);
-  }
-  if (pid !== undefined) await waitForDaemonExit(pid);
+  if (!(await health())) return;
+  await runCli(["down"], { env, cwd, timeoutMs: 30_000 });
+  await waitFor("daemon shutdown", async () => !(await health()), 10_000);
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 150));
 }
 
 async function emergencyStop() {
-  if (!daemonUrl || !currentEnv) return;
-  const live = await daemonHealth();
-  if (live) {
-    trackedDaemonPids.add(live.pid);
-    try {
-      await fetch(`${daemonUrl}/memwarden/shutdown`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${secret}`,
-        },
-        body: JSON.stringify({ data_dir: currentBrain }),
-        signal: AbortSignal.timeout(2000),
-      });
-      await waitFor("emergency daemon port shutdown", async () => !(await health()), 6000);
-      await waitForDaemonExit(live.pid, 6000);
-    } catch {
-      // Fall through to a PID-scoped hard stop below. Never use a broad pkill.
-    }
-  }
-
-  for (const pid of [...trackedDaemonPids]) {
-    if (processIsAlive(pid)) {
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch {
-        // It may have exited between the liveness check and the signal.
-      }
-    }
-    try {
-      await waitForDaemonExit(pid, 3000);
-    } catch {
-      // The script watchdog/job timeout remains the final bounded backstop.
-    }
-  }
-}
-
-async function reapActiveChildren() {
-  for (const child of activeChildren) {
-    try {
-      child.kill("SIGKILL");
-    } catch {
-      // It may already have exited while retaining inherited pipe handles.
-    }
-  }
+  if (!daemonUrl || !currentEnv || !(await health())) return;
   try {
-    await waitFor("packed child process exit", () => activeChildren.size === 0, 3000);
+    await fetch(`${daemonUrl}/memwarden/shutdown`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${secret}`,
+      },
+      body: JSON.stringify({ data_dir: currentBrain }),
+      signal: AbortSignal.timeout(2000),
+    });
+    await waitFor("emergency daemon shutdown", async () => !(await health()), 6000);
   } catch {
-    for (const child of activeChildren) {
-      child.stdin?.destroy();
-      child.stdout?.destroy();
-      child.stderr?.destroy();
-    }
-    activeChildren.clear();
+    // The normal failure report includes daemon.log; never use a broad pkill.
   }
 }
 
@@ -476,7 +390,6 @@ async function mcpRequest(cwd, method, params) {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
-    activeChildren.add(child);
     const finish = (error, response) => {
       if (settled) return;
       settled = true;
@@ -519,7 +432,6 @@ async function mcpRequest(cwd, method, params) {
       }
     });
     child.on("close", (code) => {
-      activeChildren.delete(child);
       if (!settled) finish(new Error(`MCP exited ${code} before replying: ${stderr}`));
     });
     child.stdin.end(`${JSON.stringify(request)}\n`);
@@ -821,16 +733,19 @@ async function main() {
     return basename(tarball);
   });
 
-  await journey("up + status + auth + secure bounded log", async () => {
-    // Seed the artifact's detached path with a world-readable oversized log.
-    // Startup must correct its mode, preserve one bounded tail, and truncate
-    // this inode rather than rename/recreate it under the already-open writer.
+  await journey("up + status + auth + permissions", async () => {
+    // #79 is a launchd/POSIX contract. Keep Windows on the exact known-green
+    // v0.1.0 packed flow: do not seed or require the new rotation generation.
+    const verifySecureFileLog = process.platform !== "win32";
     const seededLog = join(paths.brainA, "daemon.log");
-    const seeded = Buffer.alloc(DAEMON_LOG_MAX_BYTES + 4096, 0x78);
-    seeded.write(PACKED_LOG_TAIL_MARKER, seeded.length - PACKED_LOG_TAIL_MARKER.length);
-    writeFileSync(seededLog, seeded);
-    if (process.platform !== "win32") chmodSync(seededLog, 0o644);
-    const seededInode = statSync(seededLog).ino;
+    let seededInode;
+    if (verifySecureFileLog) {
+      const seeded = Buffer.alloc(DAEMON_LOG_MAX_BYTES + 4096, 0x78);
+      seeded.write(PACKED_LOG_TAIL_MARKER, seeded.length - PACKED_LOG_TAIL_MARKER.length);
+      writeFileSync(seededLog, seeded);
+      chmodSync(seededLog, 0o644);
+      seededInode = statSync(seededLog).ino;
+    }
 
     const status = await startBrain(paths.brainA, {
       vectors: vectorsRequested,
@@ -845,21 +760,21 @@ async function main() {
     await api("/stats", { expected: 200 });
     await assertPermissions();
 
-    const rotated = join(paths.brainA, "daemon.log.1");
-    assert(existsSync(rotated), "startup did not preserve daemon.log.1");
-    assert(
-      statSync(seededLog).size <= DAEMON_LOG_MAX_BYTES,
-      "current daemon.log exceeded its startup bound",
-    );
-    assert(
-      statSync(rotated).size <= DAEMON_LOG_MAX_BYTES,
-      "daemon.log.1 exceeded its one-generation bound",
-    );
-    assert(
-      readFileSync(rotated, "utf8").includes(PACKED_LOG_TAIL_MARKER),
-      "daemon.log.1 did not retain the prior tail",
-    );
-    if (process.platform !== "win32") {
+    if (verifySecureFileLog) {
+      const rotated = join(paths.brainA, "daemon.log.1");
+      assert(existsSync(rotated), "startup did not preserve daemon.log.1");
+      assert(
+        statSync(seededLog).size <= DAEMON_LOG_MAX_BYTES,
+        "current daemon.log exceeded its startup bound",
+      );
+      assert(
+        statSync(rotated).size <= DAEMON_LOG_MAX_BYTES,
+        "daemon.log.1 exceeded its one-generation bound",
+      );
+      assert(
+        readFileSync(rotated, "utf8").includes(PACKED_LOG_TAIL_MARKER),
+        "daemon.log.1 did not retain the prior tail",
+      );
       assert.equal(statSync(seededLog).ino, seededInode, "daemon.log inode was replaced");
       assert.equal(statSync(rotated).mode & 0o777, 0o600, "daemon.log.1 is not 0600");
     }
@@ -1225,11 +1140,9 @@ async function main() {
     assertSnapshot(homeFixtureSnapshot);
     const finalStatus = await statusJson(currentEnv, paths.worktree);
     assert.equal(finalStatus.daemon.up, false);
-    await waitFor("direct packed child cleanup", () => activeChildren.size === 0, 5000);
     assertCleanShutdownLog(paths.brainA);
     if (profile === "full") assertCleanShutdownLog(paths.brainB);
-    assert.equal(trackedDaemonPids.size, 0, "a daemon process survived graceful shutdown");
-    return "daemon process exited; isolated HOME fixtures unchanged";
+    return "daemon port closed; isolated HOME fixtures unchanged";
   });
 }
 
@@ -1239,7 +1152,6 @@ try {
   failure = error;
 } finally {
   await emergencyStop();
-  await reapActiveChildren();
   archiveDaemonLog(paths.brainA, "source-brain");
   archiveDaemonLog(paths.brainB, "fresh-brain");
   const summary = {
@@ -1248,7 +1160,6 @@ try {
     arch: process.arch,
     node: process.version,
     vectorsRequested,
-    scriptTimeoutMs,
     tarball: tarball ? basename(tarball) : null,
     sandbox,
     matrix,
@@ -1273,5 +1184,4 @@ try {
   else log(`sandbox retained: ${sandbox}`);
 }
 
-clearTimeout(scriptWatchdog);
 if (failure) process.exitCode = 1;

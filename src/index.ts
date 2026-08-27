@@ -207,9 +207,9 @@ function installSweeps(sdk: Kernel): Array<NodeJS.Timeout> {
 }
 
 async function main(): Promise<void> {
-  // Detached processes and launchd both write a real file. Validate/rotate it
-  // before boot; POSIX retains one descriptor for unref'd periodic checks,
-  // while Windows is startup-only. systemd never enters this journald path.
+  // POSIX detached processes and launchd validate/rotate their real file and
+  // retain one descriptor for unref'd periodic checks. Windows stays on its
+  // v0.1.0 lifecycle; systemd selects journald. Neither enters this path.
   const daemonLogMaintenance = daemonUsesFileLogging()
     ? startDaemonLogMaintenance(getDataDir())
     : undefined;
