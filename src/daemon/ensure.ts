@@ -7,10 +7,15 @@
 // the loop.
 
 import { spawn } from "node:child_process";
-import { chmodSync, closeSync, mkdirSync, openSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  DAEMON_LOG_MODE_ENV,
+  DAEMON_LOG_MODE_FILE,
+  openSecureDaemonLog,
+} from "./log.js";
 
 // dist/daemon/ensure.js -> dist/index.js
 export const DAEMON_ENTRY = join(
@@ -49,30 +54,33 @@ export async function ensureDaemon(
   dataDir: string = defaultDataDir(),
   timeoutMs = 15000,
 ): Promise<EnsureResult> {
-  if (await daemonAlive(url)) return "already";
+  const alive = await daemonAlive(url);
   // libSQL won't create the data directory; make it so the daemon can open
   // its db instead of crashing on boot.
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  // Detached fallbacks need the same diagnosability as managed services. Keep
-  // stdout/stderr in the isolated brain so release gates can archive it and a
-  // user can inspect startup/shutdown failures instead of losing them to
-  // stdio="ignore".
-  const logPath = join(dataDir, "daemon.log");
-  const logFd = openSync(logPath, "a", 0o600);
-  try {
-    chmodSync(logPath, 0o600);
-  } catch {
-    // Best-effort on filesystems that do not implement POSIX permissions.
+  // Detached fallbacks use the exact secure/open/rotate path used by launchd.
+  // Run this even for an already-live daemon so a repeated `up` corrects an
+  // older 0644 log without requiring a restart.
+  const log = openSecureDaemonLog(dataDir);
+  if (alive) {
+    log.close();
+    return "already";
   }
+  // The descriptor is validated without following links and inherited for
+  // both stdout/stderr; the child keeps the same bounds with its periodic pass.
   let child: ReturnType<typeof spawn>;
   try {
     child = spawn(process.execPath, [DAEMON_ENTRY], {
       detached: true,
-      stdio: ["ignore", logFd, logFd],
-      env: { ...process.env, MEMWARDEN_DATA_DIR: dataDir },
+      stdio: ["ignore", log.fd, log.fd],
+      env: {
+        ...process.env,
+        MEMWARDEN_DATA_DIR: dataDir,
+        [DAEMON_LOG_MODE_ENV]: DAEMON_LOG_MODE_FILE,
+      },
     });
   } finally {
-    closeSync(logFd);
+    log.close();
   }
   child.unref();
   const deadline = Date.now() + timeoutMs;

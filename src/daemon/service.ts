@@ -17,6 +17,13 @@ import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DAEMON_ENTRY } from "./ensure.js";
+import {
+  DAEMON_LOG_MODE_ENV,
+  DAEMON_LOG_MODE_FILE,
+  DAEMON_LOG_MODE_JOURNALD,
+  daemonLogPath,
+  openSecureDaemonLog,
+} from "./log.js";
 
 const LABEL = "ai.memwarden.daemon";
 
@@ -25,6 +32,34 @@ export interface ServiceResult {
   ok: boolean;
   path?: string;
   message: string;
+}
+
+type ServiceCommand = (command: string, args: string[]) => void;
+
+interface ServiceRuntime {
+  platform: NodeJS.Platform;
+  home: string;
+  node: string;
+  run: ServiceCommand;
+}
+
+/** Test-only runtime: lets launchd installation stay entirely below a temp HOME. */
+export interface ServiceTestRuntime {
+  platform: NodeJS.Platform;
+  home: string;
+  node?: string;
+  run?: ServiceCommand;
+}
+
+function productionRuntime(): ServiceRuntime {
+  return {
+    platform: process.platform,
+    home: homedir(),
+    node: process.execPath,
+    run: (command, args) => {
+      execFileSync(command, args, { stdio: "ignore" });
+    },
+  };
 }
 
 function errMsg(err: unknown): string {
@@ -80,7 +115,7 @@ function tuningEnv(): Array<[string, string]> {
 }
 
 function macPlist(node: string, dataDir: string, secret?: string): string {
-  const log = join(dataDir, "daemon.log");
+  const log = daemonLogPath(dataDir);
   // The managed daemon resolves its auth secret from MEMWARDEN_SECRET, so it
   // must be in the service environment or a login-launched daemon would run
   // open. Only emitted when a secret was resolved.
@@ -94,20 +129,21 @@ function macPlist(node: string, dataDir: string, secret?: string): string {
   <key>Label</key><string>${LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${node}</string>
-    <string>${DAEMON_ENTRY}</string>
+    <string>${xmlEscape(node)}</string>
+    <string>${xmlEscape(DAEMON_ENTRY)}</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>MEMWARDEN_DATA_DIR</key><string>${dataDir}</string>${secretEntry}${tuningEnv()
+    <key>MEMWARDEN_DATA_DIR</key><string>${xmlEscape(dataDir)}</string>
+    <key>${DAEMON_LOG_MODE_ENV}</key><string>${DAEMON_LOG_MODE_FILE}</string>${secretEntry}${tuningEnv()
       .map(([k, v]) => `\n    <key>${k}</key><string>${xmlEscape(v)}</string>`)
       .join("")}
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key>
   <dict><key>SuccessfulExit</key><false/></dict>
-  <key>StandardOutPath</key><string>${log}</string>
-  <key>StandardErrorPath</key><string>${log}</string>
+  <key>StandardOutPath</key><string>${xmlEscape(log)}</string>
+  <key>StandardErrorPath</key><string>${xmlEscape(log)}</string>
 </dict>
 </plist>
 `;
@@ -128,7 +164,8 @@ After=network.target
 
 [Service]
 ExecStart=${node} ${DAEMON_ENTRY}
-Environment=MEMWARDEN_DATA_DIR=${dataDir}${secretEnv}${tuning}
+Environment=MEMWARDEN_DATA_DIR=${dataDir}
+Environment=${DAEMON_LOG_MODE_ENV}=${DAEMON_LOG_MODE_JOURNALD}${secretEnv}${tuning}
 Restart=on-failure
 RestartSec=2
 
@@ -143,9 +180,12 @@ WantedBy=default.target
  * login-launched daemon enforces auth (otherwise a managed daemon would run
  * open even though the CLI generated a secret).
  */
-export function installService(dataDir: string, secret?: string): ServiceResult {
-  const home = homedir();
-  const node = process.execPath;
+function installServiceWithRuntime(
+  dataDir: string,
+  secret: string | undefined,
+  runtime: ServiceRuntime,
+): ServiceResult {
+  const { home, node, platform, run } = runtime;
 
   // The secret and dataDir are interpolated into generated service units. A
   // newline (or, on systemd, other control chars) would let a chosen value
@@ -156,21 +196,25 @@ export function installService(dataDir: string, secret?: string): ServiceResult 
   const hasControlChar = (s: string): boolean => /[\r\n\0]/.test(s);
   if (hasControlChar(dataDir) || (secret !== undefined && hasControlChar(secret))) {
     return {
-      kind: process.platform === "darwin" ? "launchd" : "systemd",
+      kind: platform === "darwin" ? "launchd" : "systemd",
       ok: false,
       message: "refusing to install service: secret or data dir contains a newline/control character",
     };
   }
 
   try {
-    mkdirSync(dataDir, { recursive: true });
+    mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   } catch {
     // non-fatal; the write below will surface a real error if the dir is bad
   }
 
-  if (process.platform === "darwin") {
+  if (platform === "darwin") {
     const path = plistPath(home);
     try {
+      // launchd opens StandardOutPath itself, so validate/create/chmod the real
+      // fixed target before the plist is loaded. Failure is closed: no load.
+      const log = openSecureDaemonLog(dataDir);
+      log.close();
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, macPlist(node, dataDir, secret), "utf8");
       // Lock the plist down: it now carries the secret in plaintext.
@@ -180,11 +224,11 @@ export function installService(dataDir: string, secret?: string): ServiceResult 
         // best-effort
       }
       try {
-        execFileSync("launchctl", ["unload", path], { stdio: "ignore" });
+        run("launchctl", ["unload", path]);
       } catch {
         // not previously loaded — fine
       }
-      execFileSync("launchctl", ["load", "-w", path], { stdio: "ignore" });
+      run("launchctl", ["load", "-w", path]);
       return {
         kind: "launchd",
         ok: true,
@@ -196,7 +240,7 @@ export function installService(dataDir: string, secret?: string): ServiceResult 
     }
   }
 
-  if (process.platform === "linux") {
+  if (platform === "linux") {
     const path = systemdPath(home);
     try {
       mkdirSync(dirname(path), { recursive: true });
@@ -207,10 +251,8 @@ export function installService(dataDir: string, secret?: string): ServiceResult 
       } catch {
         // best-effort
       }
-      execFileSync("systemctl", ["--user", "daemon-reload"], { stdio: "ignore" });
-      execFileSync("systemctl", ["--user", "enable", "--now", "memwarden"], {
-        stdio: "ignore",
-      });
+      run("systemctl", ["--user", "daemon-reload"]);
+      run("systemctl", ["--user", "enable", "--now", "memwarden"]);
       return {
         kind: "systemd",
         ok: true,
@@ -225,8 +267,44 @@ export function installService(dataDir: string, secret?: string): ServiceResult 
   return {
     kind: "unsupported",
     ok: false,
-    message: `no supported service manager for ${process.platform}`,
+    message: `no supported service manager for ${platform}`,
   };
+}
+
+/** Install using the real home, platform, executable, and service manager. */
+export function installService(dataDir: string, secret?: string): ServiceResult {
+  return installServiceWithRuntime(dataDir, secret, productionRuntime());
+}
+
+/** Temp-only launchd/systemd seam; never resolves the caller's real home. */
+export function __installServiceForTests(
+  dataDir: string,
+  secret: string | undefined,
+  testRuntime: ServiceTestRuntime,
+): ServiceResult {
+  return installServiceWithRuntime(dataDir, secret, {
+    platform: testRuntime.platform,
+    home: testRuntime.home,
+    node: testRuntime.node ?? process.execPath,
+    run: testRuntime.run ?? (() => undefined),
+  });
+}
+
+/** Test-only generated-unit views; no filesystem or service-manager access. */
+export function __macPlistForTests(
+  node: string,
+  dataDir: string,
+  secret?: string,
+): string {
+  return macPlist(node, dataDir, secret);
+}
+
+export function __systemdUnitForTests(
+  node: string,
+  dataDir: string,
+  secret?: string,
+): string {
+  return systemdUnit(node, dataDir, secret);
 }
 
 /** Stop + remove the supervised daemon. Best-effort. */
