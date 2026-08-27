@@ -893,6 +893,8 @@ export function registerApiTriggers(
 
   // --- POST /memwarden/why ----------------------------------------
   // Explain one memory's trust verdict: why it would be injected or refused.
+  // Refused content is withheld by mem::why itself. Only the exact boolean
+  // include_content flag can request its bounded, framed representation.
   sdk.registerFunction(
     "api::why",
     async (
@@ -900,12 +902,14 @@ export function registerApiTriggers(
         observation_id?: string;
         observationId?: string;
         root?: string;
+        include_content?: unknown;
       }>,
     ): Promise<Response> => {
       const body = (req.body ?? {}) as {
         observation_id?: string;
         observationId?: string;
         root?: string;
+        include_content?: unknown;
       };
       const observationId =
         asNonEmptyString(body.observation_id) ??
@@ -913,11 +917,21 @@ export function registerApiTriggers(
       if (!observationId) {
         return { status_code: 400, body: { error: "observation_id is required" } };
       }
+      if (
+        body.include_content !== undefined &&
+        typeof body.include_content !== "boolean"
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "include_content must be a boolean" },
+        };
+      }
       const result = await sdk.trigger({
         function_id: "mem::why",
         payload: {
           observationId,
           ...(typeof body.root === "string" ? { root: body.root } : {}),
+          ...(body.include_content === true ? { include_content: true } : {}),
         },
       });
       return { status_code: 200, body: result };
