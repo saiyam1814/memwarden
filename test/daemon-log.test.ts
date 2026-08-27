@@ -287,7 +287,9 @@ describe("periodic daemon log lifecycle", () => {
     let maintenance: DaemonLogMaintenance | undefined;
     try {
       maintenance = startDaemonLogMaintenance(root, { intervalMs: 25 });
-      expect(maintenance.timer.hasRef()).toBe(false);
+      expect(maintenance.periodic).toBe(true);
+      expect(maintenance.timer).toBeDefined();
+      expect(maintenance.timer!.hasRef()).toBe(false);
       writeFileSync(logPath(root), oversized("PERIODIC-TAIL"));
 
       await vi.advanceTimersByTimeAsync(25);
@@ -306,6 +308,31 @@ describe("periodic daemon log lifecycle", () => {
       maintenance?.stop();
       clearIntervalSpy.mockRestore();
     }
+  });
+
+  it("bounds Windows logs at startup without retaining a timer-backed lifecycle", async () => {
+    vi.useFakeTimers();
+    const root = tempRoot();
+    writeFileSync(logPath(root), oversized("WINDOWS-STARTUP-TAIL"));
+    const baselineTimers = vi.getTimerCount();
+    const maintenance = startDaemonLogMaintenance(root, {
+      intervalMs: 25,
+      platform: "win32",
+    });
+    try {
+      expect(maintenance.periodic).toBe(false);
+      expect(maintenance.timer).toBeUndefined();
+      expect(vi.getTimerCount()).toBe(baselineTimers);
+      expect(statSync(logPath(root)).size).toBe(0);
+      expect(readFileSync(rotatedPath(root), "utf8")).toContain("WINDOWS-STARTUP-TAIL");
+
+      writeFileSync(logPath(root), oversized("NO-WINDOWS-PERIODIC-HANDLE"));
+      await vi.advanceTimersByTimeAsync(100);
+      expect(statSync(logPath(root)).size).toBeGreaterThan(DAEMON_LOG_MAX_BYTES);
+    } finally {
+      maintenance.stop();
+    }
+    expect(maintenance.stopped).toBe(true);
   });
 
   it("selects files for detached/launchd and never infers them for journald", () => {

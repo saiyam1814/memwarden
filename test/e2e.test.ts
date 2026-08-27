@@ -118,7 +118,11 @@ describe("E2E: boot -> observe -> search (BM25) -> context over the REST wire", 
   it("livez answers 200 with the service identity (no auth)", async () => {
     const res = await fetch(`${base}/livez`);
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ status: "ok", service: "memwarden" });
+    expect(await res.json()).toMatchObject({
+      status: "ok",
+      service: "memwarden",
+      pid: process.pid,
+    });
   });
 
   it("shutdown is bounded to the exact daemon data directory", async () => {

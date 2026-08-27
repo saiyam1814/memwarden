@@ -144,7 +144,9 @@ export function registerApiTriggers(
     "api::liveness",
     async (): Promise<Response> => ({
       status_code: 200,
-      body: { status: "ok", service: "memwarden" },
+      // PID lets lifecycle clients prove the daemon process—not only its
+      // listening socket—has exited after an authenticated shutdown.
+      body: { status: "ok", service: "memwarden", pid: process.pid },
     }),
   );
   sdk.registerTrigger({
