@@ -46,7 +46,7 @@ memwarden up
 - writes the **MCP server + native hooks** into every installed tool, in each tool's own config, without clobbering anything
 - ends by printing `memwarden status` so you can see it's flowing
 
-`memwarden down --all` reverses everything it wrote; `--data` deletes the brain. Prefer to try before you install? `npx memwarden audit <store>` needs no daemon and no setup. launchd/detached daemon logs are owner-only (`0600`) and checked every minute: each oversized current log is reduced in place while at most one 1 MiB tail is retained as `daemon.log.1`; systemd continues to use journald's own rotation.
+`memwarden down --all` reverses everything it wrote; `--data` deletes the brain. Prefer to try before you install? `npx memwarden audit <store>` needs no daemon and no setup. launchd/POSIX detached daemon logs are owner-only (`0600`) and checked every minute: each oversized current log is reduced in place while at most one 1 MiB tail is retained as `daemon.log.1`. Windows applies the same bound at startup without retaining a maintenance file handle; systemd continues to use journald's own rotation.
 
 **Already have memory elsewhere?** `memwarden adopt <store>` seeds an existing CLAUDE.md, claude-mem db, or Mem0 export into the brain so it flows across your agents. Adopted memory carries no capture-time hashes, so it is labeled `sourced` (drift-aware but not content-`verified`) - honest by construction; only memory captured going forward earns `verified`. Run `memwarden audit <store>` first to preview exactly what you are adopting.
 

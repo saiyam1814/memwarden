@@ -35,7 +35,11 @@ const sleep = (ms: number): Promise<void> =>
 export async function daemonAlive(url: string): Promise<boolean> {
   try {
     const res = await fetch(`${url}/memwarden/livez`);
-    return res.ok;
+    const ok = res.ok;
+    // Short-lived CLI probes do not consume the body. Cancel it explicitly so
+    // undici cannot retain a response/connection handle while the CLI exits.
+    await res.body?.cancel().catch(() => undefined);
+    return ok;
   } catch {
     return false;
   }
