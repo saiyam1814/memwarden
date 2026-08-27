@@ -34,6 +34,10 @@ import {
 import { createEmbeddingProvider, LocalEmbeddingProvider } from "./embedding/index.js";
 import { registerApiTriggers, type ApiLifecycle } from "./triggers/api.js";
 import { startProxyServer } from "./proxy/server.js";
+import {
+  daemonUsesFileLogging,
+  startDaemonLogMaintenance,
+} from "./daemon/log.js";
 
 const REST_PORT = parseInt(process.env.MEMWARDEN_REST_PORT ?? "3111", 10);
 const STORE_URL =
@@ -203,6 +207,13 @@ function installSweeps(sdk: Kernel): Array<NodeJS.Timeout> {
 }
 
 async function main(): Promise<void> {
+  // Detached processes and launchd both write a real file. Validate/rotate it
+  // before boot and retain one descriptor for the unref'd periodic checks.
+  // systemd explicitly selects journald and never enters this file path.
+  const daemonLogMaintenance = daemonUsesFileLogging()
+    ? startDaemonLogMaintenance(getDataDir())
+    : undefined;
+
   // StoreLibsql ensures the data dir exists before opening the file, so a
   // first run against a fresh MEMWARDEN_DATA_DIR no longer crashes on boot.
   const store = new StoreLibsql({ url: STORE_URL });
@@ -321,6 +332,7 @@ async function main(): Promise<void> {
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    daemonLogMaintenance?.stop();
     console.log(`\n[memwarden] Shutting down...`);
     for (const t of timers) clearInterval(t);
     await http.close().catch(() => undefined);
