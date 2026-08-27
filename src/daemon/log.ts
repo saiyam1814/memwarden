@@ -28,10 +28,10 @@ export const DAEMON_LOG_MODE_FILE = "file";
 export const DAEMON_LOG_MODE_JOURNALD = "journald";
 
 /**
- * The current file is checked at startup and, on POSIX file-log paths, once a
- * minute. When it exceeds 1 MiB, its newest 1 MiB is copied to the sole prior
- * generation and the same current inode is truncated. Immediately after each
- * check, each generation is at most 1 MiB (writes between checks may exceed it).
+ * The current file is checked at startup and once a minute. When it exceeds
+ * 1 MiB, its newest 1 MiB is copied to the sole prior generation and the same
+ * current inode is truncated. Immediately after every check, each generation
+ * is therefore at most 1 MiB (writes between checks may temporarily exceed it).
  */
 export const DAEMON_LOG_MAX_BYTES = 1024 * 1024;
 export const DAEMON_LOG_CHECK_INTERVAL_MS = 60_000;
@@ -118,16 +118,6 @@ export function rotatedDaemonLogPath(dataDir: string): string {
 
 function sameFile(left: Stats, right: Stats): boolean {
   return left.dev === right.dev && left.ino === right.ino;
-}
-
-function assertFdClosed(fd: number): void {
-  try {
-    fstatSync(fd);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EBADF") return;
-    unsafe();
-  }
-  unsafe();
 }
 
 function assertRegularOwnedFile(stat: Stats): void {
@@ -368,8 +358,7 @@ export async function checkDaemonLog(dataDir: string): Promise<void> {
 }
 
 export interface DaemonLogMaintenance {
-  readonly periodic: boolean;
-  readonly timer?: NodeJS.Timeout;
+  readonly timer: NodeJS.Timeout;
   readonly stopped: boolean;
   stop(): void;
 }
@@ -377,16 +366,9 @@ export interface DaemonLogMaintenance {
 export interface DaemonLogMaintenanceOptions {
   intervalMs?: number;
   onError?: (error: DaemonLogSecurityError) => void;
-  /** Test seam for the Windows startup-only lifecycle. */
-  platform?: NodeJS.Platform;
 }
 
-/**
- * Run the startup pass, then install an unref'd periodic pass on POSIX.
- * Windows bounds the file at startup but retains no second descriptor/timer:
- * detached descendants and open HANDLEs interact poorly with runner job
- * objects, and Windows has no launchd-style always-open inode requirement.
- */
+/** Run the startup pass, then install an unref'd periodic pass. */
 export function startDaemonLogMaintenance(
   dataDir: string,
   options: DaemonLogMaintenanceOptions = {},
@@ -398,23 +380,6 @@ export function startDaemonLogMaintenance(
 
   const log = openSecureDaemonLog(dataDir);
   let stopped = false;
-  if ((options.platform ?? process.platform) === "win32") {
-    // The synchronous startup check is complete; release and verify the HANDLE
-    // before returning so it cannot extend a detached process/job lifecycle.
-    const fd = log.fd;
-    log.close();
-    assertFdClosed(fd);
-    return {
-      periodic: false,
-      get stopped() {
-        return stopped;
-      },
-      stop() {
-        stopped = true;
-      },
-    };
-  }
-
   const report =
     options.onError ??
     (() => {
@@ -427,7 +392,6 @@ export function startDaemonLogMaintenance(
   timer.unref();
 
   return {
-    periodic: true,
     timer,
     get stopped() {
       return stopped;
@@ -444,13 +408,15 @@ export function startDaemonLogMaintenance(
 /**
  * New launchd plists opt in explicitly. The macOS fallback recognizes plists
  * written by 0.1.0, which had MEMWARDEN_DATA_DIR but no logging-mode marker.
- * Linux is never inferred: generated systemd units use journald rotation.
+ * Linux is never inferred because managed services use journald. Windows keeps
+ * its proven v0.1.0 detached lifecycle and never enters secure maintenance.
  */
 export function daemonUsesFileLogging(
   mode: string | undefined = process.env[DAEMON_LOG_MODE_ENV],
   platform: NodeJS.Platform = process.platform,
   hasConfiguredDataDir = process.env.MEMWARDEN_DATA_DIR !== undefined,
 ): boolean {
+  if (platform === "win32") return false;
   if (mode !== undefined) return mode === DAEMON_LOG_MODE_FILE;
   return platform === "darwin" && hasConfiguredDataDir;
 }
