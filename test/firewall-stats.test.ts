@@ -23,6 +23,7 @@ import { StateKV } from "../src/state/kv.js";
 import { KV } from "../src/state/schema.js";
 import { registerCoreFunctions, getSearchIndex } from "../src/functions/index.js";
 import {
+  FIREWALL_STATS_SCHEMA_VERSION,
   recordFirewallActivity,
   summarizeFirewall,
   utcDay,
@@ -46,20 +47,52 @@ beforeEach(() => {
 afterEach(() => __resetKernelSingleton());
 
 describe("firewall stats: honest counting", () => {
-  it("reports no data on a fresh install rather than a confident row of zeros", async () => {
-    const s = await summarizeFirewall(kv);
-    expect(s.hasData).toBe(false);
-    expect(s.refused).toBe(0);
-    expect(s.injected).toBe(0);
+  it("reports a complete deterministic v2 schema with no data on a fresh install", async () => {
+    expect(await summarizeFirewall(kv)).toEqual({
+      schemaVersion: FIREWALL_STATS_SCHEMA_VERSION,
+      days: 30,
+      recalls: 0,
+      refused: 0,
+      injected: 0,
+      served: {
+        verified: 0,
+        cosmetic: 0,
+        sourced: 0,
+        unsourced: 0,
+        legacyUnclassified: 0,
+      },
+      dejafix: 0,
+      hasData: false,
+    });
   });
 
-  it("accumulates one event's outcome into today's bucket", async () => {
-    await recordFirewallActivity(kv, { recall: true, refused: 3, injected: 5 });
+  it("accumulates one event's total and trust breakdown into today's v2 bucket", async () => {
+    await recordFirewallActivity(kv, {
+      recall: true,
+      refused: 3,
+      injected: 5,
+      served: { verified: 1, cosmetic: 1, sourced: 2, unsourced: 1 },
+    });
     const s = await summarizeFirewall(kv);
     expect(s.hasData).toBe(true);
     expect(s.recalls).toBe(1);
     expect(s.refused).toBe(3);
     expect(s.injected).toBe(5);
+    expect(s.served).toEqual({
+      verified: 1,
+      cosmetic: 1,
+      sourced: 2,
+      unsourced: 1,
+      legacyUnclassified: 0,
+    });
+    const rows = await kv.list<FirewallDay>(KV.firewallStats);
+    expect(rows).toEqual([
+      expect.objectContaining({
+        schemaVersion: FIREWALL_STATS_SCHEMA_VERSION,
+        injected: 5,
+        served: s.served,
+      }),
+    ]);
   });
 
   it("counts recall EVENTS, not candidates", async () => {
@@ -80,6 +113,30 @@ describe("firewall stats: honest counting", () => {
     expect(s.dejafix).toBe(2);
   });
 
+  it("keeps Déjà Fix and refusal accounting separate from served trust classes", async () => {
+    await recordFirewallActivity(kv, {
+      recall: true,
+      refused: 2,
+      injected: 1,
+      served: { sourced: 1 },
+    });
+    await recordFirewallActivity(kv, { dejafix: 3 });
+    const s = await summarizeFirewall(kv);
+    expect(s).toMatchObject({
+      recalls: 1,
+      refused: 2,
+      injected: 1,
+      dejafix: 3,
+      served: {
+        verified: 0,
+        cosmetic: 0,
+        sourced: 1,
+        unsourced: 0,
+        legacyUnclassified: 0,
+      },
+    });
+  });
+
   it("keeps separate daily buckets and sums them across the window", async () => {
     const now = Date.now();
     await recordFirewallActivity(kv, { recall: true, refused: 2 }, now - 2 * DAY);
@@ -91,6 +148,64 @@ describe("firewall stats: honest counting", () => {
     const s = await summarizeFirewall(kv, 30, now);
     expect(s.refused).toBe(7);
     expect(s.recalls).toBe(2);
+  });
+
+  it("reads v1 aggregate-only buckets as legacy/unclassified, never verified", async () => {
+    const now = Date.parse("2026-08-24T12:00:00Z");
+    const date = utcDay(now);
+    await kv.set(KV.firewallStats, date, {
+      date,
+      recalls: 2,
+      refused: 3,
+      injected: 7,
+      dejafix: 1,
+    });
+
+    const legacy = await summarizeFirewall(kv, 30, now);
+    expect(legacy).toMatchObject({
+      schemaVersion: FIREWALL_STATS_SCHEMA_VERSION,
+      recalls: 2,
+      refused: 3,
+      injected: 7,
+      dejafix: 1,
+      served: {
+        verified: 0,
+        cosmetic: 0,
+        sourced: 0,
+        unsourced: 0,
+        legacyUnclassified: 7,
+      },
+    });
+
+    // A later write on the same UTC day may upgrade the row shape, but it must
+    // not rewrite unknowable history into a trusted class.
+    await recordFirewallActivity(
+      kv,
+      { recall: true, injected: 1, served: { verified: 1 } },
+      now,
+    );
+    const upgraded = await summarizeFirewall(kv, 30, now);
+    expect(upgraded.injected).toBe(8);
+    expect(upgraded.served).toEqual({
+      verified: 1,
+      cosmetic: 0,
+      sourced: 0,
+      unsourced: 0,
+      legacyUnclassified: 7,
+    });
+    expect(await kv.get<FirewallDay>(KV.firewallStats, date)).toMatchObject({
+      schemaVersion: FIREWALL_STATS_SCHEMA_VERSION,
+      injected: 8,
+      served: upgraded.served,
+    });
+  });
+
+  it("treats a compatibility aggregate without labels as unclassified", async () => {
+    await recordFirewallActivity(kv, { recall: true, injected: 2 });
+    const s = await summarizeFirewall(kv);
+    expect(s.injected).toBe(2);
+    expect(s.served.verified).toBe(0);
+    expect(s.served.legacyUnclassified).toBe(2);
   });
 
   it("excludes buckets outside the requested window", async () => {
@@ -105,27 +220,36 @@ describe("firewall stats: honest counting", () => {
     expect(month.refused).toBe(10);
   });
 
-  it("prunes buckets past the retention window so history stays bounded", async () => {
-    const now = Date.now();
-    // Older than the 45-day retention window.
-    await recordFirewallActivity(kv, { recall: true, refused: 4 }, now - 60 * DAY);
-    expect((await kv.list(KV.firewallStats)).length).toBe(1);
+  it("prunes by UTC date while retaining the inclusive 45-day cutoff", async () => {
+    const now = Date.parse("2026-08-24T00:00:00Z");
+    const cutoff = utcDay(now - 45 * DAY);
+    const expired = utcDay(now - 45 * DAY - 1);
+    for (const date of [cutoff, expired]) {
+      await kv.set(KV.firewallStats, date, {
+        date,
+        recalls: 1,
+        refused: 1,
+        injected: 0,
+        dejafix: 0,
+      });
+    }
 
     // Pruning happens on write — no timer to schedule, no unbounded growth.
     await recordFirewallActivity(kv, { recall: true, refused: 1 }, now);
     const rows = await kv.list<FirewallDay>(KV.firewallStats);
-    expect(rows.map((r) => r.date)).toEqual([utcDay(now)]);
+    expect(rows.map((r) => r.date).sort()).toEqual([cutoff, utcDay(now)]);
   });
 
-  it("uses UTC dates so a bucket cannot split on the caller's timezone", async () => {
-    // Two writes seconds apart across a local-midnight boundary must land in
-    // the same UTC bucket; keying on local time would double-count them.
-    const utcNoon = Date.parse("2026-08-24T12:00:00Z");
-    await recordFirewallActivity(kv, { recall: true, refused: 1 }, utcNoon);
-    await recordFirewallActivity(kv, { recall: true, refused: 1 }, utcNoon + 1000);
+  it("uses UTC dates rather than either caller offset's local date", async () => {
+    // These instants have local calendar dates two days apart but both fall on
+    // 2026-08-23 UTC. A local-date key would split one event into each date.
+    const east = Date.parse("2026-08-24T00:30:00+14:00");
+    const west = Date.parse("2026-08-22T23:30:00-12:00");
+    await recordFirewallActivity(kv, { recall: true, refused: 1 }, east);
+    await recordFirewallActivity(kv, { recall: true, refused: 1 }, west);
     const rows = await kv.list<FirewallDay>(KV.firewallStats);
-    expect(rows.length).toBe(1);
-    expect(rows[0]!.date).toBe("2026-08-24");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ date: "2026-08-23", recalls: 2, refused: 2 });
   });
 });
 

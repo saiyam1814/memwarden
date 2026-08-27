@@ -77,6 +77,43 @@ The older `safe_only: true` REST/core flag remains supported for automatic recal
 fail-closed shorthand for project-scoped `current`. Deliberate historical/all inspection is not
 subject to the current inclusion floor, but it never bypasses classification or labeling.
 
+## Firewall activity schema
+
+`GET /memwarden/stats` exposes the firewall's last-30-day activity as `firewall`;
+`memwarden status --json` carries that same object at `stats.firewall`. The deterministic schema is
+version 2: every field and every trust class is present even when its value is zero.
+
+```json
+{
+  "schemaVersion": 2,
+  "days": 30,
+  "recalls": 4,
+  "refused": 2,
+  "injected": 7,
+  "served": {
+    "verified": 2,
+    "cosmetic": 1,
+    "sourced": 2,
+    "unsourced": 1,
+    "legacyUnclassified": 1
+  },
+  "dejafix": 1,
+  "hasData": true
+}
+```
+
+`injected` remains the backward-compatible total and always equals the sum of `served`. A current
+recall increments it only for unique memories that are actually returned after inclusion policy and
+token-budget packing. `verified`, `cosmetic`, `sourced`, and `unsourced` are the labels attached to
+those final results. Aggregate-only daily buckets written by 0.1.0 and earlier remain readable, but
+their trust cannot be reconstructed; those values therefore appear only as `legacyUnclassified`, never
+as `verified`. `refused` still counts memories withheld by current-policy recall, `recalls` counts
+firewall-gated events, and `dejafix` remains a separate count of prior fixes served. Daily buckets use
+UTC dates and are pruned on write after the bounded retention window.
+
+Human `memwarden status` prints the total as `memories served`, followed by the nonzero trust
+breakdown when available. It never describes an aggregate-only total as verified.
+
 ## Per-project and per-session switches
 
 - `memwarden exclude <path>` firewalls a project completely - no capture from it, no injection

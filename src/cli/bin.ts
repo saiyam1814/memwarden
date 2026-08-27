@@ -2045,10 +2045,19 @@ interface StatsBody {
   compression?: { algorithm: string; bits: number; ratio: number } | null;
   hosts?: Array<{ host?: string; lastSeen?: string }>;
   firewall?: {
+    /** Absent when a new CLI is querying a pre-v2 daemon. */
+    schemaVersion?: number;
     days: number;
     recalls: number;
     refused: number;
     injected: number;
+    served?: {
+      verified: number;
+      cosmetic: number;
+      sourced: number;
+      unsourced: number;
+      legacyUnclassified: number;
+    };
     dejafix: number;
     hasData: boolean;
   } | null;
@@ -2186,9 +2195,24 @@ async function status(rest: string[]): Promise<void> {
     // machine and never once said so. Silent protection reads as no protection.
     const fw = stats.firewall;
     if (fw && fw.hasData) {
+      const breakdown = fw.served
+        ? [
+            { label: "verified", value: fw.served.verified },
+            { label: "cosmetic", value: fw.served.cosmetic },
+            { label: "sourced", value: fw.served.sourced },
+            { label: "unsourced", value: fw.served.unsourced },
+            {
+              label: "legacy/unclassified",
+              value: fw.served.legacyUnclassified,
+            },
+          ]
+            .filter(({ value }) => value > 0)
+            .map(({ label, value }) => `${value} ${label}`)
+            .join(", ")
+        : "";
       const parts = [
         `${fw.refused} stale refused`,
-        `${fw.injected} verified served`,
+        `${fw.injected} memories served${breakdown ? ` (${breakdown})` : ""}`,
       ];
       if (fw.dejafix > 0) parts.push(`${fw.dejafix} déjà-fix hits`);
       console.log(
