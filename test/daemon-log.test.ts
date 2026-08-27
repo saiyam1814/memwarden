@@ -282,6 +282,7 @@ describe("detached daemon integration", () => {
 describe("periodic daemon log lifecycle", () => {
   it("uses an unref'd timer, rotates periodically, and stops cleanly", async () => {
     vi.useFakeTimers();
+    const clearIntervalSpy = vi.spyOn(globalThis, "clearInterval");
     const root = tempRoot();
     let maintenance: DaemonLogMaintenance | undefined;
     try {
@@ -295,12 +296,15 @@ describe("periodic daemon log lifecycle", () => {
 
       maintenance.stop();
       expect(maintenance.stopped).toBe(true);
-      expect(vi.getTimerCount()).toBe(0);
+      // Assert this maintenance handle was cleared. A process-wide timer count
+      // can include unrelated async-runtime cleanup in full-suite CI workers.
+      expect(clearIntervalSpy).toHaveBeenCalledWith(maintenance.timer);
       writeFileSync(logPath(root), oversized("MUST-NOT-ROTATE-AFTER-STOP"));
       await vi.advanceTimersByTimeAsync(100);
       expect(statSync(logPath(root)).size).toBeGreaterThan(DAEMON_LOG_MAX_BYTES);
     } finally {
       maintenance?.stop();
+      clearIntervalSpy.mockRestore();
     }
   });
 
