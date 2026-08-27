@@ -28,9 +28,11 @@ import {
   hashFiles,
 } from "../src/functions/verify.js";
 import { extractProvenance } from "../src/functions/provenance.js";
+import { summarizeFirewall } from "../src/functions/firewall-stats.js";
 import type { Provenance } from "../src/functions/types.js";
 
 let sdk: Kernel;
+let kv: StateKV;
 const dirs: string[] = [];
 
 beforeEach(() => {
@@ -39,7 +41,8 @@ beforeEach(() => {
   sdk = registerWorker("in-process", { workerName: "memwarden-verify" }, {
     store: new StoreLibsql({ url: ":memory:" }),
   });
-  registerCoreFunctions(sdk, new StateKV(sdk));
+  kv = new StateKV(sdk);
+  registerCoreFunctions(sdk, kv);
 });
 afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
@@ -350,12 +353,20 @@ describe("Verified Recall firewall (safe_only)", () => {
 
     // balanced (default): both are recallable under safe_only.
     expect(await search(root, true)).toBeGreaterThanOrEqual(2);
+    const beforeStrict = await summarizeFirewall(kv);
 
     // verified-only: just the hash-verified one survives auto-injection.
     process.env.MEMWARDEN_RECALL_POLICY = "verified-only";
     try {
       expect(await search(root, true)).toBe(1);
-      // Explicit unfiltered lookups are never policy-filtered.
+      const afterStrict = await summarizeFirewall(kv);
+      expect(afterStrict.injected - beforeStrict.injected).toBe(1);
+      expect(afterStrict.served.verified - beforeStrict.served.verified).toBe(1);
+      expect(afterStrict.served.cosmetic - beforeStrict.served.cosmetic).toBe(0);
+      expect(afterStrict.served.sourced - beforeStrict.served.sourced).toBe(0);
+      expect(afterStrict.served.unsourced - beforeStrict.served.unsourced).toBe(0);
+      expect(afterStrict.refused - beforeStrict.refused).toBe(1);
+      // Explicit unfiltered lookups are never policy-filtered or counted.
       expect(await search(root, false)).toBeGreaterThanOrEqual(2);
     } finally {
       delete process.env.MEMWARDEN_RECALL_POLICY;
@@ -391,6 +402,13 @@ describe("Verified Recall firewall (safe_only)", () => {
           historical: false,
         }),
       ]);
+      expect((await summarizeFirewall(kv)).served).toEqual({
+        verified: 0,
+        cosmetic: 1,
+        sourced: 0,
+        unsourced: 0,
+        legacyUnclassified: 0,
+      });
     } finally {
       delete process.env.MEMWARDEN_RECALL_POLICY;
     }
@@ -519,6 +537,18 @@ describe("Verified Recall firewall (safe_only)", () => {
     expect(r.text).toContain("[verified]");
     expect(r.text).toContain("[sourced]");
     expect(r.text).toContain("[unsourced]");
+
+    // Regression for #78: this mixed balanced result used to increment one
+    // aggregate that status mislabeled entirely as "verified served".
+    const stats = await summarizeFirewall(kv);
+    expect(stats.injected).toBe(3);
+    expect(stats.served).toEqual({
+      verified: 1,
+      cosmetic: 0,
+      sourced: 1,
+      unsourced: 1,
+      legacyUnclassified: 0,
+    });
   });
 
   it("labels compact-format balanced recall too", async () => {
@@ -539,6 +569,91 @@ describe("Verified Recall firewall (safe_only)", () => {
     })) as { results: Array<{ trust?: string }> };
     expect(r.results.length).toBe(1);
     expect(r.results[0]!.trust).toBe("verified");
+  });
+
+  it("counts only results that survive final token-budget packing", async () => {
+    const root = repo();
+    mkdirSync(join(root, "src"));
+    for (const name of ["one.ts", "two.ts"]) {
+      writeFileSync(join(root, "src", name), `// quartz budget ${name}\n`);
+      await observe(
+        root,
+        `src/${name}`,
+        `quartz budget memory from ${name} with enough distinct detail`,
+      );
+    }
+
+    // Measure the first compact item with an unguarded lookup. Legacy/plain
+    // lookups classify results but intentionally do not affect firewall stats.
+    const preview = (await sdk.trigger({
+      function_id: "mem::search",
+      payload: {
+        query: "quartz budget memory",
+        cwd: root,
+        project: root,
+        limit: 10,
+        format: "compact",
+      },
+    })) as { results: Array<{ obsId: string; trust: string }> };
+    expect(preview.results).toHaveLength(2);
+    const oneItemBudget = Math.ceil(JSON.stringify(preview.results[0]).length / 3);
+
+    const packed = (await sdk.trigger({
+      function_id: "mem::search",
+      payload: {
+        query: "quartz budget memory",
+        cwd: root,
+        project: root,
+        limit: 10,
+        safe_only: true,
+        format: "compact",
+        token_budget: oneItemBudget,
+      },
+    })) as {
+      results: Array<{ obsId: string; trust: string }>;
+      truncated: boolean;
+    };
+    expect(packed.truncated).toBe(true);
+    expect(packed.results).toHaveLength(1);
+
+    const stats = await summarizeFirewall(kv);
+    expect(stats.recalls).toBe(1);
+    expect(stats.injected).toBe(1);
+    expect(stats.served).toEqual({
+      verified: 1,
+      cosmetic: 0,
+      sourced: 0,
+      unsourced: 0,
+      legacyUnclassified: 0,
+    });
+  });
+
+  it("counts one returned memory once in each repeated recall event", async () => {
+    const root = repo();
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "src", "repeat.ts"), "// topaz repeated recall\n");
+    await observe(root, "src/repeat.ts", "topaz repeated recall memory");
+
+    for (let event = 0; event < 2; event++) {
+      const result = (await sdk.trigger({
+        function_id: "mem::search",
+        payload: {
+          query: "topaz repeated recall",
+          cwd: root,
+          project: root,
+          limit: 10,
+          safe_only: true,
+          format: "compact",
+        },
+      })) as { results: Array<{ obsId: string }> };
+      expect(result.results).toHaveLength(1);
+    }
+
+    const stats = await summarizeFirewall(kv);
+    expect(stats.recalls).toBe(2);
+    expect(stats.injected).toBe(2);
+    expect(stats.served.verified).toBe(2);
+    expect(stats.served.legacyUnclassified).toBe(0);
   });
 
   it("plain (non-safe_only) search is still classified and labeled", async () => {

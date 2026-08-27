@@ -121,6 +121,28 @@ describe("E2E: boot -> observe -> search (BM25) -> context over the REST wire", 
     expect(await res.json()).toMatchObject({ status: "ok", service: "memwarden" });
   });
 
+  it("GET /stats exposes the complete deterministic firewall v2 schema", async () => {
+    const res = await fetch(`${base}/stats`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { firewall?: unknown };
+    expect(body.firewall).toEqual({
+      schemaVersion: 2,
+      days: 30,
+      recalls: 0,
+      refused: 0,
+      injected: 0,
+      served: {
+        verified: 0,
+        cosmetic: 0,
+        sourced: 0,
+        unsourced: 0,
+        legacyUnclassified: 0,
+      },
+      dejafix: 0,
+      hasData: false,
+    });
+  });
+
   it("shutdown is bounded to the exact daemon data directory", async () => {
     const wrong = await postJson("/shutdown", {
       data_dir: join(lifecycleDataDir, "other-brain"),

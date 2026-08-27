@@ -783,6 +783,31 @@ async function main() {
         `current/${format}: LF capture -> CRLF worktree was not labeled cosmetic/current`,
       );
     }
+
+    // /stats and status --json must expose the identical, complete v2
+    // firewall contract from the packed artifact, not just source tests.
+    const statsFirewall = (await api("/stats")).body.firewall;
+    const statusFirewall = (await statusJson()).stats.firewall;
+    assert.equal(statsFirewall.schemaVersion, 2);
+    assert.deepEqual(Object.keys(statsFirewall.served), [
+      "verified",
+      "cosmetic",
+      "sourced",
+      "unsourced",
+      "legacyUnclassified",
+    ]);
+    assert.equal(
+      statsFirewall.injected,
+      Object.values(statsFirewall.served).reduce((sum, value) => sum + value, 0),
+    );
+    assert(statsFirewall.served.cosmetic >= 3);
+    assert.deepEqual(statusFirewall, statsFirewall);
+
+    const humanStatus = (await runCli(["status"])).stdout;
+    assert(humanStatus.includes(`${statsFirewall.injected} memories served`));
+    assert(humanStatus.includes(`${statsFirewall.served.cosmetic} cosmetic`));
+    assert(!humanStatus.includes("verified served"));
+
     if (profile === "full") {
       const distinct = await mcpTool(paths.worktree, "memory_search", {
         query: "PACKED_DISTINCT_BETA seven snapshots",
