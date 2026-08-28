@@ -99,6 +99,10 @@ evidence summary. **`balanced`** (default) current recall blocks source-drifted/
 keeps verified, cosmetic-current, sourced, and unsourced records labeled - "not detected stale" is not
 "proven safe." **`verified-only`** raises the current/automatic recall floor to raw-verified or
 normalized-content-current memory (for hostile-repo threat models); the label still distinguishes them.
+`memwarden status` reports total **memories served** plus the nonzero
+verified/cosmetic/sourced/unsourced breakdown; old aggregate-only counters remain explicitly
+legacy/unclassified. The [versioned JSON contract](docs/configuration.md#firewall-activity-schema) is
+shared by `/stats` and `status --json`.
 
 MCP `memory_search` is project-scoped with `mode: "current"` by default. `mode: "historical"` deliberately
 returns only source-drifted or superseded records, framed with capture time and evidence;
