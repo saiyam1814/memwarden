@@ -45,7 +45,10 @@ import {
 import { canonicalizePath } from "./paths.js";
 import { projectKey as computeProjectKey } from "./git-identity.js";
 import { classifyProvenance, type Verdict } from "./verify.js";
-import { recordFirewallActivity } from "./firewall-stats.js";
+import {
+  recordFirewallActivity,
+  type FirewallServed,
+} from "./firewall-stats.js";
 import { recordAccessBatch } from "./access-tracker.js";
 import { loadVectorIndex, persistVectorIndex } from "./vector-persistence.js";
 import { logger } from "./logger.js";
@@ -1280,18 +1283,6 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           refused: refusedCount,
         });
       }
-      // mode=current is a firewall-gated model-facing recall just like the
-      // safe_only compatibility path, so it contributes honest status metrics.
-      if (currentPolicy) {
-        // The recorder swallows storage failures, so awaiting makes the status
-        // evidence observable when this request completes without adding a new
-        // recall failure mode.
-        await recordFirewallActivity(kv, {
-          recall: true,
-          refused: refusedCount,
-          injected: enriched.length,
-        });
-      }
       const firewallMeta = currentPolicy
         ? { refused: refusedCount, samples: refusalSamples }
         : undefined;
@@ -1345,6 +1336,57 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         return { items: selected, used, truncated: false };
       };
 
+      // Record only the items that cross the final return boundary. Inclusion
+      // has already run and callers invoke this only after token-budget packing.
+      // Search streams can theoretically repeat an id, so dedupe per event
+      // before updating trust classes or the compatibility aggregate.
+      const recordPackedFirewall = async (
+        items: ReadonlyArray<{ id: string; trust: TrustLabel }>,
+      ): Promise<void> => {
+        if (!currentPolicy) return;
+        const served: FirewallServed = {
+          verified: 0,
+          cosmetic: 0,
+          sourced: 0,
+          unsourced: 0,
+          legacyUnclassified: 0,
+        };
+        const seen = new Set<string>();
+        for (const item of items) {
+          if (seen.has(item.id)) continue;
+          seen.add(item.id);
+          switch (item.trust) {
+            case "verified":
+              served.verified++;
+              break;
+            case "cosmetic":
+              served.cosmetic++;
+              break;
+            case "sourced":
+              served.sourced++;
+              break;
+            case "unsourced":
+              served.unsourced++;
+              break;
+            // Current policy excludes these. If that invariant ever changes,
+            // the aggregate remains honest and the recorder conservatively
+            // places the unmatched count in legacy/unclassified.
+            case "stale":
+            case "unverifiable":
+              break;
+          }
+        }
+        // The recorder swallows storage failures, so awaiting makes status
+        // observable when this request completes without adding a recall
+        // failure mode.
+        await recordFirewallActivity(kv, {
+          recall: true,
+          refused: refusedCount,
+          injected: seen.size,
+          served,
+        });
+      };
+
       const modeMeta = inclusionMode === "legacy" ? {} : { mode: inclusionMode };
       if (format === "compact") {
         const compactResults: CompactRecallItem[] = recallResults.map((r) =>
@@ -1356,6 +1398,9 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           ),
         );
         const packed = applyTokenBudget(compactResults);
+        await recordPackedFirewall(
+          packed.items.map((item) => ({ id: item.obsId, trust: item.trust })),
+        );
         return {
           format,
           ...modeMeta,
@@ -1378,6 +1423,9 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         );
         const packed = applyTokenBudget(narrativeResults);
         const text = packed.items.map(formatNarrativeItem).join("\n\n");
+        await recordPackedFirewall(
+          packed.items.map((item) => ({ id: item.obsId, trust: item.trust })),
+        );
         return {
           format,
           ...modeMeta,
@@ -1398,6 +1446,12 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         ),
       );
       const packed = applyTokenBudget(fullResults);
+      await recordPackedFirewall(
+        packed.items.map((item) => ({
+          id: item.observation.id,
+          trust: item.trust,
+        })),
+      );
 
       // Avoid logging raw cwd/project (host paths). Log only that filters
       // were active.

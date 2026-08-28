@@ -3,6 +3,16 @@
 All notable changes to memwarden. Dates are release dates; the format loosely follows
 [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+### Fixed
+- **Firewall served counts now say what was actually returned.** Balanced recall no longer reports
+  sourced or unsourced results as verified. `/memwarden/stats` and `status --json` expose a complete
+  versioned breakdown for verified, cosmetic, sourced, unsourced, and legacy/unclassified values;
+  human status shows the preserved total plus its nonzero classes. Counting occurs after token-budget
+  packing and once per memory per event. Existing aggregate-only buckets remain readable but are never
+  promoted to verified ([#78](https://github.com/saiyam1814/memwarden/issues/78)).
+
 ## 0.1.0 - 2026-08-26
 
 The first public beta. Everything below was found by running the tool against a
@@ -134,7 +144,10 @@ install rather than a fixture.
 ### Added
 - **`status` shows what the firewall actually did.** Every firewall-gated recall
   records its outcome in daily buckets, surfaced in `/memwarden/stats` and
-  `status`: `firewall  🛡 8 stale refused · 50 verified served  (last 30d, 2 recalls)`.
+  `status`: `firewall  🛡 8 stale refused · 50 memories served  (last 30d, 2 recalls)`.
+  The original 0.0.7 renderer incorrectly called that balanced-policy aggregate
+  "verified"; current versions split new counts by trust and preserve old totals
+  as legacy/unclassified ([#78](https://github.com/saiyam1814/memwarden/issues/78)).
   memwarden had been blocking stale memory for six weeks on a real install
   without ever saying so, and silent protection reads as no protection. Counting
   is deliberately conservative: recall **events** not candidates, memories
