@@ -12,6 +12,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   appendFileSync,
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -31,6 +32,10 @@ const profile = args.has("--profile=smoke") || args.has("--smoke") ? "smoke" : "
 const vectorsRequested =
   profile === "full" && process.env.MEMWARDEN_PACKED_VECTORS === "1";
 const keepSandbox = process.env.MEMWARDEN_KEEP_PACKED_SANDBOX === "1";
+// Mirrors the public daemon-log contract without importing package internals:
+// one 1 MiB prior tail and an in-place-truncated current inode.
+const DAEMON_LOG_MAX_BYTES = 1024 * 1024;
+const PACKED_LOG_TAIL_MARKER = "PACKED-SECURE-DAEMON-LOG-TAIL";
 const repoRoot = process.cwd();
 const liveHome = homedir();
 const sandbox = mkdtempSync(join(tmpdir(), "memwarden-packed-beta-"));
@@ -729,6 +734,19 @@ async function main() {
   });
 
   await journey("up + status + auth + permissions", async () => {
+    // #79 is a launchd/POSIX contract. Keep Windows on the exact known-green
+    // v0.1.0 packed flow: do not seed or require the new rotation generation.
+    const verifySecureFileLog = process.platform !== "win32";
+    const seededLog = join(paths.brainA, "daemon.log");
+    let seededInode;
+    if (verifySecureFileLog) {
+      const seeded = Buffer.alloc(DAEMON_LOG_MAX_BYTES + 4096, 0x78);
+      seeded.write(PACKED_LOG_TAIL_MARKER, seeded.length - PACKED_LOG_TAIL_MARKER.length);
+      writeFileSync(seededLog, seeded);
+      chmodSync(seededLog, 0o644);
+      seededInode = statSync(seededLog).ino;
+    }
+
     const status = await startBrain(paths.brainA, {
       vectors: vectorsRequested,
       backend: "typescript",
@@ -741,6 +759,25 @@ async function main() {
     await api("/stats", { secret: "wrong-packed-secret", expected: 401 });
     await api("/stats", { expected: 200 });
     await assertPermissions();
+
+    if (verifySecureFileLog) {
+      const rotated = join(paths.brainA, "daemon.log.1");
+      assert(existsSync(rotated), "startup did not preserve daemon.log.1");
+      assert(
+        statSync(seededLog).size <= DAEMON_LOG_MAX_BYTES,
+        "current daemon.log exceeded its startup bound",
+      );
+      assert(
+        statSync(rotated).size <= DAEMON_LOG_MAX_BYTES,
+        "daemon.log.1 exceeded its one-generation bound",
+      );
+      assert(
+        readFileSync(rotated, "utf8").includes(PACKED_LOG_TAIL_MARKER),
+        "daemon.log.1 did not retain the prior tail",
+      );
+      assert.equal(statSync(seededLog).ino, seededInode, "daemon.log inode was replaced");
+      assert.equal(statSync(rotated).mode & 0o777, 0o600, "daemon.log.1 is not 0600");
+    }
     assertSnapshot(homeFixtureSnapshot);
     return `port ${restPort}`;
   });
