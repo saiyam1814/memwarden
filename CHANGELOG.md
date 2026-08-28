@@ -13,6 +13,48 @@ All notable changes to memwarden. Dates are release dates; the format loosely fo
   packing and once per memory per event. Existing aggregate-only buckets remain readable but are never
   promoted to verified ([#78](https://github.com/saiyam1814/memwarden/issues/78)).
 
+## 0.1.1 - 2026-08-28
+
+Three defects found by running 0.1.0 on a real machine rather than in CI. The
+first is a firewall bypass and is the reason this went out immediately.
+
+### Security
+- **`why --json` returned content the firewall had refused.** The human path
+  correctly withheld a refused memory's title and narrative unless `--content`
+  was passed; the JSON path returned before that policy was applied and printed
+  the raw `/memwarden/why` response, which always carried both. Anyone holding a
+  refused observation id — a script, or a model told only the id — could recover
+  firewalled content through the explain path, which contradicts the whole point
+  of refusing it. Withholding is now enforced **inside `mem::why`, before the
+  response leaves core**, so the raw HTTP endpoint is fixed too and not just the
+  CLI. Requesting content requires an explicit boolean (`include_content`, or
+  `--content`), and it comes back in a dedicated field wrapped in
+  untrusted-data markers rather than as bare `title`/`narrative` fields that a
+  caller would slurp by accident ([#80](https://github.com/saiyam1814/memwarden/pull/80),
+  closes [#77](https://github.com/saiyam1814/memwarden/issues/77)).
+
+### Fixed
+- **`status` called every served memory "verified".** Under the default
+  `balanced` policy the firewall serves verified, cosmetic, sourced and
+  unsourced memories, each labeled — but the recorder stored only a single
+  `injected` total and status rendered that aggregate as `N verified served`.
+  It now counts unique memories actually returned after policy filtering and
+  token-budget packing, split by trust state. Counts recorded before this
+  release cannot be re-derived, so they are reported as
+  `legacy-unclassified` rather than retroactively claimed as verified
+  ([#81](https://github.com/saiyam1814/memwarden/pull/81), closes
+  [#78](https://github.com/saiyam1814/memwarden/issues/78)).
+- **The managed daemon log was world-readable and unbounded.** The detached
+  spawn path opened and chmod'd it to 0600, but the launchd installer only
+  pointed `StandardOutPath`/`StandardErrorPath` at the file, so launchd created
+  it with the default 0644 — measured at 3.7 MB on a real install. Logging is
+  now descriptor-safe across both paths with regular-file, ownership,
+  hard-link, symlink and containment checks, enforced 0600, and bounded to one
+  1 MiB current file plus one 1 MiB tail generation while preserving launchd's
+  open inode. systemd continues to use journald
+  ([#82](https://github.com/saiyam1814/memwarden/pull/82), closes
+  [#79](https://github.com/saiyam1814/memwarden/issues/79)).
+
 ## 0.1.0 - 2026-08-26
 
 The first public beta. Everything below was found by running the tool against a
