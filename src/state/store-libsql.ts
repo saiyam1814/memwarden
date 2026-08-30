@@ -27,6 +27,7 @@ import { chmodSync, mkdirSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import {
   applyUpdateOps,
+  MAX_STATE_PAGE_LIMIT,
   type MutationListener,
   type OplogCompactOptions,
   type OplogCompactResult,
@@ -35,6 +36,7 @@ import {
   type OplogOp,
   type StateEventType,
   type StateMutationEvent,
+  type StatePage,
   type StateStore,
   type UpdateOp,
 } from "./store.js";
@@ -188,6 +190,44 @@ export class StoreLibsql implements StateStore {
       args: [scope],
     });
     return res.rows.map((row) => decode<T>(row.value));
+  }
+
+  async listPage<T = unknown>(
+    scope: string,
+    options: { after?: string; limit: number },
+  ): Promise<StatePage<T>> {
+    if (
+      !Number.isInteger(options.limit) ||
+      options.limit < 1 ||
+      options.limit > MAX_STATE_PAGE_LIMIT
+    ) {
+      throw new Error(
+        `listPage limit must be an integer between 1 and ${MAX_STATE_PAGE_LIMIT}`,
+      );
+    }
+    await this.init();
+    // Ask for one sentinel row so hasMore is exact without an offset/count
+    // query. The key predicate is an exclusive keyset cursor and remains
+    // deterministic while unrelated rows are inserted concurrently.
+    const requested = options.limit + 1;
+    const res = options.after === undefined
+      ? await this.client.execute({
+          sql: `SELECT key, value FROM kv WHERE scope = ? ORDER BY key ASC LIMIT ?`,
+          args: [scope, requested],
+        })
+      : await this.client.execute({
+          sql: `SELECT key, value FROM kv
+                WHERE scope = ? AND key > ? ORDER BY key ASC LIMIT ?`,
+          args: [scope, options.after, requested],
+        });
+    const rows = res.rows.slice(0, options.limit);
+    return {
+      entries: rows.map((row) => ({
+        key: String(row.key),
+        value: decode<T>(row.value),
+      })),
+      hasMore: res.rows.length > rows.length,
+    };
   }
 
   async set<T = unknown>(scope: string, key: string, value: T): Promise<T> {

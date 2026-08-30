@@ -4,8 +4,8 @@
 // that validates the request body and delegates to a mem::<x> business
 // handler via sdk.trigger (paths prefixed /memwarden, with the
 // middleware::api-auth chain). Scope: livez, observe, context, search,
-// verify, stats, doctor, bounded daemon shutdown, Canon export/import, and
-// Brain Bundle export/import.
+// verify, stats, doctor, bounded Memory/project management and daemon
+// shutdown, Canon export/import, and Brain Bundle export/import.
 
 import type { ApiRequest, ISdk } from "../kernel/index.js";
 import type { HookPayload } from "../functions/types.js";
@@ -16,8 +16,20 @@ import {
   getEmbeddingProvider,
   MANUAL_MEMORY_KINDS,
   MEMORY_LIFECYCLE_ACTIONS,
+  ManagementError,
+  managementHttpStatus,
+  managementProjectRoot,
+  transitionStatus,
 } from "../functions/index.js";
 import type {
+  EditManagedMemoryInput,
+  EditManagedMemoryResult,
+  ListManagedMemoriesInput,
+  ManagedHistoryResult,
+  ManagedMemoryDetails,
+  ManagedMemoryListPage,
+  ManagedTransitionInput,
+  ProjectListPage,
   RememberMemoryInput,
   RememberMemoryResult,
   TransitionMemoryLifecycleInput,
@@ -49,6 +61,10 @@ function asNonEmptyString(value: unknown): string | null {
   return trimmed ? trimmed : null;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function parseOptionalFiniteNumber(value: unknown): number | undefined | null {
   if (value === undefined || value === null) return undefined;
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
@@ -66,6 +82,53 @@ function parseOptionalPositiveInt(value: unknown): number | undefined | null {
   if (parsed === undefined || parsed === null) return parsed;
   if (!Number.isInteger(parsed) || parsed < 1) return null;
   return parsed;
+}
+
+function managementFailure(error: unknown): Response {
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    status_code: managementHttpStatus(error),
+    body: {
+      error: message,
+      ...(error instanceof ManagementError ? { code: error.code } : {}),
+    },
+  };
+}
+
+function invalidManagementInput(error: string): Response {
+  return {
+    status_code: 400,
+    body: { ok: false, code: "invalid_input", error },
+  };
+}
+
+const MEMORY_EDIT_LIMITS = {
+  id: 512,
+  project: 4_096,
+  title: 160,
+  text: 200_000,
+  agent: 256,
+  files: 128,
+  file: 1_024,
+} as const;
+
+function lifecycleSummary(
+  memory: Extract<TransitionMemoryLifecycleResult, { ok: true }>["memory"],
+): Record<string, unknown> {
+  return {
+    id: memory.id,
+    version: memory.version,
+    lifecycle: memory.lifecycle,
+    lifecycleReason: memory.lifecycleReason,
+    lifecycleChangedAt: memory.lifecycleChangedAt,
+    observedAt: memory.observedAt,
+    validFrom: memory.validFrom,
+    ...(memory.validTo ? { validTo: memory.validTo } : {}),
+    ...(memory.parentId ? { parentId: memory.parentId } : {}),
+    ...(memory.supersedes ? { supersedes: memory.supersedes } : {}),
+    ...(memory.supersededBy ? { supersededBy: memory.supersededBy } : {}),
+    transitions: memory.lifecycleTransitions?.length ?? 0,
+  };
 }
 
 /**
@@ -469,24 +532,6 @@ export function registerApiTriggers(
         payload,
       });
       if (result.ok) {
-        const lifecycleSummary = (
-          memory: Extract<TransitionMemoryLifecycleResult, { ok: true }>["memory"],
-        ) => ({
-          id: memory.id,
-          version: memory.version,
-          lifecycle: memory.lifecycle,
-          lifecycleReason: memory.lifecycleReason,
-          lifecycleChangedAt: memory.lifecycleChangedAt,
-          observedAt: memory.observedAt,
-          validFrom: memory.validFrom,
-          ...(memory.validTo ? { validTo: memory.validTo } : {}),
-          ...(memory.parentId ? { parentId: memory.parentId } : {}),
-          ...(memory.supersedes ? { supersedes: memory.supersedes } : {}),
-          ...(memory.supersededBy
-            ? { supersededBy: memory.supersededBy }
-            : {}),
-          transitions: memory.lifecycleTransitions?.length ?? 0,
-        });
         return {
           status_code: 200,
           body: {
@@ -519,6 +564,406 @@ export function registerApiTriggers(
     function_id: "api::lifecycle-transition",
     config: {
       api_path: "/memwarden/lifecycle",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  // --- bounded Memory management ---------------------------------
+  // These routes inventory real Memory rows and always require an explicit
+  // project scope (or explicit all_projects for list). No empty-search dump.
+  sdk.registerFunction(
+    "api::memories-list",
+    async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const payload = {
+        ...(body["project"] !== undefined ? { project: body["project"] } : {}),
+        ...(body["all_projects"] !== undefined
+          ? { allProjects: body["all_projects"] }
+          : {}),
+        ...(body["status"] !== undefined ? { status: body["status"] } : {}),
+        ...(body["lifecycle"] !== undefined
+          ? { lifecycle: body["lifecycle"] }
+          : {}),
+        ...(body["kind"] !== undefined ? { kind: body["kind"] } : {}),
+        ...(body["file"] !== undefined ? { file: body["file"] } : {}),
+        ...(body["agent"] !== undefined ? { agent: body["agent"] } : {}),
+        ...(body["after"] !== undefined ? { after: body["after"] } : {}),
+        ...(body["before"] !== undefined ? { before: body["before"] } : {}),
+        ...(body["limit"] !== undefined ? { limit: body["limit"] } : {}),
+        ...(body["cursor"] !== undefined ? { cursor: body["cursor"] } : {}),
+      } as unknown as ListManagedMemoriesInput;
+      try {
+        const result = await sdk.trigger<
+          ListManagedMemoriesInput,
+          ManagedMemoryListPage
+        >({ function_id: "mem::memories-list", payload });
+        return { status_code: 200, body: result };
+      } catch (error) {
+        return managementFailure(error);
+      }
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::memories-list",
+    config: {
+      api_path: "/memwarden/memories/list",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  sdk.registerFunction(
+    "api::memory-show",
+    async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      try {
+        const result = await sdk.trigger<
+          { id: string; project: string; includeContent?: boolean },
+          ManagedMemoryDetails | null
+        >({
+          function_id: "mem::memory-show",
+          payload: {
+            id: (body["id"] ?? body["memory_id"]) as string,
+            project: body["project"] as string,
+            ...(body["include_content"] !== undefined
+              ? { includeContent: body["include_content"] as boolean }
+              : {}),
+          },
+        });
+        return result
+          ? { status_code: 200, body: result }
+          : { status_code: 404, body: { error: "memory not found in project" } };
+      } catch (error) {
+        return managementFailure(error);
+      }
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::memory-show",
+    config: {
+      api_path: "/memwarden/memories/show",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  sdk.registerFunction(
+    "api::memory-edit",
+    async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
+      if (!isRecord(req.body)) {
+        return invalidManagementInput("body must be a JSON object");
+      }
+      const body = req.body;
+      if (
+        body["id"] !== undefined &&
+        body["memory_id"] !== undefined &&
+        body["id"] !== body["memory_id"]
+      ) {
+        return invalidManagementInput("id and memory_id must match when both are provided");
+      }
+      const idValue = body["id"] ?? body["memory_id"];
+      if (
+        typeof idValue !== "string" ||
+        !idValue.trim() ||
+        idValue.length > MEMORY_EDIT_LIMITS.id ||
+        idValue.includes("\0")
+      ) {
+        return invalidManagementInput(
+          `memory_id is required and must be a non-empty string of at most ${MEMORY_EDIT_LIMITS.id} characters`,
+        );
+      }
+      const projectValue = body["project"];
+      if (
+        typeof projectValue !== "string" ||
+        !projectValue.trim() ||
+        projectValue.length > MEMORY_EDIT_LIMITS.project ||
+        projectValue.includes("\0")
+      ) {
+        return invalidManagementInput(
+          `project is required and must be a non-empty string of at most ${MEMORY_EDIT_LIMITS.project} characters`,
+        );
+      }
+      let project: string;
+      try {
+        project = managementProjectRoot(projectValue);
+      } catch {
+        return invalidManagementInput("project must be an existing absolute directory");
+      }
+      const title = body["title"];
+      if (
+        typeof title !== "string" ||
+        !title.trim() ||
+        title.length > MEMORY_EDIT_LIMITS.title
+      ) {
+        return invalidManagementInput(
+          `title is required and must be a non-empty string of at most ${MEMORY_EDIT_LIMITS.title} characters`,
+        );
+      }
+      const text = body["text"];
+      if (
+        typeof text !== "string" ||
+        !text.trim() ||
+        text.length > MEMORY_EDIT_LIMITS.text
+      ) {
+        return invalidManagementInput(
+          `text is required and must be a non-empty string of at most ${MEMORY_EDIT_LIMITS.text} characters`,
+        );
+      }
+      const authoredBy = body["authored_by"];
+      if (authoredBy !== "user" && authoredBy !== "agent") {
+        return invalidManagementInput("authored_by is required and must be user or agent");
+      }
+      const agentValue = body["agent"];
+      if (
+        agentValue !== undefined &&
+        (typeof agentValue !== "string" ||
+          !agentValue.trim() ||
+          agentValue.length > MEMORY_EDIT_LIMITS.agent ||
+          agentValue.includes("\0"))
+      ) {
+        return invalidManagementInput(
+          `agent must be a non-empty string of at most ${MEMORY_EDIT_LIMITS.agent} characters when provided`,
+        );
+      }
+      if (authoredBy === "agent" && agentValue === undefined) {
+        return invalidManagementInput("agent is required when authored_by is agent");
+      }
+      const kindValue = body["kind"];
+      if (
+        kindValue !== undefined &&
+        (typeof kindValue !== "string" ||
+          !(MANUAL_MEMORY_KINDS as readonly string[]).includes(kindValue))
+      ) {
+        return invalidManagementInput(
+          `kind must be one of: ${MANUAL_MEMORY_KINDS.join(", ")}`,
+        );
+      }
+      for (const field of ["expires_at", "expiresAt", "expiry", "retention"] as const) {
+        if (body[field] !== undefined) {
+          return invalidManagementInput(
+            "edit preserves predecessor retention; expiry and retention overrides are not supported",
+          );
+        }
+      }
+      const hasFiles = Object.prototype.hasOwnProperty.call(body, "files");
+      const filesValue = body["files"];
+      if (
+        hasFiles &&
+        (!Array.isArray(filesValue) ||
+          filesValue.length === 0 ||
+          filesValue.length > MEMORY_EDIT_LIMITS.files ||
+          filesValue.some(
+            (file) =>
+              typeof file !== "string" ||
+              !file.trim() ||
+              file.length > MEMORY_EDIT_LIMITS.file ||
+              file.includes("\0"),
+          ))
+      ) {
+        return invalidManagementInput(
+          `files must contain 1 to ${MEMORY_EDIT_LIMITS.files} non-empty paths of at most ${MEMORY_EDIT_LIMITS.file} characters`,
+        );
+      }
+      const noFileEvidence = body["no_file_evidence"];
+      if (
+        noFileEvidence !== undefined &&
+        typeof noFileEvidence !== "boolean"
+      ) {
+        return invalidManagementInput("no_file_evidence must be a boolean");
+      }
+      if ((hasFiles && noFileEvidence === true) || (!hasFiles && noFileEvidence !== true)) {
+        return invalidManagementInput(
+          "choose exactly one evidence mode: files or no_file_evidence=true",
+        );
+      }
+      const payload: EditManagedMemoryInput = {
+        id: idValue.trim(),
+        project,
+        title: title.trim(),
+        text,
+        authoredBy,
+        ...(kindValue !== undefined
+          ? { kind: kindValue as NonNullable<EditManagedMemoryInput["kind"]> }
+          : {}),
+        ...(Array.isArray(filesValue)
+          ? { files: filesValue.map((file) => String(file)) }
+          : { noFileEvidence: true }),
+        ...(typeof agentValue === "string" ? { agent: agentValue.trim() } : {}),
+      };
+      try {
+        const result = await sdk.trigger<EditManagedMemoryInput, EditManagedMemoryResult>({
+          function_id: "mem::memory-edit",
+          payload,
+        });
+        return {
+          status_code: result.ok
+            ? 201
+            : result.code === "not_found"
+              ? 404
+              : result.code === "remember_failed"
+                ? 409
+                : 400,
+          body: result.ok
+            ? { ...result, format: "memwarden.memory-edit.v1" }
+            : result,
+        };
+      } catch (error) {
+        return managementFailure(error);
+      }
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::memory-edit",
+    config: {
+      api_path: "/memwarden/memories/edit",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  const registerManagedTransition = (
+    name: "archive" | "revalidate",
+    functionId: "mem::memory-archive" | "mem::memory-revalidate",
+  ): void => {
+    const apiFunctionId = `api::memory-${name}`;
+    sdk.registerFunction(
+      apiFunctionId,
+      async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
+        const body = (req.body ?? {}) as Record<string, unknown>;
+        const id = asNonEmptyString(body["id"] ?? body["memory_id"]);
+        const project = asNonEmptyString(body["project"]);
+        const reason = asNonEmptyString(body["reason"]);
+        if (!id || !project || !reason) {
+          return {
+            status_code: 400,
+            body: { error: "memory_id, project, and reason are required" },
+          };
+        }
+        const actor = asNonEmptyString(body["actor"]);
+        if (body["actor"] !== undefined && !actor) {
+          return {
+            status_code: 400,
+            body: { error: "actor must be a non-empty string when provided" },
+          };
+        }
+        const payload: ManagedTransitionInput = {
+          id,
+          project,
+          reason,
+          ...(actor ? { actor } : {}),
+          ...(name === "revalidate" ? { confirmed: body["confirmed"] === true } : {}),
+        };
+        try {
+          const result = await sdk.trigger<
+            ManagedTransitionInput,
+            TransitionMemoryLifecycleResult
+          >({ function_id: functionId, payload });
+          if (!result.ok) {
+            return { status_code: transitionStatus(result), body: result };
+          }
+          return {
+            status_code: 200,
+            body: {
+              format: "memwarden.memory-transition.v1",
+              ok: true,
+              action: name,
+              memory: lifecycleSummary(result.memory),
+              previous: lifecycleSummary(result.previous),
+              ...(result.successor
+                ? { successor: lifecycleSummary(result.successor) }
+                : {}),
+              effectiveLifecycle: result.effectiveLifecycle,
+              ...(result.sourceStatus ? { sourceStatus: result.sourceStatus } : {}),
+            },
+          };
+        } catch (error) {
+          return managementFailure(error);
+        }
+      },
+    );
+    sdk.registerTrigger({
+      type: "http",
+      function_id: apiFunctionId,
+      config: {
+        api_path: `/memwarden/memories/${name}`,
+        http_method: "POST",
+        middleware_function_ids: ["middleware::api-auth"],
+      },
+    });
+  };
+  registerManagedTransition("archive", "mem::memory-archive");
+  registerManagedTransition("revalidate", "mem::memory-revalidate");
+
+  sdk.registerFunction(
+    "api::memory-history",
+    async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      try {
+        const result = await sdk.trigger<
+          { id: string; project: string; limit?: number },
+          ManagedHistoryResult | null
+        >({
+          function_id: "mem::memory-history",
+          payload: {
+            id: (body["id"] ?? body["memory_id"]) as string,
+            project: body["project"] as string,
+            ...(body["limit"] !== undefined
+              ? { limit: body["limit"] as number }
+              : {}),
+          },
+        });
+        return result
+          ? { status_code: 200, body: result }
+          : { status_code: 404, body: { error: "memory not found in project" } };
+      } catch (error) {
+        return managementFailure(error);
+      }
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::memory-history",
+    config: {
+      api_path: "/memwarden/memories/history",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  sdk.registerFunction(
+    "api::projects",
+    async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      try {
+        const result = await sdk.trigger<
+          { limit?: number; cursor?: string },
+          ProjectListPage
+        >({
+          function_id: "mem::projects",
+          payload: {
+            ...(body["limit"] !== undefined
+              ? { limit: body["limit"] as number }
+              : {}),
+            ...(body["cursor"] !== undefined
+              ? { cursor: body["cursor"] as string }
+              : {}),
+          },
+        });
+        return { status_code: 200, body: result };
+      } catch (error) {
+        return managementFailure(error);
+      }
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::projects",
+    config: {
+      api_path: "/memwarden/projects",
       http_method: "POST",
       middleware_function_ids: ["middleware::api-auth"],
     },
@@ -584,6 +1029,7 @@ export function registerApiTriggers(
         as_of?: string;
         include_drifted?: boolean;
         trust?: string[];
+        files?: string[];
         include_memories?: boolean;
         all_projects?: boolean;
       }>,
@@ -705,6 +1151,24 @@ export function registerApiTriggers(
           },
         };
       }
+      if (
+        body["files"] !== undefined &&
+        (!Array.isArray(body["files"]) ||
+          body["files"].length === 0 ||
+          body["files"].length > 32 ||
+          body["files"].some(
+            (file) =>
+              typeof file !== "string" ||
+              !file.trim() ||
+              file.length > 1_024 ||
+              file.includes("\0"),
+          ))
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "files must be a non-empty array of at most 32 bounded paths" },
+        };
+      }
       const normalizedMode =
         typeof body["mode"] === "string"
           ? body["mode"].trim().toLowerCase()
@@ -775,6 +1239,7 @@ export function registerApiTriggers(
         as_of?: string;
         include_drifted?: boolean;
         trust?: string[];
+        files?: string[];
         include_memories?: boolean;
         all_projects?: boolean;
       } = { query: (body["query"] as string).trim() };
@@ -793,6 +1258,8 @@ export function registerApiTriggers(
         payload.include_drifted = body["include_drifted"];
       if (Array.isArray(body["trust"]))
         payload.trust = body["trust"].map((item) => String(item));
+      if (Array.isArray(body["files"]))
+        payload.files = body["files"].map((item) => String(item));
       if (inventory) payload.include_memories = true;
       if (body["all_projects"] === true) payload.all_projects = true;
 
@@ -812,6 +1279,137 @@ export function registerApiTriggers(
     function_id: "api::search",
     config: {
       api_path: "/memwarden/search",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  // Daily-use search is a strict, project-scoped adapter over #56. It forces
+  // compact output (no full content) and an explicit labeled inclusion mode.
+  sdk.registerFunction(
+    "api::memory-search",
+    async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const query = asNonEmptyString(body["query"]);
+      const project = asNonEmptyString(body["project"]);
+      const mode =
+        body["mode"] === undefined
+          ? "current"
+          : asNonEmptyString(body["mode"]);
+      if (!query || query.length > 10_000 || !project || !mode) {
+        return {
+          status_code: 400,
+          body: {
+            error:
+              "query (at most 10000 characters), project, and a valid mode are required",
+          },
+        };
+      }
+      let scopedProject: string;
+      try {
+        scopedProject = managementProjectRoot(project);
+      } catch (error) {
+        return managementFailure(error);
+      }
+      if (!(["current", "historical", "all", "as_of"] as const).includes(
+        mode as "current" | "historical" | "all" | "as_of",
+      )) {
+        return {
+          status_code: 400,
+          body: { error: "mode must be current, historical, all, or as_of" },
+        };
+      }
+      const limit = parseOptionalPositiveInt(body["limit"]);
+      if (limit === null || (limit !== undefined && limit > 100)) {
+        return {
+          status_code: 400,
+          body: { error: "limit must be an integer between 1 and 100" },
+        };
+      }
+      if (
+        body["files"] !== undefined &&
+        (!Array.isArray(body["files"]) ||
+          body["files"].length === 0 ||
+          body["files"].length > 32 ||
+          body["files"].some(
+            (file) =>
+              typeof file !== "string" ||
+              !file.trim() ||
+              file.length > 1_024 ||
+              file.includes("\0"),
+          ))
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "files must be a non-empty array of at most 32 bounded paths" },
+        };
+      }
+      const trust = body["trust"] ?? body["status"];
+      if (
+        trust !== undefined &&
+        (!Array.isArray(trust) || trust.length === 0 || trust.length > 16)
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "status/trust must be a non-empty array of at most 16 labels" },
+        };
+      }
+      const asOf = asNonEmptyString(body["as_of"]);
+      if (
+        (mode === "as_of" &&
+          (!asOf || asOf.length > 128 || !Number.isFinite(Date.parse(asOf)))) ||
+        (mode !== "as_of" && body["as_of"] !== undefined)
+      ) {
+        return {
+          status_code: 400,
+          body: {
+            error:
+              mode === "as_of"
+                ? "mode=as_of requires a valid as_of date-time"
+                : "as_of is only compatible with mode=as_of",
+          },
+        };
+      }
+      const payload: Record<string, unknown> = {
+        query,
+        project: scopedProject,
+        cwd: scopedProject,
+        mode,
+        format: "compact",
+        ...(limit !== undefined ? { limit } : {}),
+        ...(asOf ? { as_of: asOf } : {}),
+        ...(Array.isArray(body["files"])
+          ? { files: body["files"].map((file) => String(file)) }
+          : {}),
+        ...(Array.isArray(trust)
+          ? { trust: trust.map((item) => String(item)) }
+          : {}),
+      };
+      try {
+        const result = await sdk.trigger({
+          function_id: "mem::search",
+          payload,
+        });
+        return {
+          status_code: 200,
+          body: {
+            ...(isRecord(result) ? result : { results: [] }),
+            contract: "memwarden.memory-search.v1",
+          },
+        };
+      } catch (error) {
+        return {
+          status_code: 400,
+          body: { error: error instanceof Error ? error.message : String(error) },
+        };
+      }
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::memory-search",
+    config: {
+      api_path: "/memwarden/memories/search",
       http_method: "POST",
       middleware_function_ids: ["middleware::api-auth"],
     },

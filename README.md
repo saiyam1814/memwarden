@@ -125,6 +125,94 @@ memwarden why <id>              # explain one memory's verdict
 memwarden doctor . --fix-stale  # forget every stale memory
 ```
 
+## Daily memory management
+
+The management commands are non-interactive and scriptable. They scope to the current checkout by
+default; use `--project <dir>` to name another checkout. Project-scoped lookups fail closed for rows
+without a matching path/stable project key. Only `memories list --all-projects` deliberately returns
+cross-project memory metadata.
+
+```bash
+# Content-free inventory. Filters may be repeated or comma-separated.
+memwarden memories list [--project .] [--all-projects] \
+  [--status verified|cosmetic|sourced_unverified|stale|unsourced|unverifiable] \
+  [--lifecycle active|needs_revalidation|superseded|disputed|archived|revoked] \
+  [--kind pattern|preference|architecture|bug|workflow|fact] \
+  [--file src/path.ts] [--agent codex] [--after ISO_DATE] [--before ISO_DATE] \
+  [--limit N] [--cursor TOKEN] [--json]
+
+# Ranked search delegates to the labeled current/historical/as-of search path.
+memwarden memories search <query> [--project .] \
+  [--mode current|historical|all|as_of] [--as-of ISO_DATE] \
+  [--file src/path.ts] [--status source-verified|sourced|source-drifted|unsourced] \
+  [--limit N] [--json]
+
+memwarden memories show <id> [--project .] [--content] [--json]
+
+# Edit is version creation, never in-place mutation. Authorship and the new
+# version's evidence policy are mandatory; old content/evidence and retention
+# remain intact (expiry/retention overrides are rejected).
+memwarden memories edit <id> --title "..." --text "..." \
+  --authored-by user|agent (--file src/path.ts ... | --no-file-evidence) \
+  [--agent name] [--kind fact] [--project .] [--json]
+
+# Archive keeps content and lineage; it is not forget/erase.
+memwarden memories archive <id> --reason "..." [--actor name] [--project .] [--json]
+
+# Revalidation re-hashes every declared source through the lifecycle boundary.
+# It never runs without both deliberate confirmation and a recorded reason.
+memwarden memories revalidate <id> --yes --reason "..." \
+  [--actor name] [--project .] [--json]
+
+memwarden memories history <id> [--project .] [--limit N] [--json]
+memwarden projects [--limit N] [--cursor TOKEN] [--json]
+memwarden logs [--tail] [--lines N] [--json]
+```
+
+`list` uses signed, filter-bound keyset cursors over immutable Memory ids, plus a snapshot timestamp;
+it never uses offsets, so a concurrent insert cannot shift page two onto a duplicate row. Page size is
+capped at 200; `--after`/`--before` apply to the record's latest valid update/create activity time.
+`history` is cycle-safe and capped at 100 linked versions. `projects` returns only path,
+stable key, aggregate evidence/source/lifecycle counts, last activity, and an estimated serialized
+footprint—never titles, files, or content from unrelated projects—and refuses to publish partial
+aggregates if the brain exceeds its 20,000-Memory scan cap. The API returns HTTP 413 with
+`code: "scan_limit"`; the CLI exits nonzero with the same explicit error instead of printing partial
+counts. `logs` accepts no path: it reads only
+`$MEMWARDEN_DATA_DIR/daemon.log` (normally `~/.memwarden/daemon.log`), rejects symlinks, reads at most
+2 MiB, and returns at most 1,000 secret-redacted/control-sanitized lines. `--tail` selects the last N
+lines; it does not start an unbounded follow process.
+
+`show --content` returns the content only inside the shared
+`<memwarden-untrusted-memory>` historical-data frame, with embedded closing delimiters defanged,
+terminal controls removed, and a 200,000-character response cap. Stale, unsourced, and unverifiable
+records retain their status label in both human and JSON output.
+
+When a Memory carries #62 fine-grained evidence, list/show/history JSON exposes only a bounded
+anchor summary (`present`, validated count, locally `recomputed`, `actionable`, aggregate `status`,
+and a bounded reason); project output aggregates those fields. Management re-hashes anchors against
+the selected checkout and recomputes the exact stored claim commitment—persisted caller status words
+and unknown payload fields are discarded, and no anchor hashes, locations, or source snippets are
+returned. `memories edit` never copies predecessor anchors into successor prose: the new version keeps
+only explicitly recaptured whole-file evidence unless a deterministic operation independently creates
+new anchors. Revalidation remains the #61/#62 lifecycle boundary and likewise never carries old
+anchors forward as fresh support.
+
+Stable `--json` envelopes are versioned by their `format`/`contract` field:
+
+| Command | JSON contract |
+| --- | --- |
+| `memories list` | `memwarden.memory-list.v1` (`items`, `nextCursor`, `snapshotAt`) |
+| `memories search` | `memwarden.memory-search.v1` (every result has source/evidence/lifecycle labels) |
+| `memories show` | `memwarden.memory.v1` |
+| `memories edit` | `memwarden.memory-edit.v1` |
+| `memories archive` / `revalidate` | `memwarden.memory-transition.v1` |
+| `memories history` | `memwarden.memory-history.v1` |
+| `projects` | `memwarden.projects.v1` |
+| `logs` | `memwarden.logs.v1` |
+
+The same bounded surfaces are available to local clients at authenticated POST routes under
+`/memwarden/memories/{list,search,show,edit,archive,revalidate,history}` and `/memwarden/projects`.
+
 ## 🔌 Compatibility
 
 Three ways memory reaches a tool; `memwarden up` wires whichever each supports. No "native hooks
@@ -170,6 +258,9 @@ verifiable-erasure model - is in **[docs/architecture.md](docs/architecture.md)*
 | --- | --- |
 | `memwarden up` / `down` | wire every tool + daemon / reverse it |
 | `memwarden status` | daemon, backend, and per-tool detected/configured/live |
+| `memwarden memories list / search / show` | bounded, labeled daily inspection without default content disclosure |
+| `memwarden memories edit / archive / revalidate / history` | successor versioning and lifecycle management without conflating archive with erase |
+| `memwarden projects` / `logs` | aggregate project footprint / sanitized configured daemon log |
 | `memwarden doctor .` | trust audit of this project (`--fix-stale`, `--erase`) |
 | `memwarden audit <store>` | audit a foreign store (claude-mem, CLAUDE.md, Mem0) - no daemon |
 | `memwarden adopt <store>` | seed a foreign store into the brain (labeled `sourced`, never `verified`) |
@@ -200,9 +291,9 @@ vector runtime, then the native backend when `@memwarden/turbovec` is available 
 Daemon and command logs are printed and archived on failure. Windows is intentionally the supported
 smoke subset, not a claim that service-manager or every full-release journey is implemented there.
 
-The gate proves today's conservative source-validity contract. Versioned claim supersession,
-fine-grained revalidation anchors, and richer daily memory management remain follow-up work in
-issues #61, #62, and #63 rather than hidden beta claims.
+The gate proves the conservative packed source-validity contract. This stacked feature line layers
+explicit lifecycle history (#61), bounded fine-grained anchors (#62), and daily management (#63) on
+top without weakening the packed gate or its whole-file fallback.
 
 ## 📚 Docs
 

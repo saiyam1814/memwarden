@@ -11,8 +11,8 @@
 // - the `shutdown` lifecycle.
 //
 // Persistence lives behind the STATE layer's `StateStore` abstraction
-// (../state/store.ts). The kernel routes the five `state::*`
-// function_ids to that store and drives any registered `type:"state"`
+// (../state/store.ts). The kernel routes the StateKV operations (including
+// bounded keyset paging) to that store and drives any registered `type:"state"`
 // trigger from the store's mutation events. The kernel does NOT carry
 // its own KV implementation.
 //
@@ -177,8 +177,8 @@ export class Kernel implements ISdk {
   }
 
   /**
-   * Route engine-provided built-ins: the five `state::*` ops, the
-   * `stream::*` surface, and `engine::workers::list`. Returns the
+   * Route engine-provided built-ins: StateKV operations, the `stream::*`
+   * surface, and `engine::workers::list`. Returns the
    * sentinel NOT_BUILTIN for everything else. State-change events are
    * emitted by the store (via onMutation), not here, so set/update/delete
    * stay a single store call.
@@ -212,6 +212,13 @@ export class Kernel implements ISdk {
       case "state::list": {
         const p = payload as { scope: string };
         return (await this.store.list(p.scope)) as R;
+      }
+      case "state::list-page": {
+        const p = payload as { scope: string; after?: string; limit: number };
+        return (await this.store.listPage(p.scope, {
+          ...(p.after === undefined ? {} : { after: p.after }),
+          limit: p.limit,
+        })) as R;
       }
       case "state::verify": {
         // Tamper-evidence: verify the whole oplog hash chain. Read-only.

@@ -1,9 +1,9 @@
 //
 // StateKV is the single persistence chokepoint for every mem:: function. It
-// turns five operations (get/set/update/delete/list over scope + key) into one
-// trigger dispatch against the in-process kernel, which routes the five
-// state::* function ids to a StateStore (store.ts / store-libsql.ts /
-// store-memory.ts).
+// turns the original five operations (get/set/update/delete/list over scope +
+// key), plus an additive bounded keyset page, into trigger dispatches. The
+// kernel routes these state::* function ids to a StateStore (store.ts /
+// store-libsql.ts / store-memory.ts).
 //
 // The constructor takes the narrow TriggerSink (just the `trigger` method) so
 // the state layer has no build-time dependency on the kernel; the kernel's ISdk
@@ -16,6 +16,7 @@ export const STATE_FUNCTION_IDS = {
   update: "state::update",
   delete: "state::delete",
   list: "state::list",
+  listPage: "state::list-page",
 } as const;
 
 /** A single flat update operation; callers only ever produce `type:"set"`. */
@@ -83,6 +84,20 @@ export class StateKV {
 
   list<T = unknown>(scope: string): Promise<T[]> {
     return this.call<{ scope: string }, T[]>(STATE_FUNCTION_IDS.list, { scope });
+  }
+
+  listPage<T = unknown>(
+    scope: string,
+    options: { after?: string; limit: number },
+  ): Promise<{ entries: Array<{ key: string; value: T }>; hasMore: boolean }> {
+    return this.call<
+      { scope: string; after?: string; limit: number },
+      { entries: Array<{ key: string; value: T }>; hasMore: boolean }
+    >(STATE_FUNCTION_IDS.listPage, {
+      scope,
+      ...(options.after === undefined ? {} : { after: options.after }),
+      limit: options.limit,
+    });
   }
 }
 

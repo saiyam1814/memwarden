@@ -48,6 +48,12 @@ export interface RememberMemoryInput {
   agent?: string;
   authoredBy?: Provenance["authoredBy"];
   timestamp?: string;
+  /** Internal versioning guard used by management edit: the deterministic
+   * successor id must be an empty slot, never an in-place dedup update. */
+  requireNewVersion?: boolean;
+  /** Project identity resolved by the management boundary for legacy rows
+   * whose recorded checkout path is no longer available. */
+  expectedProjectKey?: string;
 }
 
 export interface RememberMemoryResult {
@@ -202,6 +208,20 @@ export async function rememberMemory(
     return { success: false, reason: "authoredBy is invalid" };
   }
   if (
+    input.requireNewVersion !== undefined &&
+    typeof input.requireNewVersion !== "boolean"
+  ) {
+    return { success: false, reason: "requireNewVersion must be a boolean" };
+  }
+  if (
+    input.expectedProjectKey !== undefined &&
+    (typeof input.expectedProjectKey !== "string" ||
+      !input.expectedProjectKey ||
+      input.expectedProjectKey.length > 4_096)
+  ) {
+    return { success: false, reason: "expectedProjectKey is invalid" };
+  }
+  if (
     input.timestamp !== undefined &&
     (typeof input.timestamp !== "string" ||
       Number.isNaN(new Date(input.timestamp).getTime()))
@@ -254,6 +274,12 @@ export async function rememberMemory(
     const previous = supersedes
       ? await kv.get<Memory>(KV.memories, supersedes).catch(() => null)
       : null;
+    if (existing && input.requireNewVersion === true) {
+      return {
+        success: false,
+        reason: `successor slot ${id} is already occupied; no existing version was mutated`,
+      };
+    }
     if (existing && persistedLifecycleOf(existing) !== "active") {
       return {
         success: false,
@@ -266,7 +292,13 @@ export async function rememberMemory(
     const previousIdentity = previous
       ? resolveMemoryIdentity(previous)
       : undefined;
+    const boundaryResolvedLegacyMatch =
+      input.requireNewVersion === true &&
+      previousIdentity !== undefined &&
+      !previousIdentity.projectKey &&
+      input.expectedProjectKey === projectKey;
     if (
+      !boundaryResolvedLegacyMatch &&
       previousIdentity &&
       hasProjectIdentity(previousIdentity) &&
       !projectIdentityMatchesPath(previousIdentity, projectPath)

@@ -24,6 +24,11 @@ export function defaultDataDir(): string {
   return process.env.MEMWARDEN_DATA_DIR ?? join(homedir(), ".memwarden");
 }
 
+/** The one configured daemon log. The CLI intentionally accepts no path override. */
+export function daemonLogPath(dataDir: string = defaultDataDir()): string {
+  return join(dataDir, "daemon.log");
+}
+
 const sleep = (ms: number): Promise<void> =>
   new Promise((r) => setTimeout(r, ms));
 
@@ -54,10 +59,10 @@ export async function ensureDaemon(
   // its db instead of crashing on boot.
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   // Detached fallbacks need the same diagnosability as managed services. Keep
-  // stdout/stderr in the isolated brain so release gates can archive it and a
-  // user can inspect startup/shutdown failures instead of losing them to
+  // stdout/stderr in the isolated brain so release gates and `memwarden logs`
+  // can inspect startup/shutdown failures instead of losing them to
   // stdio="ignore".
-  const logPath = join(dataDir, "daemon.log");
+  const logPath = daemonLogPath(dataDir);
   const logFd = openSync(logPath, "a", 0o600);
   try {
     chmodSync(logPath, 0o600);

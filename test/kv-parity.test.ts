@@ -111,6 +111,14 @@ const SCRIPT: readonly Step[] = [
   { name: "list obs A (exact scope, insertion order)", run: (s) => s.list(OBS_A) },
   { name: "list obs B is isolated", run: (s) => s.list(OBS_B) },
 
+  // --- deterministic keyset pages (management inventory primitive) ---------
+  { name: "set page key z", run: (s) => s.set("mem:page", "z", { key: "z" }) },
+  { name: "set page key a", run: (s) => s.set("mem:page", "a", { key: "a" }) },
+  { name: "set page key unicode", run: (s) => s.set("mem:page", "é", { key: "é" }) },
+  { name: "key page starts in binary key order", run: (s) => s.listPage("mem:page", { limit: 2 }) },
+  { name: "key page cursor is exclusive", run: (s) => s.listPage("mem:page", { after: "z", limit: 2 }) },
+  { name: "key page unknown scope", run: (s) => s.listPage("mem:no-page", { limit: 2 }) },
+
   // --- in-place update preserves list insertion order ----------------------
   { name: "overwrite obs A o1 in place", run: (s) => s.set(OBS_A, "o1", { i: 11 }) },
   { name: "list obs A keeps original order after in-place overwrite", run: (s) => s.list(OBS_A) },

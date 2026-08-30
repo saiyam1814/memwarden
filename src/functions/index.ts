@@ -18,6 +18,7 @@ import { registerWhyFunction } from "./why.js";
 import { registerRememberFunction } from "./remember.js";
 import { registerCanonFunctions } from "./canon.js";
 import { registerLifecycleFunction } from "./lifecycle.js";
+import { registerManagementFunctions } from "./management.js";
 import { DedupMap } from "./dedup.js";
 import { getTokenBudget, getMaxObservationsPerSession } from "./config.js";
 
@@ -134,6 +135,41 @@ export type {
   TransitionMemoryLifecycleResult,
 } from "./lifecycle.js";
 export {
+  MEMORY_HISTORY_DEFAULT_LIMIT,
+  MEMORY_HISTORY_MAX_LIMIT,
+  MEMORY_LIST_DEFAULT_LIMIT,
+  MEMORY_LIST_MAX_LIMIT,
+  PROJECT_LIST_DEFAULT_LIMIT,
+  PROJECT_LIST_MAX_LIMIT,
+  ManagementError,
+  archiveManagedMemory,
+  editManagedMemory,
+  historyManagedMemory,
+  listManagedMemories,
+  listManagedProjects,
+  managementHttpStatus,
+  managementProjectRoot,
+  registerManagementFunctions,
+  revalidateManagedMemory,
+  showManagedMemory,
+  transitionStatus,
+} from "./management.js";
+export type {
+  EditManagedMemoryInput,
+  EditManagedMemoryResult,
+  ListManagedMemoriesInput,
+  ManagedAnchorStatus,
+  ManagedAnchorSummary,
+  ManagedHistoryResult,
+  ManagedMemoryDetails,
+  ManagedMemoryListPage,
+  ManagedMemorySummary,
+  ManagedTransitionInput,
+  ManagementStatus,
+  ProjectAggregate,
+  ProjectListPage,
+} from "./management.js";
+export {
   MEMORY_LIFECYCLE_ACTIONS,
   MEMORY_LIFECYCLE_STATES,
   applyMemoryLifecycleTransition,
@@ -219,6 +255,7 @@ export function registerCoreFunctions(
   registerRememberFunction(sdk, kv);
   registerCanonFunctions(sdk, kv);
   registerLifecycleFunction(sdk, kv);
+  registerManagementFunctions(sdk, kv);
 
   return kv;
 }
