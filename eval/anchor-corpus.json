@@ -1,0 +1,46 @@
+[
+  {
+    "id": "unrelated-same-file-constant",
+    "captureContent": "export const TTL = 900;\nexport const RETRIES = 3;\n",
+    "mutationContent": "export const TTL = 900;\nexport const RETRIES = 5;\n",
+    "expectedCurrent": true
+  },
+  {
+    "id": "line-shift-stable-context",
+    "captureContent": "// policy\nexport const TTL = 900;\n",
+    "mutationContent": "// generated heading\n// policy\nexport const TTL = 900;\n",
+    "expectedCurrent": true
+  },
+  {
+    "id": "declared-cosmetic-formatting",
+    "captureContent": "export const TTL = 900;\nexport const MODE = 'strict';\n",
+    "mutationContent": "export const TTL = 900;   \nexport const MODE = 'strict';\n",
+    "expectedCurrent": true
+  },
+  {
+    "id": "anchored-value-change",
+    "captureContent": "export const TTL = 900;\nexport const RETRIES = 3;\n",
+    "mutationContent": "export const TTL = 60;\nexport const RETRIES = 3;\n",
+    "expectedCurrent": false
+  },
+  {
+    "id": "anchored-unit-removed",
+    "captureContent": "export const TTL = 900;\nexport const RETRIES = 3;\n",
+    "mutationContent": "export const RETRIES = 3;\n",
+    "expectedCurrent": false
+  },
+  {
+    "id": "unsupported-security-claim",
+    "captureContent": "export const TTL = 900;\nexport const SECURITY_CHECKS = true;\n",
+    "mutationContent": "export const TTL = 900;\nexport const SECURITY_CHECKS = false;\n",
+    "toolOutput": "Security checks are disabled for every request",
+    "expectedCompleteness": "partial",
+    "expectedCurrent": false
+  },
+  {
+    "id": "same-snippet-different-context",
+    "captureContent": "function authPolicy() {\n  export const TTL = 900;\n}\nfunction decoy() {\n}\n",
+    "mutationContent": "function authPolicy() {\n}\nfunction decoy() {\n  export const TTL = 900;\n}\n",
+    "expectedCurrent": false
+  }
+]

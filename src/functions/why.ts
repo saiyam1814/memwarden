@@ -14,6 +14,10 @@ import type {
 } from "./types.js";
 import { KV } from "../state/schema.js";
 import { classifyProvenance, type Verdict } from "./verify.js";
+import {
+  fineGrainedClaimForMemory,
+  fineGrainedClaimForObservation,
+} from "./anchors.js";
 import { memoryToObservation } from "./memory-utils.js";
 import {
   projectIdentityMatchesPath,
@@ -240,6 +244,7 @@ export function registerWhyFunction(sdk: ISdk, kv: StateKV): void {
           // Stable identity decides that re-rooting is safe; `root` remains
           // the caller's checkout path actually read by the verifier.
           verifyAgainstRoot: projectIdentityMatchesPath(identity, root),
+          fineGrainedClaim: fineGrainedClaimForObservation(obs),
         });
         const explanation = explanationFields(obs, null, verdict);
         return {
@@ -272,6 +277,7 @@ export function registerWhyFunction(sdk: ISdk, kv: StateKV): void {
         const obs = memoryToObservation(mem, identity);
         const verdict = classifyProvenance(obs.provenance, root, {
           verifyAgainstRoot: projectIdentityMatchesPath(identity, root),
+          fineGrainedClaim: fineGrainedClaimForMemory(mem),
         });
         const explanation = explanationFields(obs, mem, verdict);
         const sourceSession = identity.sourceSession;

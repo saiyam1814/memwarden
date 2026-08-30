@@ -1992,18 +1992,17 @@ async function canonPull(rest: string[]): Promise<void> {
   // The durable answer is CODEOWNERS on .memwarden/ plus review (documented in
   // the generated .memwarden/README.md); signing is the eventual fix.
   const checked = verifyCanon(records, root);
-  // Exact raw matches enter as verified; normalized-only matches enter as
-  // explicitly cosmetic/current. Both commitments are stored, so recall keeps
-  // the distinction instead of laundering CRLF conversion into "verified".
-  const loadable = checked.filter(
-    (candidate) =>
-      candidate.verdict === "verified" || candidate.verdict === "cosmetic",
-  );
+  // Exact raw matches enter as verified; normalized-only whole-file or
+  // capture-complete anchor matches enter as explicitly cosmetic/current.
+  // Core import re-hashes the same commitments immediately before writing.
+  const locallyLoadable = (candidate: (typeof checked)[number]): boolean =>
+    candidate.verdict === "verified" || candidate.verdict === "cosmetic";
+  const loadable = checked.filter(locallyLoadable);
   const yes = rest.includes("--yes");
   if (!yes && !asJson) {
     console.log(
       `\nmemwarden canon pull — ${root}\n\n` +
-        `  ${loadable.length} of ${checked.length} record(s) match raw or normalized capture commitments and would\n` +
+        `  ${loadable.length} of ${checked.length} record(s) match complete raw or normalized source commitments and would\n` +
         `  be loaded into this machine's memory with honest trust labels:\n`,
     );
     for (const c of loadable.slice(0, 15)) {
@@ -2013,7 +2012,7 @@ async function canonPull(rest: string[]): Promise<void> {
     const rejected = checked.length - loadable.length;
     if (rejected > 0) {
       console.log(
-        `\n  ${rejected} refused (source-drifted or unverifiable) — they will not be loaded.`,
+        `\n  ${rejected} refused (source-drifted, incomplete, ambiguous, or unverifiable) — they will not be loaded.`,
       );
     }
     console.log(
@@ -2028,13 +2027,11 @@ async function canonPull(rest: string[]): Promise<void> {
   for (const candidate of loadable) {
     const record = candidate.record;
     // Re-run local verification immediately before each import, after any
-    // confirmation delay. The daemon repeats the raw/normalized check at its
-    // core boundary immediately before writing.
+    // confirmation delay. The daemon repeats the whole-file/fine-grained
+    // raw-or-normalized check at its core boundary immediately before writing,
+    // closing both stale previews and caller-asserted status shortcuts.
     const fresh = verifyCanon([record], root)[0];
-    if (
-      !fresh ||
-      (fresh.verdict !== "verified" && fresh.verdict !== "cosmetic")
-    ) {
+    if (!fresh || !locallyLoadable(fresh)) {
       refused++;
       continue;
     }
@@ -2055,7 +2052,7 @@ async function canonPull(rest: string[]): Promise<void> {
     `\nmemwarden canon pull — ${root}\n\n` +
       `  loaded    ${loaded} verified/cosmetic-current memories into this machine's brain\n` +
       (refused > 0
-        ? `  refused   ${refused} without a local raw or normalized commitment match\n`
+        ? `  refused   ${refused} without a complete local raw or normalized source match\n`
         : "") +
       `\n  Your agents now start with the team's source-current canon instead of nothing.\n`,
   );

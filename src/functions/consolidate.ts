@@ -65,6 +65,11 @@ import {
 import { getAccessLog, deleteAccessLog } from "./access-tracker.js";
 import { logger } from "./logger.js";
 import { withKeyedLock } from "./keyed-mutex.js";
+import {
+  bindFineGrainedEvidenceToMemory,
+  canonicalFineGrainedEvidence,
+  fineGrainedClaimForObservation,
+} from "./anchors.js";
 
 // Only these observation types are the duplicate-Read/Edit rot bucket #20
 // describes. Conversations, decisions, errors, etc. are left alone.
@@ -177,6 +182,10 @@ function evidenceFingerprintFor(args: {
             fileHashesNormalized: canonicalFileHashes(
               provenance.fileHashesNormalized,
             ),
+            anchors:
+              provenance.anchors === undefined
+                ? null
+                : canonicalFineGrainedEvidence(provenance.anchors) ?? "invalid",
             command: provenance.command ?? null,
             agent: provenance.agent ?? null,
             userConfirmed: provenance.userConfirmed ?? null,
@@ -569,6 +578,14 @@ async function distillMembersUnlocked(
         "distilled memory created",
         newest.agentId,
       );
+  const anchorCommits = new Set(
+    newest.provenance?.anchors?.anchors
+      .map((anchor) => anchor.sourceCommit)
+      .filter((commit): commit is string => typeof commit === "string") ?? [],
+  );
+  const sourceCommit =
+    existing?.sourceCommit ??
+    (anchorCommits.size === 1 ? [...anchorCommits][0] : undefined);
 
   const memory: Memory = {
     ...lifecycleFields,
@@ -612,6 +629,7 @@ async function distillMembersUnlocked(
     ...(projectPath ? { projectPath } : {}),
     ...(projectKey ? { projectKey } : {}),
     ...(captureCwd ? { captureCwd } : {}),
+    ...(sourceCommit ? { sourceCommit } : {}),
     // Equivalent members have identical trust-relevant provenance. Carry the
     // newest one verbatim so capturedAt remains useful without synthesizing or
     // merging hashes across trust boundaries.
@@ -619,6 +637,18 @@ async function distillMembersUnlocked(
       ? { provenance: newest.provenance }
       : {}),
   };
+  if (memory.provenance?.anchors !== undefined) {
+    const rebound = bindFineGrainedEvidenceToMemory(
+      memory.provenance.anchors,
+      memory,
+      fineGrainedClaimForObservation(newest),
+    );
+    const { anchors: _observationClaimBinding, ...rest } = memory.provenance;
+    memory.provenance = {
+      ...rest,
+      ...(rebound ? { anchors: rebound } : {}),
+    };
+  }
 
   try {
     // StateKV.set is the successor installation point. It is atomic in both
