@@ -5,6 +5,7 @@
 // KV.memories lookups fall back on.
 
 import type { CompressedObservation, Memory } from "./types.js";
+import { persistedLifecycleOf } from "./memory-lifecycle.js";
 
 export function isMemoryExpired(memory: Memory, now = Date.now()): boolean {
   if (!memory.forgetAfter) return false;
@@ -13,7 +14,11 @@ export function isMemoryExpired(memory: Memory, now = Date.now()): boolean {
 }
 
 export function isMemoryRecallable(memory: Memory, now = Date.now()): boolean {
-  return memory.isLatest !== false && !isMemoryExpired(memory, now);
+  return (
+    persistedLifecycleOf(memory) === "active" &&
+    memory.isLatest !== false &&
+    !isMemoryExpired(memory, now)
+  );
 }
 
 export function memoryToObservation(
@@ -26,7 +31,7 @@ export function memoryToObservation(
       memory.origin === "manual"
         ? `memory:${memory.id}`
         : (memory.sessionIds?.[0] ?? "memory"),
-    timestamp: memory.createdAt,
+    timestamp: memory.observedAt ?? memory.createdAt,
     type: "decision",
     title: memory.title,
     facts: memory.facts ?? [memory.content],

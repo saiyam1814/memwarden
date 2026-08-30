@@ -14,6 +14,7 @@ import type { ISdk } from "../kernel/index.js";
 import type {
   CompressedObservation,
   Memory,
+  MemoryLifecycleState,
   SearchResult,
   Session,
   EmbeddingProvider,
@@ -44,7 +45,21 @@ import {
 } from "./memory-identity.js";
 import { canonicalizePath } from "./paths.js";
 import { projectKey as computeProjectKey } from "./git-identity.js";
-import { classifyProvenance, type Verdict } from "./verify.js";
+import {
+  classifyProvenance,
+  evidenceTrustOf,
+  type EvidenceTrust,
+  type LiveSourceStatus,
+  type Verdict,
+} from "./verify.js";
+import {
+  evaluateMemoryAsOf,
+  lifecycleProjection,
+  persistedLifecycleOf,
+  validityIntervalsOf,
+  type AsOfLifecycleResult,
+  type LifecycleProjection,
+} from "./memory-lifecycle.js";
 import { recordFirewallActivity } from "./firewall-stats.js";
 import { recordAccessBatch } from "./access-tracker.js";
 import { loadVectorIndex, persistVectorIndex } from "./vector-persistence.js";
@@ -492,11 +507,17 @@ export async function buildScopedAllowedIds(
 // This prevents an unfiltered lookup from laundering a drifted record into
 // unlabeled current context.
 
-export type SearchMode = "current" | "historical" | "all";
-export type SearchVerdict = Verdict | {
-  status: "unverifiable";
-  reason: string;
-};
+export type SearchMode = "current" | "historical" | "as_of" | "all";
+export type SearchVerdict =
+  | Verdict
+  | {
+      status: "unverifiable";
+      reason: string;
+      evidenceTrust: EvidenceTrust;
+      evidenceReason: string;
+      sourceStatus: "unknown";
+      sourceReason: string;
+    };
 export type TrustLabel =
   | "verified"
   | "cosmetic"
@@ -549,16 +570,33 @@ export function sourceStatusOf(verdict: SearchVerdict): SourceStatusLabel {
 interface RecallClassificationFields {
   /** Trust label; `cosmetic` is current but explicitly not byte-identical. */
   trust: TrustLabel;
-  /** Explicit source state; drift is never described as merely "stale". */
+  /** Backward-compatible #56 source label. */
   source_status: SourceStatusLabel;
+  /** Independent lifecycle model axes. */
+  evidence_trust: EvidenceTrust;
+  evidence_reason: string;
+  live_source_status: LiveSourceStatus;
+  live_source_reason: string;
+  persisted_lifecycle: MemoryLifecycleState;
+  effective_lifecycle: MemoryLifecycleState;
+  transition_reason: string;
+  lifecycle_reason: string;
+  observed_at: string;
+  valid_from?: string;
+  valid_to?: string;
+  validity_reconstruction: "recorded" | "legacy_inferred" | "unavailable";
+  source_commit?: string;
+  attestation?: "canon-imported" | "canon-reanchored";
   /** Capture time used to frame historical records. */
   captured_at: string;
-  /** Short provenance verdict; historical results always retain this context. */
+  /** Short compatibility provenance verdict. */
   evidence: string;
-  /** True for source-drifted or superseded records. */
   historical: boolean;
   /** Present only for a stored Memory version that is no longer latest. */
   superseded?: true;
+  lifecycle_as_of?: "active";
+  as_of_reconstruction?: AsOfLifecycleResult["reconstruction"];
+  source_status_temporality?: "current-check-only";
 }
 
 interface RecallItemBase extends RecallClassificationFields {
@@ -576,39 +614,120 @@ export interface NarrativeRecallItem extends RecallItemBase {
 }
 export interface FullRecallItem extends SearchResult, RecallClassificationFields {}
 
+interface RecallLifecycleContext {
+  memory: Memory | null;
+  projection: LifecycleProjection;
+  asOf?: AsOfLifecycleResult;
+}
+
 function classificationFields(
   r: SearchResult,
   verdict: SearchVerdict,
-  superseded: boolean,
+  lifecycle: RecallLifecycleContext,
 ): RecallClassificationFields {
   const sourceStatus = sourceStatusOf(verdict);
+  const memory = lifecycle.memory;
+  const capturedAt =
+    memory?.observedAt ??
+    r.observation.provenance?.capturedAt ??
+    r.observation.timestamp;
+  const intervals = memory ? validityIntervalsOf(memory) : [];
+  const latest = lifecycle.asOf?.interval ?? intervals[intervals.length - 1];
+  const superseded = lifecycle.projection.persisted === "superseded";
+  const canon = r.observation.provenance?.canon;
   return {
     trust: trustLabelOf(verdict),
     source_status: sourceStatus,
-    captured_at: r.observation.provenance?.capturedAt ?? r.observation.timestamp,
+    evidence_trust: verdict.evidenceTrust,
+    evidence_reason: verdict.evidenceReason,
+    live_source_status: verdict.sourceStatus,
+    live_source_reason: verdict.sourceReason,
+    persisted_lifecycle: lifecycle.projection.persisted,
+    effective_lifecycle: lifecycle.projection.effective,
+    transition_reason: lifecycle.projection.persistedReason,
+    lifecycle_reason: lifecycle.projection.effectiveReason,
+    observed_at: capturedAt,
+    ...(latest?.validFrom
+      ? { valid_from: latest.validFrom }
+      : { valid_from: capturedAt }),
+    ...(latest?.validTo ? { valid_to: latest.validTo } : {}),
+    validity_reconstruction: lifecycle.asOf
+      ? lifecycle.asOf.reconstruction === "exact"
+        ? "recorded"
+        : lifecycle.asOf.reconstruction
+      : memory
+        ? intervals.length === 0
+          ? "unavailable"
+          : intervals.some((interval) => interval.inferred)
+            ? "legacy_inferred"
+            : "recorded"
+        : "unavailable",
+    ...(memory?.sourceCommit ? { source_commit: memory.sourceCommit } : {}),
+    ...(canon
+      ? {
+          attestation: canon.reanchoredAt
+            ? ("canon-reanchored" as const)
+            : ("canon-imported" as const),
+        }
+      : {}),
+    captured_at: capturedAt,
     evidence: verdict.reason,
-    historical: sourceStatus === "source-drifted" || superseded,
+    historical:
+      lifecycle.projection.effective !== "active" || lifecycle.asOf !== undefined,
     ...(superseded ? { superseded: true as const } : {}),
+    ...(lifecycle.asOf?.active
+      ? {
+          lifecycle_as_of: "active" as const,
+          as_of_reconstruction: lifecycle.asOf.reconstruction,
+          source_status_temporality: "current-check-only" as const,
+        }
+      : {}),
   };
+}
+
+function defaultLifecycleContext(
+  superseded = false,
+): RecallLifecycleContext {
+  const persisted: MemoryLifecycleState = superseded ? "superseded" : "active";
+  const reason = superseded
+    ? "legacy serializer flag marks this version superseded"
+    : "observation defaults to active";
+  return {
+    memory: null,
+    projection: {
+      persisted,
+      effective: persisted,
+      persistedReason: reason,
+      effectiveReason: reason,
+    },
+  };
+}
+
+function normalizeLifecycleContext(
+  value: RecallLifecycleContext | boolean | undefined,
+): RecallLifecycleContext {
+  return typeof value === "object"
+    ? value
+    : defaultLifecycleContext(value === true);
 }
 
 export function serializeRecallItem(
   r: SearchResult,
   format: "compact",
   verdict: SearchVerdict,
-  superseded?: boolean,
+  lifecycle?: RecallLifecycleContext | boolean,
 ): CompactRecallItem;
 export function serializeRecallItem(
   r: SearchResult,
   format: "narrative",
   verdict: SearchVerdict,
-  superseded?: boolean,
+  lifecycle?: RecallLifecycleContext | boolean,
 ): NarrativeRecallItem;
 export function serializeRecallItem(
   r: SearchResult,
   format: "compact" | "narrative",
   verdict: SearchVerdict,
-  superseded = false,
+  lifecycle?: RecallLifecycleContext | boolean,
 ): CompactRecallItem | NarrativeRecallItem {
   const base: RecallItemBase = {
     obsId: r.observation.id,
@@ -616,7 +735,7 @@ export function serializeRecallItem(
     title: r.observation.title,
     score: r.score,
     timestamp: r.observation.timestamp,
-    ...classificationFields(r, verdict, superseded),
+    ...classificationFields(r, verdict, normalizeLifecycleContext(lifecycle)),
   };
   return format === "compact"
     ? { ...base, type: r.observation.type }
@@ -626,9 +745,12 @@ export function serializeRecallItem(
 function serializeFullRecallItem(
   r: SearchResult,
   verdict: SearchVerdict,
-  superseded = false,
+  lifecycle?: RecallLifecycleContext | boolean,
 ): FullRecallItem {
-  return { ...r, ...classificationFields(r, verdict, superseded) };
+  return {
+    ...r,
+    ...classificationFields(r, verdict, normalizeLifecycleContext(lifecycle)),
+  };
 }
 
 /** One narrative line, label first — the text surfaces (hooks, proxy, MCP
@@ -641,11 +763,19 @@ export function formatNarrativeItem(
 ): string {
   const sourceLabel =
     item.source_status === "source-verified" ? item.trust : item.source_status;
-  const labels = `${item.superseded ? "[superseded] " : ""}[${sourceLabel}] `;
+  const lifecycleLabel =
+    item.effective_lifecycle !== "active"
+      ? `[${item.effective_lifecycle}] `
+      : "";
+  const labels = `${item.lifecycle_as_of ? "[as-of] " : ""}${lifecycleLabel}[${sourceLabel}] `;
+  const validity = `${item.valid_from ?? item.captured_at}${item.valid_to ? ` to ${item.valid_to}` : " onward"}`;
   const historicalFrame = item.historical
-    ? `Historical record captured ${item.captured_at}. Evidence: ${item.evidence}\n`
+    ? `Historical record captured ${item.captured_at}; recorded validity ${validity} (${item.validity_reconstruction}). Evidence: ${item.evidence}. Effective lifecycle: ${item.lifecycle_reason}\n`
     : "";
-  return `${idx + 1}. ${labels}${item.title}\n${historicalFrame}${item.narrative}`;
+  const asOfFrame = item.lifecycle_as_of
+    ? `As-of reconstruction: ${item.as_of_reconstruction}; source status is a current-check-only label, not reconstructed history.\n`
+    : "";
+  return `${idx + 1}. ${labels}${item.title}\n${historicalFrame}${asOfFrame}${item.narrative}`;
 }
 
 function usableCheckoutRoot(value: string | undefined): string | null {
@@ -702,6 +832,10 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       safe_only?: boolean;
       /** Explicit inclusion policy. Classification runs in every mode. */
       mode?: string;
+      /** ISO timestamp required by mode=as_of. Time reconstruction is bounded
+       * to stored Memory validity intervals; observation history is labeled
+       * unavailable rather than inferred from oplog commitments. */
+      as_of?: string;
       /** Backward-compatible alias for mode=all when true, current when false. */
       include_drifted?: boolean;
       /** Optional source-status allowlist, applied after classification. */
@@ -791,13 +925,17 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       let explicitMode: SearchMode | undefined;
       if (data.mode !== undefined) {
         if (typeof data.mode !== "string") {
-          throw new Error("mem::search: mode must be current, historical, or all");
+          throw new Error(
+            "mem::search: mode must be current, historical, as_of, or all",
+          );
         }
         const normalizedMode = data.mode.trim().toLowerCase();
-        if (!(["current", "historical", "all"] as const).includes(
+        if (!(["current", "historical", "as_of", "all"] as const).includes(
           normalizedMode as SearchMode,
         )) {
-          throw new Error("mem::search: mode must be current, historical, or all");
+          throw new Error(
+            "mem::search: mode must be current, historical, as_of, or all",
+          );
         }
         explicitMode = normalizedMode as SearchMode;
       }
@@ -813,21 +951,41 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           : data.include_drifted === false
             ? "current"
             : undefined;
-      if (explicitMode && aliasMode && explicitMode !== aliasMode) {
+      let asOfIso: string | undefined;
+      if (data.as_of !== undefined) {
+        if (
+          typeof data.as_of !== "string" ||
+          !data.as_of.trim() ||
+          data.as_of.length > 128 ||
+          !Number.isFinite(Date.parse(data.as_of))
+        ) {
+          throw new Error("mem::search: as_of must be a valid date-time string");
+        }
+        const parsed = Date.parse(data.as_of);
+        asOfIso = new Date(parsed).toISOString();
+      }
+      if (explicitMode && explicitMode !== "as_of" && asOfIso) {
+        throw new Error("mem::search: as_of is only compatible with mode=as_of");
+      }
+      if (explicitMode === "as_of" && !asOfIso) {
+        throw new Error("mem::search: mode=as_of requires as_of");
+      }
+      const requestedMode = explicitMode ?? (asOfIso ? "as_of" : undefined);
+      if (requestedMode && aliasMode && requestedMode !== aliasMode) {
         throw new Error(
           "mem::search: mode conflicts with include_drifted (true means all; false means current)",
         );
       }
       if (
         wantsSafeOnly &&
-        ((explicitMode !== undefined && explicitMode !== "current") ||
+        ((requestedMode !== undefined && requestedMode !== "current") ||
           (aliasMode !== undefined && aliasMode !== "current"))
       ) {
         throw new Error("mem::search: safe_only is only compatible with mode=current");
       }
       const inclusionMode: SearchMode | "legacy" = wantsSafeOnly
         ? "current"
-        : explicitMode ?? aliasMode ?? "legacy";
+        : requestedMode ?? aliasMode ?? "legacy";
       const currentPolicy = inclusionMode === "current";
       const trustFilter = normalizeTrustFilter(data.trust);
       const format = typeof data.format === "string" ? data.format : "full";
@@ -879,7 +1037,10 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       const POLICY_SCAN_CAP = 2000;
       const filtering = !!(projectFilter || cwdFilter);
       const policyFiltering =
-        currentPolicy || inclusionMode === "historical" || trustFilter !== null;
+        currentPolicy ||
+        inclusionMode === "historical" ||
+        inclusionMode === "as_of" ||
+        trustFilter !== null;
       const fetchLimit = policyFiltering
         ? Math.min(POLICY_SCAN_CAP, Math.max(effectiveLimit * 50, 500))
         : filtering
@@ -920,20 +1081,29 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       // history. Truncating their merge back to one window before policy would
       // let 2,000 current hits starve every superseded match.
       const combinedFetchLimit =
-        inclusionMode === "historical" ? fetchLimit * 2 : fetchLimit;
+        inclusionMode === "historical" || inclusionMode === "as_of"
+          ? Math.min(POLICY_SCAN_CAP * 2, fetchLimit * 2)
+          : fetchLimit;
 
-      // Superseded Memory rows are intentionally absent from the live index.
-      // Historical/all mode builds a bounded temporary BM25 stream for them,
-      // so the default/current ranking remains untouched while deliberate
-      // history inspection can still retrieve old versions.
-      const supersededMemoryById = new Map<string, Memory>();
-      if (inclusionMode === "historical" || inclusionMode === "all") {
+      // Persisted non-active Memory rows are intentionally absent from the live
+      // index. Historical/all mode builds a bounded temporary stream for them;
+      // as_of scans every stored Memory version because a currently superseded,
+      // disputed, archived, or restored row may own the requested interval.
+      const historicalMemoryById = new Map<string, Memory>();
+      if (
+        inclusionMode === "historical" ||
+        inclusionMode === "as_of" ||
+        inclusionMode === "all"
+      ) {
         try {
           const historicalIndex = new SearchIndex();
           const memories = await kv.list<Memory>(KV.memories);
           for (const memory of memories) {
-            if (memory.isLatest !== false || !memory.title || !memory.content) continue;
-            supersededMemoryById.set(memory.id, memory);
+            if (!memory.title || !memory.content) continue;
+            const includeInTemporary =
+              inclusionMode === "as_of" || !isMemoryRecallable(memory);
+            if (!includeInTemporary) continue;
+            historicalMemoryById.set(memory.id, memory);
             historicalIndex.add(memoryToObservation(memory));
           }
           bm25Results = mergeRanked(
@@ -1004,7 +1174,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       // Cache Memory rows as records. Historical mode already loaded
       // superseded rows above, so those require no second KV hit.
       const memoryCache = new Map<string, Memory | null>();
-      for (const [id, memory] of supersededMemoryById) memoryCache.set(id, memory);
+      for (const [id, memory] of historicalMemoryById) memoryCache.set(id, memory);
       const loadMemory = async (obsId: string): Promise<Memory | null> => {
         if (memoryCache.has(obsId)) return memoryCache.get(obsId)!;
         const memory = await kv.get<Memory>(KV.memories, obsId).catch(() => null);
@@ -1032,7 +1202,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           return source;
         }
         const memory = await loadMemory(r.obsId);
-        const historical = supersededMemoryById.has(r.obsId);
+        const historical = historicalMemoryById.has(r.obsId);
         const source =
           memory && (historical || isMemoryRecallable(memory))
             ? { observation: memoryToObservation(memory), memory }
@@ -1068,11 +1238,26 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         return allSessions;
       };
 
-      const unverifiable = (): SearchVerdict => ({
-        status: "unverifiable",
-        reason:
-          "the source checkout is unavailable, so capture-time file evidence cannot be checked",
-      });
+      const unverifiable = (
+        provenance: CompressedObservation["provenance"],
+      ): SearchVerdict => {
+        const reason =
+          "the source checkout is unavailable, so capture-time file evidence cannot be checked";
+        const evidenceTrust = evidenceTrustOf(provenance);
+        return {
+          status: "unverifiable",
+          reason,
+          evidenceTrust,
+          evidenceReason:
+            evidenceTrust === "verified"
+              ? "capture-time file commitments exist, but no live checkout is available"
+              : evidenceTrust === "sourced"
+                ? "source or confirmation evidence exists without a currently checkable checkout"
+                : "no source evidence was captured",
+          sourceStatus: "unknown",
+          sourceReason: reason,
+        };
+      };
 
       /** Classify against the caller checkout for a proven same-project scoped
        * result; otherwise against the candidate's own known live checkout.
@@ -1105,7 +1290,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
             });
           }
           if (!callerRoot && sameProject && mustUseCallerCheckout) {
-            return unverifiable();
+            return unverifiable(obs.provenance);
           }
         }
 
@@ -1152,12 +1337,12 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         // checkout-internal absolute paths unverifiable: absence of the whole
         // checkout is not evidence that the referenced source itself drifted.
         if (obs.provenance?.cwd && isAbsolute(obs.provenance.cwd)) {
-          return unverifiable();
+          return unverifiable(obs.provenance);
         }
         // With no recorded checkout, absolute evidence identifies its own path
         // and can still be checked directly. Relative evidence cannot.
         return needsRelativeRoot
-          ? unverifiable()
+          ? unverifiable(obs.provenance)
           : classifyProvenance(obs.provenance, "/");
       };
 
@@ -1165,7 +1350,9 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       // that survives already has the verdict its serializer will expose.
       const enriched: SearchResult[] = [];
       const verdictByObs = new Map<string, SearchVerdict>();
-      const supersededObs = new Set<string>();
+      const lifecycleByObs = new Map<string, RecallLifecycleContext>();
+      let asOfUnavailable = 0;
+      let asOfOutsideValidity = 0;
       let refusedCount = 0;
       // Evidence only (id + verdict), never title/content: refused content must
       // not ride back to the model inside its own refusal notice.
@@ -1230,21 +1417,40 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         }
 
         const obs = source.observation;
-        const superseded = supersededMemoryById.has(r.obsId);
         const verdict = await classifyForSearch(obs, identity);
         const sourceStatus = sourceStatusOf(verdict);
+        const projection = lifecycleProjection(
+          source.memory,
+          verdict.sourceStatus,
+          verdict.status === "unverifiable" ||
+            (verdict.evidenceTrust === "verified" &&
+              verdict.sourceStatus === "unknown"),
+        );
+        let asOf: AsOfLifecycleResult | undefined;
 
         let included = true;
         if (inclusionMode === "current") {
           included =
-            !superseded &&
-            sourceStatus !== "source-drifted" &&
-            sourceStatus !== "unverifiable" &&
+            projection.effective === "active" &&
+            verdict.status !== "unverifiable" &&
+            verdict.sourceStatus !== "drifted" &&
+            verdict.sourceStatus !== "missing" &&
             (getRecallPolicy() !== "verified-only" ||
-              verdict.status === "verified" ||
-              verdict.status === "cosmetic");
+              (verdict.evidenceTrust === "verified" &&
+                (verdict.status === "verified" ||
+                  verdict.status === "cosmetic")));
         } else if (inclusionMode === "historical") {
-          included = superseded || sourceStatus === "source-drifted";
+          included = projection.effective !== "active";
+        } else if (inclusionMode === "as_of") {
+          if (!source.memory || !asOfIso) {
+            asOfUnavailable++;
+            included = false;
+          } else {
+            asOf = evaluateMemoryAsOf(source.memory, asOfIso);
+            if (!asOf.available) asOfUnavailable++;
+            else if (!asOf.active) asOfOutsideValidity++;
+            included = asOf.available && asOf.active;
+          }
         }
         if (included && trustFilter !== null) {
           included = trustFilter.has(sourceStatus);
@@ -1256,10 +1462,14 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
             if (refusalSamples.length < 5) {
               refusalSamples.push({
                 obsId: obs.id,
-                reason: superseded
-                  ? "a newer memory supersedes this record"
-                  : verdict.reason,
-                status: superseded ? "superseded" : verdict.status,
+                reason:
+                  projection.effective !== "active"
+                    ? projection.effectiveReason
+                    : verdict.reason,
+                status:
+                  projection.effective !== "active"
+                    ? projection.effective
+                    : verdict.status,
               });
             }
           }
@@ -1267,7 +1477,11 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         }
 
         verdictByObs.set(obs.id, verdict);
-        if (superseded) supersededObs.add(obs.id);
+        lifecycleByObs.set(obs.id, {
+          memory: source.memory,
+          projection,
+          ...(asOf ? { asOf } : {}),
+        });
         enriched.push({
           observation: obs,
           score: r.score,
@@ -1346,19 +1560,35 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       };
 
       const modeMeta = inclusionMode === "legacy" ? {} : { mode: inclusionMode };
+      const asOfMeta =
+        inclusionMode === "as_of"
+          ? {
+              as_of: {
+                at: asOfIso!,
+                reconstruction: "stored-validity-intervals-only",
+                unavailable: asOfUnavailable,
+                outside_validity: asOfOutsideValidity,
+                scanned: results.length,
+                scan_cap: combinedFetchLimit,
+                note:
+                  "Oplog payload hashes are commitments, not content history; observations without stored version intervals are excluded rather than reconstructed.",
+              },
+            }
+          : {};
       if (format === "compact") {
         const compactResults: CompactRecallItem[] = recallResults.map((r) =>
           serializeRecallItem(
             r,
             "compact",
             verdictByObs.get(r.observation.id)!,
-            supersededObs.has(r.observation.id),
+            lifecycleByObs.get(r.observation.id)!,
           ),
         );
         const packed = applyTokenBudget(compactResults);
         return {
           format,
           ...modeMeta,
+          ...asOfMeta,
           results: packed.items,
           tokens_used: packed.used,
           tokens_budget: tokenBudget,
@@ -1373,7 +1603,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
             r,
             "narrative",
             verdictByObs.get(r.observation.id)!,
-            supersededObs.has(r.observation.id),
+            lifecycleByObs.get(r.observation.id)!,
           ),
         );
         const packed = applyTokenBudget(narrativeResults);
@@ -1381,6 +1611,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         return {
           format,
           ...modeMeta,
+          ...asOfMeta,
           results: packed.items,
           text,
           tokens_used: packed.used,
@@ -1394,7 +1625,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         serializeFullRecallItem(
           r,
           verdictByObs.get(r.observation.id)!,
-          supersededObs.has(r.observation.id),
+          lifecycleByObs.get(r.observation.id)!,
         ),
       );
       const packed = applyTokenBudget(fullResults);
@@ -1410,6 +1641,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       return {
         format,
         ...modeMeta,
+        ...asOfMeta,
         results: packed.items,
         tokens_used: packed.used,
         tokens_budget: tokenBudget,

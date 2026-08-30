@@ -50,7 +50,12 @@ import {
   isPortableCanonPath,
 } from "../functions/canon.js";
 import { projectKey } from "../functions/git-identity.js";
-import type { CanonRecord } from "../functions/types.js";
+import type {
+  CanonRecord,
+  MemoryLifecycleState,
+  MemoryLifecycleTransition,
+  MemoryValidityInterval,
+} from "../functions/types.js";
 
 export { CANON_FORMAT };
 export type { CanonRecord };
@@ -211,6 +216,40 @@ export function serializeCanon(records: CanonRecord[]): string {
       id: r.id,
       type: r.type,
       ...(r.projectKey ? { projectKey: r.projectKey } : {}),
+      ...(r.version !== undefined ? { version: r.version } : {}),
+      ...(r.observedAt ? { observedAt: r.observedAt } : {}),
+      ...(r.validFrom ? { validFrom: r.validFrom } : {}),
+      ...(r.validTo ? { validTo: r.validTo } : {}),
+      ...(r.validityIntervals
+        ? {
+            validityIntervals: r.validityIntervals.map((interval) => ({
+              validFrom: interval.validFrom,
+              ...(interval.validTo ? { validTo: interval.validTo } : {}),
+              ...(interval.reason ? { reason: interval.reason } : {}),
+              ...(interval.inferred ? { inferred: true } : {}),
+            })),
+          }
+        : {}),
+      ...(r.sourceCommit ? { sourceCommit: r.sourceCommit } : {}),
+      ...(r.lifecycle ? { lifecycle: r.lifecycle } : {}),
+      ...(r.lifecycleReason ? { lifecycleReason: r.lifecycleReason } : {}),
+      ...(r.lifecycleChangedAt
+        ? { lifecycleChangedAt: r.lifecycleChangedAt }
+        : {}),
+      ...(r.lifecycleTransitions
+        ? {
+            lifecycleTransitions: r.lifecycleTransitions.map((transition) => ({
+              ...transition,
+            })),
+          }
+        : {}),
+      ...(r.lifecycleMigratedFromLegacy
+        ? { lifecycleMigratedFromLegacy: true }
+        : {}),
+      ...(r.parentId ? { parentId: r.parentId } : {}),
+      ...(r.supersedes ? { supersedes: [...r.supersedes].sort() } : {}),
+      ...(r.supersededBy ? { supersededBy: r.supersededBy } : {}),
+      ...(r.relatedIds ? { relatedIds: [...r.relatedIds].sort() } : {}),
       title: r.title,
       content: r.content,
       concepts: [...r.concepts].sort(),
@@ -431,6 +470,21 @@ export function recordFromMemory(
     concepts?: string[];
     files?: string[];
     type?: CanonRecord["type"];
+    version?: number;
+    observedAt?: string;
+    validFrom?: string;
+    validTo?: string;
+    validityIntervals?: MemoryValidityInterval[];
+    sourceCommit?: string;
+    lifecycle?: MemoryLifecycleState;
+    lifecycleReason?: string;
+    lifecycleChangedAt?: string;
+    lifecycleTransitions?: MemoryLifecycleTransition[];
+    lifecycleMigratedFromLegacy?: true;
+    parentId?: string;
+    supersedes?: string[];
+    supersededBy?: string;
+    relatedIds?: string[];
     agentId?: string;
     projectPath?: string;
     projectKey?: string;
@@ -553,6 +607,39 @@ export function recordFromMemory(
     id: memory.id,
     type: memory.type ?? "fact",
     ...(portableProjectKey ? { projectKey: portableProjectKey } : {}),
+    ...(memory.version !== undefined ? { version: memory.version } : {}),
+    ...(memory.observedAt ? { observedAt: memory.observedAt } : {}),
+    ...(memory.validFrom ? { validFrom: memory.validFrom } : {}),
+    ...(memory.validTo ? { validTo: memory.validTo } : {}),
+    ...(memory.validityIntervals
+      ? {
+          validityIntervals: memory.validityIntervals.map((interval) => ({
+            ...interval,
+          })),
+        }
+      : {}),
+    ...(memory.sourceCommit ? { sourceCommit: memory.sourceCommit } : {}),
+    ...(memory.lifecycle ? { lifecycle: memory.lifecycle } : {}),
+    ...(memory.lifecycleReason
+      ? { lifecycleReason: memory.lifecycleReason }
+      : {}),
+    ...(memory.lifecycleChangedAt
+      ? { lifecycleChangedAt: memory.lifecycleChangedAt }
+      : {}),
+    ...(memory.lifecycleTransitions
+      ? {
+          lifecycleTransitions: memory.lifecycleTransitions.map((transition) => ({
+            ...transition,
+          })),
+        }
+      : {}),
+    ...(memory.lifecycleMigratedFromLegacy
+      ? { lifecycleMigratedFromLegacy: true }
+      : {}),
+    ...(memory.parentId ? { parentId: memory.parentId } : {}),
+    ...(memory.supersedes ? { supersedes: [...memory.supersedes] } : {}),
+    ...(memory.supersededBy ? { supersededBy: memory.supersededBy } : {}),
+    ...(memory.relatedIds ? { relatedIds: [...memory.relatedIds] } : {}),
     title: memory.title,
     content: memory.content,
     concepts: memory.concepts ?? [],

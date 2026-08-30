@@ -25,6 +25,7 @@ import { isUnsourced } from "./provenance.js";
 
 // Don't hash enormous files; treat them as unhashed (existence-only).
 const MAX_HASH_BYTES = 2_000_000;
+const SHA256_RE = /^[a-f0-9]{64}$/;
 
 const UTF8 = new TextDecoder("utf-8", { fatal: true });
 
@@ -115,9 +116,40 @@ export type VerifyStatus =
   | "sourced_unverified"
   | "stale"
   | "unsourced";
+
+/** Capture evidence quality, independent of what the live checkout looks like. */
+export type EvidenceTrust = "verified" | "sourced" | "unsourced";
+/** The live relationship between capture commitments and source bytes. */
+export type LiveSourceStatus =
+  | "matched"
+  | "cosmetic_drift"
+  | "drifted"
+  | "missing"
+  | "unknown";
+
 export interface Verdict {
+  /** Compatibility verdict retained for existing clients; cosmetic is additive. */
   status: VerifyStatus;
+  /** Compatibility summary reason retained for existing clients. */
   reason: string;
+  evidenceTrust: EvidenceTrust;
+  evidenceReason: string;
+  sourceStatus: LiveSourceStatus;
+  sourceReason: string;
+}
+
+/** Classify only the capture evidence. This does not read the checkout. */
+export function evidenceTrustOf(prov: Provenance | undefined): EvidenceTrust {
+  if (isUnsourced(prov)) return "unsourced";
+  const files = prov?.files ?? [];
+  const hashes = prov?.fileHashes ?? {};
+  return files.length > 0 &&
+    prov?.mixedTrust !== true &&
+    files.every(
+      (file) => typeof hashes[file] === "string" && SHA256_RE.test(hashes[file]!),
+    )
+    ? "verified"
+    : "sourced";
 }
 
 export function classifyProvenance(
@@ -137,8 +169,17 @@ export function classifyProvenance(
     verifyAgainstRoot?: boolean;
   },
 ): Verdict {
+  const evidenceTrust = evidenceTrustOf(prov);
   if (isUnsourced(prov)) {
-    return { status: "unsourced", reason: "no file, command, or user-confirmation evidence" };
+    const reason = "no file, command, or user-confirmation evidence";
+    return {
+      status: "unsourced",
+      reason,
+      evidenceTrust: "unsourced",
+      evidenceReason: reason,
+      sourceStatus: "unknown",
+      sourceReason: "no source evidence was captured",
+    };
   }
   const files = prov?.files ?? [];
   const hashes = prov?.fileHashes ?? {};
@@ -190,10 +231,7 @@ export function classifyProvenance(
     if (!current) {
       unchecked++; // can't hash now (e.g. grew past the cap) -> unverified
     } else if (recordedRaw && current.raw === recordedRaw) {
-      if (
-        recordedNormalized &&
-        current.normalized !== recordedNormalized
-      ) {
+      if (recordedNormalized && current.normalized !== recordedNormalized) {
         changed.push(f); // inconsistent trust-bearing commitments fail closed
       } else {
         exactMatched++;
@@ -212,7 +250,18 @@ export function classifyProvenance(
     const parts: string[] = [];
     if (deleted.length > 0) parts.push(`deleted: ${deleted.slice(0, 2).join(", ")}`);
     if (changed.length > 0) parts.push(`changed: ${changed.slice(0, 2).join(", ")}`);
-    return { status: "stale", reason: `references files that no longer match (${parts.join("; ")})` };
+    const reason = `references files that no longer match (${parts.join("; ")})`;
+    return {
+      status: "stale",
+      reason,
+      evidenceTrust,
+      evidenceReason:
+        evidenceTrust === "verified"
+          ? "all declared source files carry capture-time raw-byte commitments"
+          : "the memory is sourced, but its evidence is incomplete or not fully hash-backed",
+      sourceStatus: deleted.length > 0 ? "missing" : "drifted",
+      sourceReason: reason,
+    };
   }
   // Mixed-trust content carries material its file evidence does not cover —
   // a handoff digest embedding an unsourced prompt, or a capture whose file
@@ -220,34 +269,75 @@ export function classifyProvenance(
   // "verified" for the whole memory. Drift above still proves it stale;
   // matching hashes only ever earn "sourced".
   if (prov?.mixedTrust === true) {
+    const reason =
+      "the memory's evidence is incomplete (mixed or capped at capture); file commitments cannot vouch for all of it";
+    const allCapturedSourcesChecked =
+      files.length > 0 &&
+      unchecked === 0 &&
+      exactMatched + normalizedMatched === files.length;
+    const sourceStatus: LiveSourceStatus = allCapturedSourcesChecked
+      ? normalizedMatched > 0
+        ? "cosmetic_drift"
+        : "matched"
+      : "unknown";
     return {
       status: "sourced_unverified",
-      reason:
-        "the memory's evidence is incomplete (mixed or capped at capture); file hashes cannot vouch for all of it",
+      reason,
+      evidenceTrust: "sourced",
+      evidenceReason: reason,
+      sourceStatus,
+      sourceReason: allCapturedSourcesChecked
+        ? normalizedMatched > 0
+          ? "all captured source commitments match normalized content, but they do not cover the whole memory"
+          : "all captured raw source commitments match, but they do not cover the whole memory"
+        : "the captured source subset cannot establish complete live freshness",
     };
   }
   // Current only when EVERY existing referenced file was content-checked. A
   // single unchecked file still caps the whole memory below content-verified.
   if (unchecked === 0 && normalizedMatched > 0) {
+    const reason =
+      "all referenced files match their captured normalized content; only line endings or trailing whitespace differ";
     return {
       status: "cosmetic",
-      reason:
-        "all referenced files match their captured normalized content; only line endings or trailing whitespace differ",
+      reason,
+      evidenceTrust,
+      evidenceReason:
+        evidenceTrust === "verified"
+          ? "all declared source files carry capture-time raw-byte and normalized-text commitments"
+          : "normalized source commitments match, but capture evidence is not fully raw-hash-backed",
+      sourceStatus: "cosmetic_drift",
+      sourceReason: reason,
     };
   }
   if (unchecked === 0 && exactMatched > 0) {
+    const reason =
+      "all referenced files exist and match their captured hashes exactly (raw bytes)";
     return {
       status: "verified",
-      reason: "all referenced files exist and match their captured hashes exactly (raw bytes)",
+      reason,
+      evidenceTrust,
+      evidenceReason:
+        "all declared source files carry capture-time raw-byte commitments",
+      sourceStatus: "matched",
+      sourceReason: reason,
     };
   }
+  const reason =
+    exactMatched + normalizedMatched > 0
+      ? "some referenced files verified, but others could not be content-checked"
+      : files.length > 0
+        ? "referenced files exist but were not hashed at capture (existence only)"
+        : "sourced by command or user, no file evidence to verify against";
   return {
     status: "sourced_unverified",
-    reason:
-      exactMatched + normalizedMatched > 0
-        ? "some referenced files verified, but others could not be content-checked"
-        : files.length > 0
-          ? "referenced files exist but were not hashed at capture (existence only)"
-          : "sourced by command or user, no file evidence to verify against",
+    reason,
+    evidenceTrust,
+    evidenceReason:
+      evidenceTrust === "verified"
+        ? "all declared source files carry capture-time commitments, but the live source could not be fully checked"
+        : "the memory has source or confirmation evidence without complete file commitments",
+    sourceStatus: "unknown",
+    sourceReason: reason,
   };
 }

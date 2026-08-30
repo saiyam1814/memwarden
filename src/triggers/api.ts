@@ -15,8 +15,14 @@ import {
   getVectorIndex,
   getEmbeddingProvider,
   MANUAL_MEMORY_KINDS,
+  MEMORY_LIFECYCLE_ACTIONS,
 } from "../functions/index.js";
-import type { RememberMemoryInput, RememberMemoryResult } from "../functions/index.js";
+import type {
+  RememberMemoryInput,
+  RememberMemoryResult,
+  TransitionMemoryLifecycleInput,
+  TransitionMemoryLifecycleResult,
+} from "../functions/index.js";
 import { listActiveAgents } from "../functions/fleet.js";
 import { summarizeFirewall } from "../functions/firewall-stats.js";
 import { QuantizedVectorIndex } from "../functions/quantized-vector-index.js";
@@ -359,6 +365,165 @@ export function registerApiTriggers(
     },
   });
 
+  // --- POST /memwarden/lifecycle ----------------------------------
+  // Explicit, bounded semantic transitions. Drift projection remains read-only;
+  // this route is the authenticated decision boundary for dispute/archive/
+  // revoke/restore/revalidation and explicit supersession.
+  sdk.registerFunction(
+    "api::lifecycle-transition",
+    async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const memoryId =
+        asNonEmptyString(body["memory_id"]) ??
+        asNonEmptyString(body["memoryId"]);
+      const action = asNonEmptyString(body["action"]);
+      const reason = asNonEmptyString(body["reason"]);
+      if (!memoryId || !action || !reason) {
+        return {
+          status_code: 400,
+          body: { error: "memory_id, action, and reason are required" },
+        };
+      }
+      if (memoryId.length > 512) {
+        return {
+          status_code: 400,
+          body: { error: "memory_id must be at most 512 characters" },
+        };
+      }
+      if (
+        !MEMORY_LIFECYCLE_ACTIONS.includes(
+          action as (typeof MEMORY_LIFECYCLE_ACTIONS)[number],
+        )
+      ) {
+        return {
+          status_code: 400,
+          body: {
+            error: `action must be one of: ${MEMORY_LIFECYCLE_ACTIONS.join(", ")}`,
+          },
+        };
+      }
+      if (reason.length > 1_000) {
+        return {
+          status_code: 400,
+          body: { error: "reason must be at most 1000 characters" },
+        };
+      }
+      const actor = asNonEmptyString(body["actor"]);
+      if (body["actor"] !== undefined && (!actor || actor.length > 256)) {
+        return {
+          status_code: 400,
+          body: { error: "actor must be a non-empty string of at most 256 characters" },
+        };
+      }
+      const at = asNonEmptyString(body["at"]);
+      if (
+        body["at"] !== undefined &&
+        (!at || !Number.isFinite(Date.parse(at)))
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "at must be a valid date-time string" },
+        };
+      }
+      const root = asNonEmptyString(body["root"]);
+      const successorId =
+        asNonEmptyString(body["successor_id"]) ??
+        asNonEmptyString(body["successorId"]);
+      if (root && root.length > 4_096) {
+        return {
+          status_code: 400,
+          body: { error: "root must be at most 4096 characters" },
+        };
+      }
+      if (successorId && successorId.length > 512) {
+        return {
+          status_code: 400,
+          body: { error: "successor_id must be at most 512 characters" },
+        };
+      }
+      for (const [field, value] of [
+        ["root", body["root"]],
+        ["successor_id", body["successor_id"] ?? body["successorId"]],
+      ] as const) {
+        if (value !== undefined && typeof value !== "string") {
+          return {
+            status_code: 400,
+            body: { error: `${field} must be a string` },
+          };
+        }
+      }
+      const payload: TransitionMemoryLifecycleInput = {
+        memoryId,
+        action: action as TransitionMemoryLifecycleInput["action"],
+        reason,
+        ...(actor ? { actor } : {}),
+        ...(at ? { at } : {}),
+        ...(root ? { root } : {}),
+        ...(successorId ? { successorId } : {}),
+      };
+      const result = await sdk.trigger<
+        TransitionMemoryLifecycleInput,
+        TransitionMemoryLifecycleResult
+      >({
+        function_id: "mem::lifecycle-transition",
+        payload,
+      });
+      if (result.ok) {
+        const lifecycleSummary = (
+          memory: Extract<TransitionMemoryLifecycleResult, { ok: true }>["memory"],
+        ) => ({
+          id: memory.id,
+          version: memory.version,
+          lifecycle: memory.lifecycle,
+          lifecycleReason: memory.lifecycleReason,
+          lifecycleChangedAt: memory.lifecycleChangedAt,
+          observedAt: memory.observedAt,
+          validFrom: memory.validFrom,
+          ...(memory.validTo ? { validTo: memory.validTo } : {}),
+          ...(memory.parentId ? { parentId: memory.parentId } : {}),
+          ...(memory.supersedes ? { supersedes: memory.supersedes } : {}),
+          ...(memory.supersededBy
+            ? { supersededBy: memory.supersededBy }
+            : {}),
+          transitions: memory.lifecycleTransitions?.length ?? 0,
+        });
+        return {
+          status_code: 200,
+          body: {
+            ok: true,
+            memory: lifecycleSummary(result.memory),
+            previous: lifecycleSummary(result.previous),
+            ...(result.successor
+              ? { successor: lifecycleSummary(result.successor) }
+              : {}),
+            effectiveLifecycle: result.effectiveLifecycle,
+            ...(result.sourceStatus
+              ? { sourceStatus: result.sourceStatus }
+              : {}),
+          },
+        };
+      }
+      const status =
+        result.code === "not_found"
+          ? 404
+          : result.code === "write_failed"
+            ? 500
+            : result.code === "invalid_input"
+              ? 400
+              : 409;
+      return { status_code: status, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::lifecycle-transition",
+    config: {
+      api_path: "/memwarden/lifecycle",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
   // --- POST /memwarden/context ------------------------------------
   sdk.registerFunction(
     "api::context",
@@ -416,6 +581,7 @@ export function registerApiTriggers(
         token_budget?: number;
         safe_only?: boolean;
         mode?: string;
+        as_of?: string;
         include_drifted?: boolean;
         trust?: string[];
         include_memories?: boolean;
@@ -479,13 +645,25 @@ export function registerApiTriggers(
       if (
         body["mode"] !== undefined &&
         (typeof body["mode"] !== "string" ||
-          !["current", "historical", "all"].includes(
+          !["current", "historical", "as_of", "all"].includes(
             (body["mode"] as string).trim().toLowerCase(),
           ))
       ) {
         return {
           status_code: 400,
-          body: { error: "mode must be one of: current, historical, all" },
+          body: { error: "mode must be one of: current, historical, as_of, all" },
+        };
+      }
+      if (
+        body["as_of"] !== undefined &&
+        (typeof body["as_of"] !== "string" ||
+          !(body["as_of"] as string).trim() ||
+          (body["as_of"] as string).length > 128 ||
+          !Number.isFinite(Date.parse(body["as_of"] as string)))
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "as_of must be a valid date-time string" },
         };
       }
       if (
@@ -531,13 +709,31 @@ export function registerApiTriggers(
         typeof body["mode"] === "string"
           ? body["mode"].trim().toLowerCase()
           : undefined;
+      if (
+        normalizedMode !== undefined &&
+        normalizedMode !== "as_of" &&
+        body["as_of"] !== undefined
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "as_of is only compatible with mode=as_of" },
+        };
+      }
+      if (normalizedMode === "as_of" && body["as_of"] === undefined) {
+        return {
+          status_code: 400,
+          body: { error: "mode=as_of requires as_of" },
+        };
+      }
+      const requestedMode =
+        normalizedMode ?? (body["as_of"] !== undefined ? "as_of" : undefined);
       const aliasMode =
         body["include_drifted"] === true
           ? "all"
           : body["include_drifted"] === false
             ? "current"
             : undefined;
-      if (normalizedMode && aliasMode && normalizedMode !== aliasMode) {
+      if (requestedMode && aliasMode && requestedMode !== aliasMode) {
         return {
           status_code: 400,
           body: {
@@ -548,7 +744,7 @@ export function registerApiTriggers(
       }
       if (
         body["safe_only"] === true &&
-        ((normalizedMode !== undefined && normalizedMode !== "current") ||
+        ((requestedMode !== undefined && requestedMode !== "current") ||
           (aliasMode !== undefined && aliasMode !== "current"))
       ) {
         return {
@@ -576,6 +772,7 @@ export function registerApiTriggers(
         token_budget?: number;
         safe_only?: boolean;
         mode?: string;
+        as_of?: string;
         include_drifted?: boolean;
         trust?: string[];
         include_memories?: boolean;
@@ -590,7 +787,8 @@ export function registerApiTriggers(
       if (body["token_budget"] !== undefined)
         payload.token_budget = body["token_budget"] as number;
       if (body["safe_only"] === true) payload.safe_only = true;
-      if (normalizedMode !== undefined) payload.mode = normalizedMode;
+      if (requestedMode !== undefined) payload.mode = requestedMode;
+      if (typeof body["as_of"] === "string") payload.as_of = body["as_of"];
       if (typeof body["include_drifted"] === "boolean")
         payload.include_drifted = body["include_drifted"];
       if (Array.isArray(body["trust"]))

@@ -14,14 +14,32 @@ import { isAbsolute } from "node:path";
 import type { ISdk } from "../kernel/index.js";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
-import type { CanonRecord, Memory, Provenance } from "./types.js";
+import type {
+  CanonRecord,
+  Memory,
+  MemoryLifecycleState,
+  Provenance,
+} from "./types.js";
 import { canonicalizePath } from "./paths.js";
 import { projectKey } from "./git-identity.js";
 import {
   projectIdentityMatchesPath,
   resolveMemoryIdentity,
 } from "./memory-identity.js";
-import { isMemoryRecallable, memoryToObservation } from "./memory-utils.js";
+import {
+  isMemoryExpired,
+  isMemoryRecallable,
+  memoryToObservation,
+} from "./memory-utils.js";
+import {
+  MEMORY_LIFECYCLE_ACTIONS,
+  MEMORY_LIFECYCLE_STATES,
+  initializeMemoryLifecycle,
+  isValidRecordedLifecycleTransition,
+  memoryLifecycleMetadata,
+  migrateLegacyMemoryLifecycle,
+  persistedLifecycleOf,
+} from "./memory-lifecycle.js";
 import {
   classifyProvenance,
   hashFileCommitments,
@@ -46,6 +64,11 @@ const MEMORY_TYPES = new Set<Memory["type"]>([
 ]);
 const SHA256_RE = /^[a-f0-9]{64}$/;
 const UNSAFE_MAP_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+const LIFECYCLE_STATES = new Set<string>(MEMORY_LIFECYCLE_STATES);
+const LIFECYCLE_ACTIONS = new Set<string>([
+  "create",
+  ...MEMORY_LIFECYCLE_ACTIONS,
+]);
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -87,6 +110,87 @@ export function isPortableCanonPath(value: unknown): value is string {
     UNSAFE_MAP_KEYS.has(value)
   ) {
     return false;
+  }
+  return true;
+}
+
+function isIso(value: unknown): value is string {
+  return isBoundedString(value, 128) && Number.isFinite(Date.parse(value));
+}
+
+function isIdArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= 256 &&
+    value.every((item) => isBoundedString(item, 512)) &&
+    new Set(value).size === value.length
+  );
+}
+
+function isValidityIntervals(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > 100) return false;
+  let previous = -Infinity;
+  let previousTo = -Infinity;
+  for (const item of value) {
+    if (!isObject(item) || !isIso(item["validFrom"])) return false;
+    const from = Date.parse(item["validFrom"] as string);
+    if (from < previous || from < previousTo) return false;
+    previous = from;
+    if (item["validTo"] !== undefined) {
+      if (!isIso(item["validTo"])) return false;
+      const to = Date.parse(item["validTo"] as string);
+      if (to < from) return false;
+      previousTo = to;
+    } else {
+      previousTo = Infinity;
+    }
+    if (
+      item["reason"] !== undefined &&
+      !isBoundedString(item["reason"], 1_000)
+    ) {
+      return false;
+    }
+    if (item["inferred"] !== undefined && item["inferred"] !== true) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isLifecycleTransitions(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > 100) return false;
+  let previousAt = -Infinity;
+  for (const item of value) {
+    if (!isObject(item)) return false;
+    if (
+      item["from"] !== null &&
+      !LIFECYCLE_STATES.has(String(item["from"]))
+    ) {
+      return false;
+    }
+    if (!LIFECYCLE_STATES.has(String(item["to"]))) return false;
+    if (!LIFECYCLE_ACTIONS.has(String(item["action"]))) return false;
+    if (!isIso(item["at"]) || !isBoundedString(item["reason"], 1_000)) {
+      return false;
+    }
+    const at = Date.parse(item["at"] as string);
+    if (at < previousAt) return false;
+    previousAt = at;
+    if (
+      item["actor"] !== undefined &&
+      !isBoundedString(item["actor"], 256)
+    ) {
+      return false;
+    }
+    if (
+      item["supersededBy"] !== undefined &&
+      !isBoundedString(item["supersededBy"], 512)
+    ) {
+      return false;
+    }
+    if (!isValidRecordedLifecycleTransition(item)) {
+      return false;
+    }
   }
   return true;
 }
@@ -183,6 +287,88 @@ export function isCanonRecord(value: unknown): value is CanonRecord {
   ) {
     return false;
   }
+  if (
+    value["version"] !== undefined &&
+    (!Number.isInteger(value["version"]) || (value["version"] as number) < 1)
+  ) {
+    return false;
+  }
+  for (const key of [
+    "observedAt",
+    "validFrom",
+    "validTo",
+    "lifecycleChangedAt",
+  ] as const) {
+    if (value[key] !== undefined && !isIso(value[key])) return false;
+  }
+  if (
+    value["validFrom"] !== undefined &&
+    value["validTo"] !== undefined &&
+    Date.parse(value["validTo"] as string) <
+      Date.parse(value["validFrom"] as string)
+  ) {
+    return false;
+  }
+  if (
+    value["validityIntervals"] !== undefined &&
+    !isValidityIntervals(value["validityIntervals"])
+  ) {
+    return false;
+  }
+  if (
+    value["lifecycle"] !== undefined &&
+    !LIFECYCLE_STATES.has(String(value["lifecycle"]))
+  ) {
+    return false;
+  }
+  if (
+    value["lifecycleReason"] !== undefined &&
+    !isBoundedString(value["lifecycleReason"], 1_000)
+  ) {
+    return false;
+  }
+  if (
+    value["lifecycleTransitions"] !== undefined &&
+    !isLifecycleTransitions(value["lifecycleTransitions"])
+  ) {
+    return false;
+  }
+  if (
+    value["lifecycle"] !== undefined &&
+    Array.isArray(value["lifecycleTransitions"]) &&
+    value["lifecycleTransitions"].length > 0 &&
+    (value["lifecycleTransitions"].at(-1) as Record<string, unknown>)["to"] !==
+      value["lifecycle"]
+  ) {
+    return false;
+  }
+  if (
+    value["lifecycleMigratedFromLegacy"] !== undefined &&
+    value["lifecycleMigratedFromLegacy"] !== true
+  ) {
+    return false;
+  }
+  if (
+    value["sourceCommit"] !== undefined &&
+    !isBoundedString(value["sourceCommit"], 256)
+  ) {
+    return false;
+  }
+  for (const key of ["parentId", "supersededBy"] as const) {
+    if (value[key] !== undefined && !isBoundedString(value[key], 512)) {
+      return false;
+    }
+  }
+  if (
+    value["supersededBy"] !== undefined &&
+    value["lifecycle"] !== undefined &&
+    value["lifecycle"] !== "superseded"
+  ) {
+    return false;
+  }
+  for (const key of ["supersedes", "relatedIds"] as const) {
+    if (value[key] !== undefined && !isIdArray(value[key])) return false;
+  }
   return true;
 }
 
@@ -250,9 +436,10 @@ export async function listCanonMemories(
       (memory) =>
         memory &&
         typeof memory.id === "string" &&
-        isMemoryRecallable(memory) &&
+        !isMemoryExpired(memory) &&
         memoryMatchesCanonProject(memory, identity),
     )
+    .map((memory) => migrateLegacyMemoryLifecycle(memory))
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const afterCursor = input.cursor
     ? matching.filter((memory) => memory.id > input.cursor!)
@@ -279,7 +466,10 @@ export type CanonImportResult =
       imported: true;
       id: string;
       projectKey: string;
+      /** Local source verdict, independent of semantic lifecycle/attestation. */
       verdict: "verified" | "cosmetic";
+      lifecycle: MemoryLifecycleState;
+      attestation: "canon-imported" | "canon-reanchored";
     }
   | {
       ok: false;
@@ -358,6 +548,20 @@ export async function importCanonRecord(
       id: record.id,
     };
   }
+  if (
+    existing &&
+    (existing.type !== record.type ||
+      existing.title !== record.title ||
+      existing.content !== record.content)
+  ) {
+    return {
+      ok: false,
+      code: "id_conflict",
+      error:
+        "Canon content changed under an existing Memory id; publish a new id with explicit supersession so the old version remains reconstructible",
+      id: record.id,
+    };
+  }
 
   const canonProjectKey = record.projectKey ?? identity.key;
   const provenance: Provenance = {
@@ -399,10 +603,44 @@ export async function importCanonRecord(
   }
 
   const now = new Date().toISOString();
+  const importedLifecycle =
+    record.lifecycle ?? (record.supersededBy ? "superseded" : undefined);
+  const lifecycleFields = importedLifecycle
+    ? {
+        ...(record.observedAt ? { observedAt: record.observedAt } : {}),
+        ...(record.validFrom ? { validFrom: record.validFrom } : {}),
+        ...(record.validTo ? { validTo: record.validTo } : {}),
+        ...(record.validityIntervals
+          ? { validityIntervals: record.validityIntervals.map((item) => ({ ...item })) }
+          : {}),
+        lifecycle: importedLifecycle,
+        lifecycleReason:
+          record.lifecycleReason ?? "lifecycle imported from Canon",
+        lifecycleChangedAt:
+          record.lifecycleChangedAt ?? record.validTo ?? record.validFrom ?? now,
+        ...(record.lifecycleTransitions
+          ? {
+              lifecycleTransitions: record.lifecycleTransitions.map((item) => ({
+                ...item,
+              })),
+            }
+          : {}),
+        ...(record.lifecycleMigratedFromLegacy
+          ? { lifecycleMigratedFromLegacy: true as const }
+          : {}),
+      }
+    : existing
+      ? memoryLifecycleMetadata(existing)
+      : initializeMemoryLifecycle(
+          record.observedAt ?? record.promotedAt,
+          "Canon memory imported",
+          record.capturedBy?.agentId ?? record.capturedBy?.host,
+        );
   const memory: Memory = {
     ...(existing ?? {}),
+    ...lifecycleFields,
     id: record.id,
-    createdAt: existing?.createdAt ?? record.promotedAt,
+    createdAt: existing?.createdAt ?? record.observedAt ?? record.promotedAt,
     updatedAt: now,
     type: record.type,
     title: record.title,
@@ -411,8 +649,15 @@ export async function importCanonRecord(
     files: [...record.files],
     sessionIds: existing?.sessionIds ?? [],
     strength: existing?.strength ?? 5,
-    version: (existing?.version ?? 0) + 1,
-    isLatest: true,
+    version: record.version ?? (existing?.version ?? 0) + 1,
+    isLatest: lifecycleFields.lifecycle !== "superseded",
+    ...(record.sourceCommit ? { sourceCommit: record.sourceCommit } : {}),
+    ...(record.parentId ? { parentId: record.parentId } : {}),
+    ...(record.supersedes
+      ? { supersedes: [...record.supersedes] }
+      : {}),
+    ...(record.supersededBy ? { supersededBy: record.supersededBy } : {}),
+    ...(record.relatedIds ? { relatedIds: [...record.relatedIds] } : {}),
     projectPath: identity.root,
     projectKey: canonProjectKey,
     captureCwd: identity.root,
@@ -425,14 +670,16 @@ export async function importCanonRecord(
   await kv.set(KV.memories, memory.id, memory);
   const index = getSearchIndex();
   index.remove(memory.id);
-  index.add(memoryToObservation(memory));
   vectorIndexRemove(memory.id);
-  await vectorIndexAddGuarded(
-    memory.id,
-    memory.sessionIds[0] ?? "canon",
-    `${memory.title} ${memory.content}`,
-    { kind: "memory", logId: memory.id },
-  );
+  if (isMemoryRecallable(memory)) {
+    index.add(memoryToObservation(memory));
+    await vectorIndexAddGuarded(
+      memory.id,
+      memory.sessionIds[0] ?? "canon",
+      `${memory.title} ${memory.content}`,
+      { kind: "memory", logId: memory.id },
+    );
+  }
 
   return {
     ok: true,
@@ -440,6 +687,10 @@ export async function importCanonRecord(
     id: memory.id,
     projectKey: canonProjectKey,
     verdict: verdict.status,
+    lifecycle: persistedLifecycleOf(memory),
+    attestation: record.reanchoredAt
+      ? "canon-reanchored"
+      : "canon-imported",
   };
 }
 

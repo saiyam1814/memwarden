@@ -17,7 +17,13 @@ import {
   vectorIndexAddGuarded,
   vectorIndexRemove,
 } from "./search.js";
-import { memoryToObservation } from "./memory-utils.js";
+import { isMemoryRecallable, memoryToObservation } from "./memory-utils.js";
+import {
+  applyMemoryLifecycleTransition,
+  initializeMemoryLifecycle,
+  migrateLegacyMemoryLifecycle,
+  persistedLifecycleOf,
+} from "./memory-lifecycle.js";
 import { withKeyedLock } from "./keyed-mutex.js";
 
 export const MANUAL_MEMORY_KINDS = [
@@ -248,6 +254,12 @@ export async function rememberMemory(
     const previous = supersedes
       ? await kv.get<Memory>(KV.memories, supersedes).catch(() => null)
       : null;
+    if (existing && persistedLifecycleOf(existing) !== "active") {
+      return {
+        success: false,
+        reason: `memory ${id} is ${persistedLifecycleOf(existing)}; use an explicit lifecycle transition or create a superseding version`,
+      };
+    }
     if (supersedes && !previous) {
       return { success: false, reason: `no memory with id ${supersedes}` };
     }
@@ -282,6 +294,48 @@ export async function rememberMemory(
         provenance.fileHashesNormalized = commitments.fileHashesNormalized;
       }
     }
+    if (existing) {
+      const priorFiles = [...(existing.provenance?.files ?? existing.files)].sort();
+      const nextFiles = [...(provenance.files ?? [])].sort();
+      const priorHashes = Object.entries(existing.provenance?.fileHashes ?? {}).sort(
+        ([left], [right]) => (left < right ? -1 : left > right ? 1 : 0),
+      );
+      const nextHashes = Object.entries(provenance.fileHashes ?? {}).sort(
+        ([left], [right]) => (left < right ? -1 : left > right ? 1 : 0),
+      );
+      const priorNormalized = Object.entries(
+        existing.provenance?.fileHashesNormalized ?? {},
+      ).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+      const nextNormalized = Object.entries(
+        provenance.fileHashesNormalized ?? {},
+      ).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+      const sameFiles = JSON.stringify(priorFiles) === JSON.stringify(nextFiles);
+      const rawEqual = JSON.stringify(priorHashes) === JSON.stringify(nextHashes);
+      const normalizedEqual =
+        priorNormalized.length === priorFiles.length &&
+        JSON.stringify(priorNormalized) === JSON.stringify(nextNormalized);
+      if (!sameFiles || (!rawEqual && !normalizedEqual)) {
+        return {
+          success: false,
+          reason:
+            "an existing memory with this content has different source evidence; use revalidate so the prior evidence version is preserved",
+        };
+      }
+      // LF/CRLF-only conversion is current, not a new evidence version. Keep
+      // the original commitments so deduplication never rewrites capture history.
+      if (!rawEqual && normalizedEqual && existing.provenance) {
+        if (existing.provenance.fileHashes) {
+          provenance.fileHashes = existing.provenance.fileHashes;
+        }
+        if (existing.provenance.fileHashesNormalized) {
+          provenance.fileHashesNormalized =
+            existing.provenance.fileHashesNormalized;
+        }
+        if (existing.provenance.capturedAt) {
+          provenance.capturedAt = existing.provenance.capturedAt;
+        }
+      }
+    }
 
     const supersededIds = Array.from(
       new Set([...(existing?.supersedes ?? []), ...(supersedes ? [supersedes] : [])]),
@@ -289,7 +343,38 @@ export async function rememberMemory(
     const sessionIds = Array.from(
       new Set([...(existing?.sessionIds ?? []), ...(sessionId ? [sessionId] : [])]),
     );
+    const migratedExisting = existing
+      ? migrateLegacyMemoryLifecycle(existing)
+      : null;
+    const lifecycleFields = migratedExisting
+      ? {
+          ...(migratedExisting.observedAt
+            ? { observedAt: migratedExisting.observedAt }
+            : {}),
+          ...(migratedExisting.validFrom
+            ? { validFrom: migratedExisting.validFrom }
+            : {}),
+          ...(migratedExisting.validTo
+            ? { validTo: migratedExisting.validTo }
+            : {}),
+          ...(migratedExisting.validityIntervals
+            ? { validityIntervals: migratedExisting.validityIntervals }
+            : {}),
+          lifecycle: migratedExisting.lifecycle!,
+          lifecycleReason: migratedExisting.lifecycleReason!,
+          ...(migratedExisting.lifecycleChangedAt
+            ? { lifecycleChangedAt: migratedExisting.lifecycleChangedAt }
+            : {}),
+          ...(migratedExisting.lifecycleTransitions
+            ? { lifecycleTransitions: migratedExisting.lifecycleTransitions }
+            : {}),
+          ...(migratedExisting.lifecycleMigratedFromLegacy
+            ? { lifecycleMigratedFromLegacy: true as const }
+            : {}),
+        }
+      : initializeMemoryLifecycle(timestamp, "manual memory created", agent);
     const memory: Memory = {
+      ...lifecycleFields,
       id,
       createdAt: existing?.createdAt ?? timestamp,
       updatedAt: timestamp,
@@ -300,10 +385,15 @@ export async function rememberMemory(
       files,
       sessionIds,
       strength: 10,
-      version: (existing?.version ?? 0) + 1,
+      version: existing
+        ? existing.version + 1
+        : previous
+          ? previous.version + 1
+          : 1,
       origin: "manual",
+      ...(previous ? { parentId: previous.parentId ?? previous.id } : {}),
       ...(supersededIds.length > 0 ? { supersedes: supersededIds } : {}),
-      isLatest: true,
+      isLatest: existing?.isLatest !== false,
       retention: expiresAt ? "expires" : "durable",
       ...(expiresAt ? { forgetAfter: expiresAt } : {}),
       ...(agent ? { agentId: agent } : {}),
@@ -312,19 +402,34 @@ export async function rememberMemory(
       captureCwd: projectPath,
       provenance,
     };
-    const archived = previous
-      ? {
-          ...previous,
-          updatedAt: timestamp,
-          isLatest: false,
+    let archived: Memory | null = null;
+    if (previous) {
+      try {
+        archived = applyMemoryLifecycleTransition(previous, {
+          action: "supersede",
+          reason: `Superseded by ${id}`,
+          at: timestamp,
+          ...(agent ? { actor: agent } : {}),
           supersededBy: id,
-        }
-      : null;
+        });
+      } catch (err) {
+        return {
+          success: false,
+          reason: err instanceof Error ? err.message : String(err),
+        };
+      }
+    }
 
     try {
-      await kv.set(KV.memories, id, memory);
+      // Fail closed under a concurrent read: close the predecessor before the
+      // successor becomes current. If successor installation fails, restore
+      // the predecessor and the prior successor slot below.
       if (archived) await kv.set(KV.memories, archived.id, archived);
+      await kv.set(KV.memories, id, memory);
     } catch (err) {
+      if (archived && previous) {
+        await kv.set(KV.memories, previous.id, previous).catch(() => undefined);
+      }
       if (existing) await kv.set(KV.memories, id, existing).catch(() => undefined);
       else await kv.delete(KV.memories, id).catch(() => undefined);
       return {
@@ -339,14 +444,16 @@ export async function rememberMemory(
     }
     const observation = memoryToObservation(memory);
     getSearchIndex().remove(id);
-    getSearchIndex().add(observation);
     vectorIndexRemove(id);
-    await vectorIndexAddGuarded(
-      id,
-      observation.sessionId,
-      `${memory.title} ${memory.content}`,
-      { kind: "memory", logId: id },
-    );
+    if (isMemoryRecallable(memory)) {
+      getSearchIndex().add(observation);
+      await vectorIndexAddGuarded(
+        id,
+        observation.sessionId,
+        `${memory.title} ${memory.content}`,
+        { kind: "memory", logId: id },
+      );
+    }
 
     return {
       success: true,

@@ -51,7 +51,12 @@ import {
   vectorIndexRemove,
   vectorIndexAddGuarded,
 } from "./search.js";
-import { memoryToObservation } from "./memory-utils.js";
+import { isMemoryRecallable, memoryToObservation } from "./memory-utils.js";
+import {
+  initializeMemoryLifecycle,
+  memoryLifecycleMetadata,
+  persistedLifecycleOf,
+} from "./memory-lifecycle.js";
 import {
   resolveMemoryIdentity,
   sessionProjectIdentity,
@@ -505,6 +510,13 @@ async function distillMembersUnlocked(
   });
   if (!slot) return null;
   const { memId, existing } = slot;
+  if (existing && persistedLifecycleOf(existing) !== "active") {
+    logger.info("distill: preserving non-active memory and source observations", {
+      memId,
+      lifecycle: persistedLifecycleOf(existing),
+    });
+    return null;
+  }
   const existingIdentity = existing
     ? resolveMemoryIdentity(existing)
     : undefined;
@@ -550,8 +562,16 @@ async function distillMembersUnlocked(
     newest.provenance?.cwd ??
     newestMember.captureCwd ??
     existingIdentity?.captureCwd;
+  const lifecycleFields = existing
+    ? memoryLifecycleMetadata(existing)
+    : initializeMemoryLifecycle(
+        newest.provenance?.capturedAt ?? newest.timestamp ?? nowIso,
+        "distilled memory created",
+        newest.agentId,
+      );
 
   const memory: Memory = {
+    ...lifecycleFields,
     id: memId,
     createdAt: existing?.createdAt ?? nowIso,
     updatedAt: nowIso,
@@ -568,7 +588,7 @@ async function distillMembersUnlocked(
     sourceObservationIds,
     claimFingerprint: identity.claimFingerprint,
     evidenceFingerprint: identity.evidenceFingerprint,
-    isLatest: true,
+    isLatest: existing?.isLatest !== false,
     ...(newest.subtitle !== undefined
       ? { subtitle: normalizeClaimText(newest.subtitle) }
       : {}),
@@ -617,19 +637,21 @@ async function distillMembersUnlocked(
   // refresh unexpectedly fails, keep every source and retry the whole handoff.
   try {
     idx.remove(memId);
-    idx.add(memoryToObservation(memory));
     vectorIndexRemove(memId);
-    await vectorIndexAddGuarded(
-      memId,
-      memory.sessionIds[0] ?? "memory",
-      [memory.title, memory.subtitle, memory.content, ...(memory.facts ?? [])]
-        .filter(
-          (part): part is string =>
-            typeof part === "string" && part.length > 0,
-        )
-        .join(" "),
-      { kind: "memory", logId: memId },
-    );
+    if (isMemoryRecallable(memory)) {
+      idx.add(memoryToObservation(memory));
+      await vectorIndexAddGuarded(
+        memId,
+        memory.sessionIds[0] ?? "memory",
+        [memory.title, memory.subtitle, memory.content, ...(memory.facts ?? [])]
+          .filter(
+            (part): part is string =>
+              typeof part === "string" && part.length > 0,
+          )
+          .join(" "),
+        { kind: "memory", logId: memId },
+      );
+    }
   } catch (err) {
     logger.warn("distill: failed to index successor memory", {
       memId,

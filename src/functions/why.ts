@@ -6,7 +6,12 @@
 
 import type { ISdk } from "../kernel/index.js";
 import type { StateKV } from "../state/kv.js";
-import type { CompressedObservation, Memory, Session } from "./types.js";
+import type {
+  CompressedObservation,
+  Memory,
+  MemoryLifecycleTransition,
+  Session,
+} from "./types.js";
 import { KV } from "../state/schema.js";
 import { classifyProvenance, type Verdict } from "./verify.js";
 import { memoryToObservation } from "./memory-utils.js";
@@ -17,6 +22,10 @@ import {
 } from "./memory-identity.js";
 import { getRecallPolicy } from "./config.js";
 import { trustLabelOf, type TrustLabel } from "./search.js";
+import {
+  lifecycleProjection,
+  validityIntervalsOf,
+} from "./memory-lifecycle.js";
 
 export interface WhyResult {
   found: boolean;
@@ -38,6 +47,35 @@ export interface WhyResult {
     projectKey?: string;
   };
   verdict?: Verdict & { trust: TrustLabel };
+  evidenceVerdict?: {
+    status: Verdict["evidenceTrust"];
+    reason: string;
+  };
+  sourceStatus?: {
+    status: Verdict["sourceStatus"];
+    reason: string;
+  };
+  lifecycle?: {
+    persisted: ReturnType<typeof lifecycleProjection>["persisted"];
+    effective: ReturnType<typeof lifecycleProjection>["effective"];
+    transitionReason: string;
+    effectiveReason: string;
+    changedAt?: string;
+    transitions: MemoryLifecycleTransition[];
+  };
+  validity?: {
+    observedAt: string;
+    validFrom?: string;
+    validTo?: string;
+    reconstruction: "recorded" | "legacy_inferred" | "unavailable";
+    sourceCommit?: string;
+  };
+  attestation?: {
+    status: "canon-imported" | "canon-reanchored";
+    promotedAt: string;
+    reanchoredBy?: string;
+    reanchoredAt?: string;
+  };
   /** Would this memory be auto-injected under the current recall policy? */
   injectable?: boolean;
   provenance?: CompressedObservation["provenance"];
@@ -61,16 +99,108 @@ function adviceFor(verdict: Verdict, injectable: boolean): string {
         : "Sourced but not hash-verified — withheld under verified-only policy. Set MEMWARDEN_RECALL_POLICY=balanced to allow labeled injection.";
     case "stale":
       return (
-        "Refused: source files changed or were deleted since capture. " +
-        "Forget it with `memwarden forget " +
-        "<id>`, or re-capture the fact after confirming the new truth. " +
-        "Bulk: `memwarden doctor . --fix-stale`."
+        "Refused from current recall: source files changed or disappeared, so the effective lifecycle is needs_revalidation. " +
+        "Revalidate the claim, supersede it with current truth, or archive it; use forget only for privacy or deliberate erasure."
       );
     case "unsourced":
       return injectable
         ? "No evidence trail — injected under balanced policy, labeled [unsourced]."
         : "No evidence trail — withheld under verified-only policy.";
   }
+}
+
+function explanationFields(
+  obs: CompressedObservation,
+  memory: Memory | null,
+  verdict: Verdict,
+): Pick<
+  WhyResult,
+  | "verdict"
+  | "evidenceVerdict"
+  | "sourceStatus"
+  | "lifecycle"
+  | "validity"
+  | "attestation"
+  | "injectable"
+  | "provenance"
+  | "advice"
+> {
+  const projection = lifecycleProjection(
+    memory,
+    verdict.sourceStatus,
+    verdict.evidenceTrust === "verified" && verdict.sourceStatus === "unknown",
+  );
+  const policy = getRecallPolicy();
+  const injectable =
+    projection.effective === "active" &&
+    verdict.sourceStatus !== "drifted" &&
+    verdict.sourceStatus !== "missing" &&
+    (policy === "balanced" ||
+      (verdict.evidenceTrust === "verified" &&
+        (verdict.status === "verified" || verdict.status === "cosmetic")));
+  const intervals = memory ? validityIntervalsOf(memory) : [];
+  const latest = intervals[intervals.length - 1];
+  const observedAt =
+    memory?.observedAt ?? obs.provenance?.capturedAt ?? obs.timestamp;
+  const canon = obs.provenance?.canon;
+  return {
+    verdict: { ...verdict, trust: trustLabelOf(verdict) },
+    evidenceVerdict: {
+      status: verdict.evidenceTrust,
+      reason: verdict.evidenceReason,
+    },
+    sourceStatus: {
+      status: verdict.sourceStatus,
+      reason: verdict.sourceReason,
+    },
+    lifecycle: {
+      persisted: projection.persisted,
+      effective: projection.effective,
+      transitionReason: projection.persistedReason,
+      effectiveReason: projection.effectiveReason,
+      ...(memory?.lifecycleChangedAt
+        ? { changedAt: memory.lifecycleChangedAt }
+        : {}),
+      transitions: [...(memory?.lifecycleTransitions ?? [])],
+    },
+    validity: {
+      observedAt,
+      ...(latest?.validFrom
+        ? { validFrom: latest.validFrom }
+        : { validFrom: observedAt }),
+      ...(latest?.validTo ? { validTo: latest.validTo } : {}),
+      reconstruction: memory
+        ? intervals.length === 0
+          ? "unavailable"
+          : intervals.some((interval) => interval.inferred)
+            ? "legacy_inferred"
+            : "recorded"
+        : "unavailable",
+      ...(memory?.sourceCommit ? { sourceCommit: memory.sourceCommit } : {}),
+    },
+    ...(canon
+      ? {
+          attestation: {
+            status: canon.reanchoredAt
+              ? ("canon-reanchored" as const)
+              : ("canon-imported" as const),
+            promotedAt: canon.promotedAt,
+            ...(canon.reanchoredBy
+              ? { reanchoredBy: canon.reanchoredBy }
+              : {}),
+            ...(canon.reanchoredAt
+              ? { reanchoredAt: canon.reanchoredAt }
+              : {}),
+          },
+        }
+      : {}),
+    injectable,
+    provenance: obs.provenance,
+    advice:
+      projection.effective !== "active" && verdict.status !== "stale"
+        ? `Withheld from current recall: lifecycle is ${projection.effective}. ${projection.effectiveReason}`
+        : adviceFor(verdict, injectable),
+  };
 }
 
 export function registerWhyFunction(sdk: ISdk, kv: StateKV): void {
@@ -111,13 +241,7 @@ export function registerWhyFunction(sdk: ISdk, kv: StateKV): void {
           // the caller's checkout path actually read by the verifier.
           verifyAgainstRoot: projectIdentityMatchesPath(identity, root),
         });
-        const trust = trustLabelOf(verdict);
-        const policy = getRecallPolicy();
-        const injectable =
-          verdict.status !== "stale" &&
-          (policy === "balanced" ||
-            verdict.status === "verified" ||
-            verdict.status === "cosmetic");
+        const explanation = explanationFields(obs, null, verdict);
         return {
           found: true,
           observationId,
@@ -137,10 +261,7 @@ export function registerWhyFunction(sdk: ISdk, kv: StateKV): void {
             ...(s.agentId ? { agentId: s.agentId } : {}),
             ...(s.projectKey ? { projectKey: s.projectKey } : {}),
           },
-          verdict: { ...verdict, trust },
-          injectable,
-          provenance: obs.provenance,
-          advice: adviceFor(verdict, injectable).replace("<id>", observationId),
+          ...explanation,
         };
       }
 
@@ -152,13 +273,7 @@ export function registerWhyFunction(sdk: ISdk, kv: StateKV): void {
         const verdict = classifyProvenance(obs.provenance, root, {
           verifyAgainstRoot: projectIdentityMatchesPath(identity, root),
         });
-        const trust = trustLabelOf(verdict);
-        const policy = getRecallPolicy();
-        const injectable =
-          verdict.status !== "stale" &&
-          (policy === "balanced" ||
-            verdict.status === "verified" ||
-            verdict.status === "cosmetic");
+        const explanation = explanationFields(obs, mem, verdict);
         const sourceSession = identity.sourceSession;
         return {
           found: true,
@@ -186,10 +301,7 @@ export function registerWhyFunction(sdk: ISdk, kv: StateKV): void {
                 },
               }
             : {}),
-          verdict: { ...verdict, trust },
-          injectable,
-          provenance: obs.provenance,
-          advice: adviceFor(verdict, injectable).replace("<id>", observationId),
+          ...explanation,
         };
       }
 

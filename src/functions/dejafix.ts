@@ -20,7 +20,7 @@
 import type { ISdk } from "../kernel/index.js";
 import type { StateKV } from "../state/kv.js";
 import type { Provenance } from "./types.js";
-import { classifyProvenance, hashFiles } from "./verify.js";
+import { classifyProvenance, hashFileCommitments } from "./verify.js";
 import { canonicalizePath } from "./paths.js";
 import { withKeyedLock } from "./keyed-mutex.js";
 import { generateId } from "../state/schema.js";
@@ -316,8 +316,13 @@ export async function recordFix(
     if (input.files && input.files.length > 0) provenance.files = input.files;
     const files = provenance.files;
     if (files && files.length > 0) {
-      const hashes = hashFiles(files, input.cwd);
-      if (Object.keys(hashes).length > 0) provenance.fileHashes = hashes;
+      const commitments = hashFileCommitments(files, input.cwd);
+      if (Object.keys(commitments.fileHashes).length > 0) {
+        provenance.fileHashes = commitments.fileHashes;
+      }
+      if (Object.keys(commitments.fileHashesNormalized).length > 0) {
+        provenance.fileHashesNormalized = commitments.fileHashesNormalized;
+      }
     }
   }
   if (!provenance.cwd) provenance.cwd = input.cwd;

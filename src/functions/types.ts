@@ -162,6 +162,47 @@ export interface CompressedObservation {
   provenance?: Provenance;
 }
 
+export type MemoryLifecycleState =
+  | "active"
+  | "needs_revalidation"
+  | "superseded"
+  | "disputed"
+  | "archived"
+  | "revoked";
+
+export type MemoryLifecycleAction =
+  | "create"
+  | "mark_needs_revalidation"
+  | "supersede"
+  | "dispute"
+  | "archive"
+  | "revoke"
+  | "restore"
+  | "revalidate";
+
+/** One explicit, append-only semantic lifecycle decision. Source drift is not
+ * written here during recall: it is projected as effective
+ * needs_revalidation, avoiding write-on-read races. */
+export interface MemoryLifecycleTransition {
+  from: MemoryLifecycleState | null;
+  to: MemoryLifecycleState;
+  action: MemoryLifecycleAction;
+  at: string;
+  reason: string;
+  actor?: string;
+  supersededBy?: string;
+}
+
+/** A period during which this exact stored content version was believed
+ * current. Inferred legacy intervals remain marked so as-of recall can be
+ * honest about reconstruction quality. */
+export interface MemoryValidityInterval {
+  validFrom: string;
+  validTo?: string;
+  reason?: string;
+  inferred?: true;
+}
+
 export interface Memory {
   id: string;
   createdAt: string;
@@ -188,6 +229,19 @@ export interface Memory {
   strength: number;
   confidence?: number;
   version: number;
+  /** Capture/validity metadata is independent of evidence freshness. */
+  observedAt?: string;
+  validFrom?: string;
+  validTo?: string;
+  validityIntervals?: MemoryValidityInterval[];
+  sourceCommit?: string;
+  /** Persisted semantic state. Missing legacy state is derived conservatively
+   * by the lifecycle reader without mutating storage during recall. */
+  lifecycle?: MemoryLifecycleState;
+  lifecycleReason?: string;
+  lifecycleChangedAt?: string;
+  lifecycleTransitions?: MemoryLifecycleTransition[];
+  lifecycleMigratedFromLegacy?: true;
   origin?: "manual";
   parentId?: string;
   supersedes?: string[];
@@ -233,6 +287,23 @@ export interface CanonRecord {
   fileHashes: Record<string, string>;
   fileHashesNormalized?: Record<string, string>;
   type: Memory["type"];
+  /** Portable lifecycle and version lineage. These are semantic assertions,
+   * not source-verification verdicts; every checkout still verifies hashes. */
+  version?: number;
+  observedAt?: string;
+  validFrom?: string;
+  validTo?: string;
+  validityIntervals?: MemoryValidityInterval[];
+  sourceCommit?: string;
+  lifecycle?: MemoryLifecycleState;
+  lifecycleReason?: string;
+  lifecycleChangedAt?: string;
+  lifecycleTransitions?: MemoryLifecycleTransition[];
+  lifecycleMigratedFromLegacy?: true;
+  parentId?: string;
+  supersedes?: string[];
+  supersededBy?: string;
+  relatedIds?: string[];
   /** Portable remote-derived identity of the repository this record belongs
    * to. Omitted for old records and remote-less repositories because their
    * local absolute-path identity must never enter a committed artifact. */
