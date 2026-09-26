@@ -572,6 +572,16 @@ export function registerApiTriggers(
           body: { error: "safe_only is only compatible with mode=current" },
         };
       }
+      if (body["rank"] !== undefined && body["rank"] !== "relevance" && body["rank"] !== "recent") {
+        return { status_code: 400, body: { error: "rank must be relevance or recent" } };
+      }
+      if (
+        body["types"] !== undefined &&
+        (!Array.isArray(body["types"]) ||
+          !body["types"].every((t) => typeof t === "string" && t.length > 0 && t.length < 64))
+      ) {
+        return { status_code: 400, body: { error: "types must be an array of type names" } };
+      }
       // Verified Recall fails closed: safe_only needs a repo root to verify
       // against, so reject it rather than silently returning unverified memory.
       if (
@@ -596,6 +606,8 @@ export function registerApiTriggers(
         trust?: string[];
         include_memories?: boolean;
         all_projects?: boolean;
+        rank?: string;
+        types?: string[];
       } = { query: (body["query"] as string).trim() };
       if (body["limit"] !== undefined) payload.limit = body["limit"] as number;
       if (body["project"] !== undefined)
@@ -613,6 +625,8 @@ export function registerApiTriggers(
         payload.trust = body["trust"].map((item) => String(item));
       if (inventory) payload.include_memories = true;
       if (body["all_projects"] === true) payload.all_projects = true;
+      if (typeof body["rank"] === "string") payload.rank = body["rank"];
+      if (Array.isArray(body["types"])) payload.types = body["types"] as string[];
 
       // Session-start injection is a search; its `agent` field only feeds the
       // liveness heartbeat (never the search itself).

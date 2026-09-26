@@ -34,6 +34,16 @@ to 1.8GB.
   is a dry run unless `--apply` is passed. Measured on a snapshot of that brain: 4,446 repaired in
   3m23s, chain verified, distinct titles 1,912 → 5,033.
 
+- **Session start shows what happened lately, not what resembles a sentence.** SessionStart recall
+  was a similarity search for the fixed phrase "recent work and decisions in this project". On a
+  real brain it injected old prompts and grep patterns containing the word "project". It now asks
+  search for `rank: "recent"`: the two latest session handoffs first (selected separately, since in
+  a busy project they are older than the newest thousand captures), then the newest edits, writes,
+  and errors. Raw prompts, reads, searches, web lookups, and command output are left out. Only the
+  candidate order changes; scope, classification, and the firewall are identical. `/memwarden/search`
+  gains `rank` and a `types` filter. Handoff "Files touched" lines are project-relative, and temp
+  paths are counted instead of listed.
+
 ### Security
 - **`compact` no longer re-anchors tampered history.** Compaction re-chains
   every entry from genesis. Run over an edited, reordered, or forged chain, it

@@ -15,6 +15,19 @@ interface IndexEntry {
   obsId: string;
   sessionId: string;
   termCount: number;
+  /** For recency-ranked recall (session start): when, what kind, how important. */
+  timestamp: string;
+  type: string;
+  importance: number;
+}
+
+/** A recency-ranked index entry (see SearchIndex.recent). */
+export interface RecentHit {
+  obsId: string;
+  sessionId: string;
+  timestamp: string;
+  type: string;
+  importance: number;
 }
 
 export interface Bm25Hit {
@@ -56,6 +69,9 @@ export class SearchIndex {
       obsId: obs.id,
       sessionId: obs.sessionId,
       termCount: terms.length,
+      timestamp: typeof obs.timestamp === "string" ? obs.timestamp : "",
+      type: typeof obs.type === "string" ? obs.type : "other",
+      importance: Number.isFinite(obs.importance) ? obs.importance : 0,
     });
     this.termFreqs.set(obs.id, tf);
     this.totalLength += terms.length;
@@ -107,6 +123,38 @@ export class SearchIndex {
   /** Every sessionId with at least one indexed doc. */
   indexedSessionIds(): string[] {
     return [...this.bySession.keys()];
+  }
+
+  /**
+   * Entries newest first, optionally limited to `allowed` ids and filtered by
+   * `keep`. For "what happened recently here" recall, where similarity to a
+   * query is the wrong ranking.
+   */
+  recent(
+    limit: number,
+    allowed?: ReadonlySet<string>,
+    keep?: (hit: RecentHit) => boolean,
+  ): RecentHit[] {
+    const out: RecentHit[] = [];
+    for (const e of this.docs.values()) {
+      if (allowed && !allowed.has(e.obsId)) continue;
+      const hit = {
+        obsId: e.obsId,
+        sessionId: e.sessionId,
+        timestamp: e.timestamp,
+        type: e.type,
+        importance: e.importance,
+      };
+      if (keep && !keep(hit)) continue;
+      out.push(hit);
+    }
+    out.sort((a, b) => (a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0));
+    return out.slice(0, limit);
+  }
+
+  /** The indexed observation type for an id, if indexed. */
+  typeOf(id: string): string | undefined {
+    return this.docs.get(id)?.type;
   }
 
   get size(): number {

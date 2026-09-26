@@ -42,6 +42,10 @@ describe("handleSessionStart", () => {
     const body = JSON.parse((calls[0]![1] as { body: string }).body);
     expect(body.cwd).toBe("/work/alpha");
     expect(body.format).toBe("narrative");
+    // what happened here lately, firewalled; not a fixed-sentence similarity search
+    expect(body.rank).toBe("recent");
+    expect(body.types).toEqual(["task", "file_edit", "file_write", "error"]);
+    expect(body.safe_only).toBe(true);
 
     const parsed = JSON.parse(out);
     expect(parsed.hookSpecificOutput.hookEventName).toBe("SessionStart");
