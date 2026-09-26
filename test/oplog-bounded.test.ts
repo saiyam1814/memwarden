@@ -29,6 +29,10 @@ import {
   type Kernel,
 } from "../src/kernel/index.js";
 
+// These suites write ~1,300 separate transactions to a real SQLite file.
+// Each one fsyncs, and CI disks are far slower at that than a laptop SSD.
+const FILE_DB_TIMEOUT = 120_000;
+
 // More than two OPLOG_PAGE (500) pages, so every paged loop crosses pages.
 const WRITES = 1_300;
 const KEYS = 40;
@@ -164,7 +168,7 @@ describe("no hot path loads the whole oplog", () => {
   });
 });
 
-describe("StoreLibsql: paged verification and streaming compaction", () => {
+describe("StoreLibsql: paged verification and streaming compaction", { timeout: FILE_DB_TIMEOUT }, () => {
   let dir: string;
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "memwarden-bounded-"));
@@ -317,7 +321,7 @@ describe("StoreLibsql: paged verification and streaming compaction", () => {
   });
 });
 
-describe("StoreLibsql: incremental verification for receipts", () => {
+describe("StoreLibsql: incremental verification for receipts", { timeout: FILE_DB_TIMEOUT }, () => {
   let dir: string;
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "memwarden-incr-"));
@@ -397,7 +401,7 @@ describe("StoreLibsql: incremental verification for receipts", () => {
   });
 });
 
-describe("StoreLibsql: review follow-ups", () => {
+describe("StoreLibsql: review follow-ups", { timeout: FILE_DB_TIMEOUT }, () => {
   let dir: string;
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "memwarden-review-"));
