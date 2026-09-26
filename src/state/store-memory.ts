@@ -9,7 +9,9 @@ import {
   type OplogCompactOptions,
   type OplogCompactResult,
   type OplogEntry,
+  type OplogEntryRef,
   type OplogEraseResult,
+  type OplogVerifyOptions,
   type StateEventType,
   type StateMutationEvent,
   type StateStore,
@@ -120,7 +122,33 @@ export class StoreMemory implements StateStore {
     return this.oplog.filter((e) => e.id > cutoff).map((e) => ({ ...e }));
   }
 
-  async verifyOplog(): Promise<{ ok: true } | { ok: false; brokenAt: number }> {
+  async oplogCount(): Promise<number> {
+    return this.oplog.length;
+  }
+
+  async oplogHead(): Promise<{ id: number; hash: string } | null> {
+    const head = this.oplog[this.oplog.length - 1];
+    return head ? { id: head.id, hash: head.hash } : null;
+  }
+
+  async findOplogEntries(key: string, scope?: string): Promise<OplogEntryRef[]> {
+    return this.oplog
+      .filter((e) => e.key === key && (scope === undefined || e.scope === scope))
+      .map((e) => ({
+        id: e.id,
+        ts: e.ts,
+        op: e.op,
+        scope: e.scope,
+        key: e.key,
+        hash: e.hash,
+        prev_hash: e.prev_hash,
+      }));
+  }
+
+  async verifyOplog(
+    _opts?: OplogVerifyOptions,
+  ): Promise<{ ok: true } | { ok: false; brokenAt: number }> {
+    // Always a full walk: the in-process log is small and already in memory.
     const brokenAt = verifyChain(this.oplog);
     return brokenAt === null ? { ok: true } : { ok: false, brokenAt };
   }

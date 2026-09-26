@@ -5,13 +5,40 @@ All notable changes to memwarden. Dates are release dates; the format loosely fo
 
 ## Unreleased
 
+Found by running 0.1.1 for a month on a real machine: the daemon crashed with
+a 4GB out-of-memory error when `memwarden doctor` ran, and the brain had grown
+to 1.8GB.
+
 ### Fixed
-- **Firewall served counts now say what was actually returned.** Balanced recall no longer reports
-  sourced or unsourced results as verified. `/memwarden/stats` and `status --json` expose a complete
-  versioned breakdown for verified, cosmetic, sourced, unsourced, and legacy/unclassified values;
-  human status shows the preserved total plus its nonzero classes. Counting occurs after token-budget
-  packing and once per memory per event. Existing aggregate-only buckets remain readable but are never
-  promoted to verified ([#78](https://github.com/saiyam1814/memwarden/issues/78)).
+- **The daemon no longer loads the whole oplog to answer small questions.**
+  Counting entries (doctor, `/memwarden/verify`), reading the chain head and
+  per-key evidence (delete receipts), verification, and compaction each
+  decoded every payload in history at once. On a brain with 459k oplog entries
+  and 1.35GB of payloads, `doctor` pushed the daemon from 212MB to its 4GB heap
+  limit, and it crashed. Counts, the head, and receipt evidence are now single
+  indexed SQL queries. Verification and compaction page through the log with
+  one page of payloads in memory, sharing streaming forms of the same planner
+  and verifier (`CompactionPlanner`, `ChainVerifier`), so both stores still
+  plan identically by construction. Measured on that brain: doctor peaks at
+  340MB instead of ~4GB, and `compact --prune-history` completes in 48s
+  (1.78GB to 719MB, chain verified end to end) where it previously could not
+  run at all.
+- **`doctor --fix-stale` finishes.** Every delete receipt ran a full chain
+  verification, so forgetting 1,318 stale memories meant 1,318 full walks (and,
+  before the paging fix, a crash on the first). Receipts now extend a full
+  verification from the last minute over the entries appended since, falling
+  back to a full walk after any in-place rewrite (erase, compact) or when the
+  window lapses. Explicit `memwarden verify` always walks everything. The same
+  1,318 forgets take 24 seconds.
+- **Raw tool output no longer lands in history.** Each capture wrote the full
+  raw observation (the complete tool output, stored twice as `raw` and
+  `toolOutput`) and then overwrote it with the bounded synthetic memory. The
+  live row was fine, but the oplog kept every raw version: a 10MB PDF read
+  became a 20MB history entry, and raw payloads were 1.2GB of the 1.35GB
+  total. Whole file bodies also sat in history that no recall path ever reads.
+  The default path now writes only the synthetic memory. The raw form is still
+  persisted on the opt-in async-compression path, which needs it. Existing
+  raw history is dropped by `memwarden compact --prune-history`.
 
 ## 0.1.1 - 2026-08-28
 

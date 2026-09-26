@@ -512,9 +512,9 @@ export function registerReceiptFunction(sdk: ISdk, kv: StateKV): void {
     });
     const deleteEntry = [...entries].reverse().find((e) => e.op === "delete") ?? null;
     const createEntry = entries.find((e) => e.op !== "delete") ?? null;
-    const verdict = await sdk.trigger<Record<string, never>, { ok: boolean }>({
+    const verdict = await sdk.trigger<{ incremental: boolean }, { ok: boolean }>({
       function_id: "state::verify",
-      payload: {},
+      payload: { incremental: true },
     });
     const head = await sdk.trigger<
       Record<string, never>,
@@ -719,9 +719,9 @@ export function registerReceiptFunction(sdk: ISdk, kv: StateKV): void {
         [...entries].reverse().find((e) => e.op === "delete") ?? null;
       const createEntry = entries.find((e) => e.op !== "delete") ?? null;
       const verdict = await sdk.trigger<
-        Record<string, never>,
+        { incremental: boolean },
         { ok: boolean }
-      >({ function_id: "state::verify", payload: {} });
+      >({ function_id: "state::verify", payload: { incremental: true } });
       const head = await sdk.trigger<
         Record<string, never>,
         { id: number; hash: string }
