@@ -9,7 +9,9 @@
 
 import type { ApiRequest, ISdk } from "../kernel/index.js";
 import type { HookPayload } from "../functions/types.js";
-import { getSecret, getQuantBits } from "../functions/config.js";
+import { getSecret, getQuantBits, getDataDir } from "../functions/config.js";
+import { statSync } from "node:fs";
+import { join } from "node:path";
 import { canonicalizePath } from "../functions/paths.js";
 import {
   getVectorIndex,
@@ -1109,11 +1111,21 @@ export function registerApiTriggers(
       const dryRun = body.dry_run === true || body.dryRun === true;
       if (!dryRun) {
         // Best-effort bookkeeping for `status`; never fails the compaction.
+        // The db size right after compaction lets `status` tell growth since
+        // then from the floor compaction cannot go below (the chain keeps one
+        // hashed row per write, forever, for tamper-evidence).
+        let dbBytes: number | null = null;
+        try {
+          dbBytes = statSync(join(getDataDir(), "memwarden.db")).size;
+        } catch {
+          dbBytes = null;
+        }
         await new StateKV(sdk)
           .set(KV.maintenance, "compact", {
             at: new Date().toISOString(),
             pruned: prune,
             keepDays: prune ? keepDays : null,
+            dbBytes,
           })
           .catch(() => undefined);
       }

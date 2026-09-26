@@ -2102,7 +2102,7 @@ async function fleetStatus(rest: string[]): Promise<void> {
 
 interface StatsBody {
   /** When `memwarden compact` last ran, and the recency window it kept. */
-  lastCompact?: { at: string; pruned: boolean; keepDays: number | null } | null;
+  lastCompact?: { at: string; pruned: boolean; keepDays: number | null; dbBytes?: number | null } | null;
   memories?: number;
   observations?: number;
   sessions?: number;
@@ -2327,10 +2327,18 @@ async function status(rest: string[]): Promise<void> {
         last?.pruned && typeof last.keepDays === "number"
           ? Date.parse(last.at) + last.keepDays * 86_400_000
           : NaN;
+      const floor = typeof last?.dbBytes === "number" ? last.dbBytes : undefined;
       if (dbBytes >= 150 * MB && Number.isFinite(windowEnds) && windowEnds > Date.now()) {
         console.log(
           `              compacted ${last!.at.slice(0, 10)}; the last ${last!.keepDays} days of history are kept,` +
             ` so 'memwarden compact --prune-history' reclaims more after ${new Date(windowEnds).toISOString().slice(0, 10)}`,
+        );
+      } else if (dbBytes >= 150 * MB && floor !== undefined && dbBytes < floor + 100 * MB) {
+        // Compaction cannot go below this: the tamper-evident chain keeps one
+        // hashed row per write it has ever recorded.
+        console.log(
+          `              compacted ${last!.at.slice(0, 10)}; what remains is mostly the tamper-evident chain` +
+            ` (one hashed row per write), which compaction keeps`,
         );
       } else if (dbBytes >= 150 * MB) {
         console.log(
