@@ -177,6 +177,11 @@ describe("shell reads: review findings (each once produced a false verified)", (
     ["jq 'now | localtime' a.json"],
     ["printf '%(%F)T\\n' -1; cat a.ts"],
     ["set -o; cat a.ts"],
+    // round-3 nits
+    ["sed -n -l 1p a.ts"],
+    ["xxd -ps a.bin"],
+    ["column -n name a.txt"],
+    ["jq -n 'get_prog_origin'"],
   ])("never complete: %s", (cmd) => {
     const r = reads(cmd);
     expect(r === null || r.complete === false).toBe(true);

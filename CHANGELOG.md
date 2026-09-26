@@ -48,7 +48,9 @@ to 1.8GB.
   checked the root `package.json`. The result was a false stale, or a false verified if the two
   files matched. New captures record where their cwd sat inside the checkout (`cwdInRepo`). Recall
   re-roots relative files at `<checkout root>/<cwdInRepo>`, and re-roots absolute files inside the
-  capture's checkout at the caller's checkout.
+  capture's checkout at the caller's checkout. Paths are compared with symlinks resolved, so a
+  symlinked checkout, `/var` vs `/private/var`, or a trailing slash cannot defeat the match. Files
+  in a different checkout nested inside this one keep their own identity.
 
 - **`memwarden repair --legacy` fixes memories distilled from pre-0.0.8 captures.** The old
   extractor titled every capture with its tool name and stored raw tool JSON as the body. The

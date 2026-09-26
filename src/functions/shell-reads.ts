@@ -331,6 +331,8 @@ interface ViewerSpec {
   singleInput?: boolean;
   /** `-20` style numeric options (head/tail line counts). */
   numericShort?: boolean;
+  /** Options are whole words, never getopt clusters (xxd). */
+  wholeWordOptions?: boolean;
 }
 
 const GREP: ViewerSpec = {
@@ -411,7 +413,10 @@ const VIEWERS: Readonly<Record<string, ViewerSpec>> = {
     fileFlags: ["-f", "--file"],
     flags: ["-n", "-E", "-r", "-s", "-u", "-z", "--quiet", "--silent", "--regexp-extended",
       "--posix", "--separate", "--null-data", "--unbuffered", "-i", "--in-place"],
-    valueFlags: ["-e", "--expression", "-l", "--line-length"],
+    valueFlags: ["-e", "--expression", "--line-length"],
+    // GNU `-l N` is a line length; BSD/macOS `-l` is a plain flag (line
+    // buffering), so a spaced value is ambiguous.
+    ambiguousFlags: ["-l"],
     refuseFlags: ["-i", "--in-place"],
     attachedOnlyFlags: ["-i"],
     programCheck: "sed",
@@ -464,9 +469,11 @@ const VIEWERS: Readonly<Record<string, ViewerSpec>> = {
     valueFlags: ["-d", "-f", "-c", "-b", "--delimiter", "--fields", "--characters", "--bytes",
       "--output-delimiter"],
   },
-  column: { flags: ["-t", "-x", "-n"], valueFlags: ["-s", "-c", "-o"] },
+  // util-linux >= 2.30 gives `-n` a value (table name) where BSD does not.
+  column: { flags: ["-t", "-x"], valueFlags: ["-s", "-c", "-o"], ambiguousFlags: ["-n"] },
   awk: { firstIsProgram: true, programFlags: ["-f"], fileFlags: ["-f"], valueFlags: ["-F", "-v"], programCheck: "awk" },
-  xxd: { flags: ["-p", "-u", "-e", "-i", "-b", "-r"], valueFlags: ["-l", "-s", "-c", "-g", "-o"], refuseFlags: ["-r"], singleInput: true },
+  // xxd reads options as whole words (`-ps` is postscript mode, not -p -s).
+  xxd: { flags: ["-p", "-u", "-e", "-i", "-b", "-r"], valueFlags: ["-l", "-s", "-c", "-g", "-o"], refuseFlags: ["-r"], singleInput: true, wholeWordOptions: true },
   od: { flags: ["-c", "-x", "-o", "-d", "-v", "-b"], valueFlags: ["-A", "-t", "-N", "-j"] },
   hexdump: { flags: ["-C", "-c", "-b", "-d", "-o", "-x", "-v"], valueFlags: ["-n", "-s", "-e"], fileFlags: ["-f"] },
   strings: { flags: ["-a"], valueFlags: ["-n", "-t"] },
@@ -507,7 +514,7 @@ function resolveOperand(tok: Token, base: string, home: string | undefined): str
 // and the s///w and s///e flags) are refused by construction.
 const SAFE_SED = /^\s*(?:(?:\d+|\$)(?:\s*(?:,|~)\s*(?:\d+|\$|\+\d+|~\d+))?)?\s*!?\s*[pl=qQ]\s*(?:;\s*(?:(?:\d+|\$)(?:\s*(?:,|~)\s*(?:\d+|\$|\+\d+|~\d+))?)?\s*!?\s*[pl=qQ]\s*)*;?\s*$/;
 const AWK_UNSAFE = /getline|system|ENVIRON|ARGV|ARGC|PROCINFO|>|\||close\s*\(|fflush|@include|@load/;
-const JQ_UNSAFE = /\benv\b|\$ENV|input_filename|\bimport\b|\binclude\b|\binputs?\b|\bnow\b|\bdebug\b|\bstderr\b|\$__loc__|\$__prog_args\b|\bget_search_list\b|\bbuiltins\b|\blocaltime\b|\bstrflocaltime\b|\bmktime\b|\bhalt_error\b|\binput_line_number\b/;
+const JQ_UNSAFE = /\benv\b|\$ENV|input_filename|\bimport\b|\binclude\b|\binputs?\b|\bnow\b|\bdebug\b|\bstderr\b|\$__loc__|\$__prog_args\b|\bget_search_list\b|\bget_prog_origin\b|\bget_jq_origin\b|\bhave_decnum\b|\bhave_literal_numbers\b|\bbuiltins\b|\blocaltime\b|\bstrflocaltime\b|\bmktime\b|\bhalt_error\b|\binput_line_number\b/;
 
 function programIsSafe(kind: "sed" | "awk" | "jq", program: string): boolean {
   if (kind === "sed") return SAFE_SED.test(program);
@@ -605,6 +612,10 @@ function parseViewer(spec: ViewerSpec, args: Token[]): ParsedViewer | null {
       continue;
     }
     if (spec.numericShort && /^-\d+$/.test(t)) continue; // head -20
+    if (spec.wholeWordOptions && t.length > 2) {
+      unknown = true; // `-ps`, `-postscript`: not a cluster we can split
+      break;
+    }
     // A short-option cluster: `-rn`, `-A3`, `-nf pats`, `-i.bak`.
     for (let k = 1; k < t.length; k++) {
       const flag = `-${t[k]}`;

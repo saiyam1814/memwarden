@@ -27,7 +27,15 @@ This file exists so the README does not have to pretend otherwise.
   other commands in the chain, stdout redirects to a file, and programs that can read or run more
   than their operands (sed `r`/`w`/`e`, awk `getline`/`system`, jq `env`/`import`). Two things are
   invisible to this parse: anything a command reads that is not on its command line (a script's
-  own inputs, `make`, test runners), and shell aliases or functions that shadow a viewer's name.
+  own inputs, `make`, test runners), shell aliases or functions that shadow a viewer's name, and
+  ambient tool configuration (`RIPGREP_CONFIG_PATH`, bat's config file, `~/.jq`), which can change
+  what a viewer reads or prints.
+- **Same-project recall checks the caller's checkout.** Evidence captured in one worktree is
+  re-rooted at the worktree you recall from, so the verdict answers "is this true here". One
+  consequence: a memory about a git-ignored file that exists only in the capture worktree
+  (`node_modules/…`, `.env`, build output) reads as stale from another worktree. Paths are compared
+  with symlinks resolved. On a case-insensitive filesystem, a file path spelled with different case
+  than its checkout is not recognized as inside it.
 - **Injection framing is a mitigation, not a proof.** Recalled content is delimited and framed as
   untrusted data (`<memwarden-memory>` markers, embedded delimiters defanged), which reduces but
   does not eliminate prompt-injection risk from hostile stored text.

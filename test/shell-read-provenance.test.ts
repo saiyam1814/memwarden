@@ -6,7 +6,8 @@
 // files for staleness but never reads as verified.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StoreMemory } from "../src/state/store-memory.js";
@@ -257,6 +258,63 @@ describe("shell reads carry verifiable file evidence", () => {
       // falls back to the caller root: repo/a.ts does not exist -> stale, never an escape
       expect(v.status).toBe("stale");
     }
+  });
+
+  describe("re-rooting survives path spelling (round-3 review)", () => {
+    function twoWorktrees() {
+      const main = join(repo, "main");
+      const wt = join(repo, "wt");
+      for (const top of [main, wt]) {
+        mkdirSync(join(top, "src"), { recursive: true });
+        mkdirSync(join(top, "packages", "foo"), { recursive: true });
+        writeFileSync(join(top, "src", "x.ts"), "export const QUOKKA = 1;\n");
+      }
+      mkdirSync(join(main, ".git"));
+      writeFileSync(join(wt, ".git"), `gitdir: ${join(main, ".git", "worktrees", "wt")}\n`);
+      __resetGitIdentityCache();
+      return { main, wt };
+    }
+    const prov = (cwd: string, file: string, hash: string) => ({
+      cwd,
+      cwdInRepo: join("packages", "foo"),
+      files: [file],
+      fileHashes: { [file]: hash },
+      command: "Read",
+      userConfirmed: false,
+    });
+    const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+
+    it.each([
+      ["a symlinked capture cwd", "link"],
+      ["a trailing-slash capture cwd", "slash"],
+    ])("%s is still recognized as inside the checkout", (_label, kind) => {
+      const { main, wt } = twoWorktrees();
+      let cwd = join(main, "packages", "foo");
+      if (kind === "link") {
+        symlinkSync(main, join(repo, "link"));
+        cwd = join(repo, "link", "packages", "foo");
+      } else {
+        cwd = `${cwd}/`;
+      }
+      const p = prov(cwd, join(main, "src", "x.ts"), sha("export const QUOKKA = 1;\n"));
+      const fromWt = () => classifyProvenance(p, wt, { verifyAgainstRoot: true });
+      expect(fromWt().status).toBe("verified");
+      writeFileSync(join(wt, "src", "x.ts"), "export const QUOKKA = 9;\n");
+      expect(fromWt().status).toBe("stale"); // this worktree's copy changed
+    });
+
+    it("a file inside a nested checkout keeps its own identity", () => {
+      const { main, wt } = twoWorktrees();
+      const nested = join(main, ".claude", "worktrees", "agent-1");
+      mkdirSync(join(nested, "src"), { recursive: true });
+      writeFileSync(join(nested, ".git"), `gitdir: ${join(main, ".git", "worktrees", "agent-1")}\n`);
+      writeFileSync(join(nested, "src", "y.ts"), "export const Y = 1;\n");
+      __resetGitIdentityCache();
+      const file = join(nested, "src", "y.ts");
+      const p = prov(join(main, "packages", "foo"), file, sha("export const Y = 1;\n"));
+      // not re-rooted into wt (which has no such file): verified against its own path
+      expect(classifyProvenance(p, wt, { verifyAgainstRoot: true }).status).toBe("verified");
+    });
   });
 });
 
