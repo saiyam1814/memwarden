@@ -872,6 +872,34 @@ export function registerApiTriggers(
     },
   });
 
+  // --- POST /memwarden/repair/legacy --------------------------------
+  // Re-extract memories distilled from pre-0.0.8 captures (tool-name title,
+  // raw JSON body) into readable successors. Dry run unless apply:true.
+  // Auth'd: applying rewrites and forgets memories.
+  sdk.registerFunction(
+    "api::repair-legacy",
+    async (req: ApiRequest<{ apply?: boolean; limit?: number }>): Promise<Response> => {
+      const body = (req.body ?? {}) as { apply?: boolean; limit?: number };
+      const report = await sdk.trigger({
+        function_id: "mem::repair-legacy",
+        payload: {
+          apply: body.apply === true,
+          ...(typeof body.limit === "number" ? { limit: body.limit } : {}),
+        },
+      });
+      return { status_code: 200, body: report };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::repair-legacy",
+    config: {
+      api_path: "/memwarden/repair/legacy",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
   // --- POST /memwarden/fleet/status ---------------------------------
   // Fleet mode (#26): the live swarm view — which agents are active in a
   // project right now, what each is touching, capture counts, last-seen.

@@ -488,6 +488,9 @@ export function registerReceiptFunction(sdk: ISdk, kv: StateKV): void {
       getSearchIndex().remove(memory.id);
       vectorIndexRemove(memory.id);
       await deleteAccessLog(kv, memory.id);
+      // Consolidation writes a retention score per memory; nothing removed it,
+      // so every forgotten memory left an orphan row behind.
+      await kv.delete(KV.retentionScores, memory.id);
     });
 
     let sourceErased = false;

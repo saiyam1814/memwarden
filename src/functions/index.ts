@@ -12,6 +12,7 @@ import { registerSearchFunction } from "./search.js";
 import { registerForgetFunction } from "./forget.js";
 import { registerConsolidateFunction } from "./consolidate.js";
 import { registerDoctorFunction } from "./doctor.js";
+import { registerRepairFunction } from "./repair.js";
 import { registerDejaFixFunctions } from "./dejafix.js";
 import { registerReceiptFunction } from "./receipt.js";
 import { registerWhyFunction } from "./why.js";
@@ -142,6 +143,7 @@ export function registerCoreFunctions(
   registerForgetFunction(sdk, kv);
   registerConsolidateFunction(sdk, kv);
   registerDoctorFunction(sdk, kv);
+  registerRepairFunction(sdk, kv);
   registerDejaFixFunctions(sdk, kv);
   registerReceiptFunction(sdk, kv);
   registerWhyFunction(sdk, kv);

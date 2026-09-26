@@ -24,6 +24,16 @@ to 1.8GB.
   against today's files). Three new eval gates pin the behavior: `shell-read-verify`,
   `shell-read-refusal`, and `shell-mixed-capped`.
 
+- **`memwarden repair --legacy` fixes memories distilled from pre-0.0.8 captures.** The old
+  extractor titled every capture with its tool name and stored raw tool JSON as the body. The
+  durability contract later promoted those observations into permanent memories, and on one real
+  brain they were 4,450 of 7,538 memories (59%). Repair re-extracts each one with today's extractor
+  (recovering keys from JSON that was clipped at capture) and re-distills it through the standard
+  path, so the successor gets correct fingerprints and keeps the original provenance, capture-time
+  hashes, sessions, and timestamps. The legacy row is retired through `forget` with a receipt. It
+  is a dry run unless `--apply` is passed. Measured on a snapshot of that brain: 4,446 repaired in
+  3m23s, chain verified, distinct titles 1,912 → 5,033.
+
 ### Security
 - **`compact` no longer re-anchors tampered history.** Compaction re-chains
   every entry from genesis. Run over an edited, reordered, or forged chain, it
@@ -34,6 +44,8 @@ to 1.8GB.
   records existed.
 
 ### Fixed
+- **`forget` no longer orphans a memory's retention score.** Consolidation writes one per memory
+  and nothing ever removed it.
 - **The daemon no longer loads the whole oplog to answer small questions.**
   Counting entries (doctor, `/memwarden/verify`), reading the chain head and
   per-key evidence (delete receipts), verification, and compaction each
