@@ -28,6 +28,12 @@ to 1.8GB.
   real shell captures, 32.4% now carry file evidence and 21.5% are complete reads (17.5% verify
   against today's files). Three new eval gates pin the behavior, including the adversarial shapes:
   `shell-read-verify`, `shell-read-refusal`, and `shell-mixed-capped`.
+- **Plain reads age out instead of becoming permanent memories.** The retention sweep promoted
+  every expiring observation that had file evidence, including bare reads. Despite a comment
+  saying low-importance reads "age out", that is how one brain accumulated 1,100+ "Read X"
+  memories. With shell reads now carrying file evidence, every `cat`/`sed -n` would have been
+  promoted too. Edits, writes, errors, decisions, handoffs, and anything with a real fact are still
+  distilled. A plain read's file is its own record, so it is deleted at the TTL.
 - **Subdirectory captures are verified against the right file.** Relative evidence was re-rooted
   at the caller's cwd, so a memory captured in `packages/foo` and recalled from the repo root
   checked the root `package.json`. The result was a false stale, or a false verified if the two

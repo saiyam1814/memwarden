@@ -137,6 +137,37 @@ describe("durability contract: code-backed knowledge is distilled, never dropped
     expect(memory!.files).toContain("src/auth.ts");
   });
 
+  it("ages out a code-backed PLAIN READ instead of promoting it (the file is its own record)", async () => {
+    await seedSession("s1", "/repo");
+    const read = await seedObservation({ sessionId: "s1", id: "obs-read", ageDays: 60, codeBacked: true });
+    await kv.set(KV.observations("s1"), "obs-read", {
+      ...read,
+      type: "file_read",
+      title: "Read auth.ts",
+      facts: [],
+    });
+    const shell = await seedObservation({ sessionId: "s1", id: "obs-sed", ageDays: 60, codeBacked: true });
+    await kv.set(KV.observations("s1"), "obs-sed", {
+      ...shell,
+      type: "command_run",
+      title: "sed -n '1,60p' src/auth.ts",
+      facts: ["ran: sed -n '1,60p' src/auth.ts"],
+    });
+    const failed = await seedObservation({ sessionId: "s1", id: "obs-err", ageDays: 60, codeBacked: true });
+    await kv.set(KV.observations("s1"), "obs-err", {
+      ...failed,
+      type: "command_run",
+      title: "npm test",
+      facts: ["ran: npm test", "error: TypeError: rotate is not a function"],
+    });
+
+    const r = await sweep();
+    expect(r.forgotten).toBe(2); // the two plain reads
+    expect(r.promoted).toBe(1); // the command that surfaced an error
+    const memories = await kv.list<Memory>(KV.memories);
+    expect(memories.map((m) => m.title)).toEqual(["npm test"]);
+  });
+
   it("still deletes an expiring observation with NO provenance (nothing to promote)", async () => {
     await seedSession("s1", "/repo");
     await seedObservation({ sessionId: "s1", id: "obs-1", ageDays: 60, codeBacked: false });
