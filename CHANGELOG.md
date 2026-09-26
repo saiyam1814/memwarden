@@ -39,6 +39,10 @@ to 1.8GB.
   The default path now writes only the synthetic memory. The raw form is still
   persisted on the opt-in async-compression path, which needs it. Existing
   raw history is dropped by `memwarden compact --prune-history`.
+- **Host heartbeats are throttled.** Every capture and every recall persisted a
+  "this host is live" row, which was 184k oplog rows (a quarter of all history)
+  in one month. Now each host writes at most once per 30 seconds, and the
+  `live` column in `status` stays accurate to that interval.
 - **Memories from web, MCP, and subagent tools say what they did.** Re-running
   extraction over 7,961 real captures: titles that were just the tool name
   fell from 18.4% to 3.0%. Web fetch and search (including the lowercase and

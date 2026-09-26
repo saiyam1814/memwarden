@@ -349,6 +349,19 @@ describe("E2E: boot -> observe -> search (BM25) -> context over the REST wire", 
     expect(stats2.hosts.filter((h) => h.host === "codex")).toHaveLength(1);
   });
 
+  it("a burst of contact from one host writes one heartbeat, not one per call", async () => {
+    for (let i = 0; i < 5; i++) {
+      await postJson("/observe", observePayload({ agent: "kiro", sessionId: `sess-burst-${i}` }));
+    }
+    // every call used to append its own oplog row for the heartbeat
+    const writes = (await store.findOplogEntries("kiro", KV.hostHeartbeats)).length;
+    expect(writes).toBe(1);
+    const stats = (await (await fetch(`${base}/stats`)).json()) as {
+      hosts: Array<{ host: string }>;
+    };
+    expect(stats.hosts.filter((h) => h.host === "kiro")).toHaveLength(1);
+  });
+
   it("project identity widens recall across git worktrees, and only there", async () => {
     // Two directories, one repository: a synthetic main checkout and a linked
     // worktree (a `.git` FILE pointing into main's .git/worktrees). Plus an
