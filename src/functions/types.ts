@@ -139,6 +139,12 @@ export interface Provenance {
    * prompts/outcomes, or inherited files dropped by a cap). File drift can
    * still prove it stale, but matching hashes can never prove it verified. */
   mixedTrust?: boolean;
+  /** Where `cwd` sat inside its git checkout at capture ("" = the checkout
+   * root). Recall from another directory of the same project re-roots
+   * relative files at <checkout root>/<cwdInRepo>, not at the caller's cwd,
+   * so a capture made from a subdirectory is neither falsely stale nor
+   * verified against a same-named file elsewhere. Absent on older memories. */
+  cwdInRepo?: string;
 }
 
 export interface CompressedObservation {

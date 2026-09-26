@@ -22,6 +22,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { TextDecoder } from "node:util";
 import type { Provenance } from "./types.js";
 import { isGlobPattern, isUnsourced } from "./provenance.js";
+import { gitWorktreeRoot } from "./git-identity.js";
 
 // Don't hash enormous files; treat them as unhashed (existence-only).
 const MAX_HASH_BYTES = 2_000_000;
@@ -155,10 +156,20 @@ export function classifyProvenance(
   // (the other repo lacks the file). Absolute files are unaffected. Fall
   // back to `root` only when the memory recorded no cwd — or when the caller
   // proved same-project identity and asked to verify against its checkout.
+  // Same-project recall re-roots at the caller's checkout. Where the capture
+  // cwd sat inside its checkout is recorded (cwdInRepo), so the anchor is
+  // <caller checkout root>/<cwdInRepo>, never the caller's own cwd: a memory
+  // captured in packages/foo and recalled from the repo root used to resolve
+  // "package.json" to the ROOT package.json (false stale, or false verified).
+  let anchor = root;
+  if (opts?.verifyAgainstRoot && typeof prov?.cwdInRepo === "string") {
+    const top = gitWorktreeRoot(root);
+    if (top) anchor = resolve(top, prov.cwdInRepo);
+  }
   const base =
     !opts?.verifyAgainstRoot && prov?.cwd && isAbsolute(prov.cwd)
       ? prov.cwd
-      : root;
+      : anchor;
   const captureCwd = prov?.cwd && isAbsolute(prov.cwd) ? prov.cwd : undefined;
   const deleted: string[] = [];
   const changed: string[] = [];
@@ -177,7 +188,7 @@ export function classifyProvenance(
     if (opts?.verifyAgainstRoot && captureCwd && isAbsolute(f)) {
       const rel = relative(captureCwd, f);
       if (rel && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) {
-        abs = resolve(root, rel);
+        abs = resolve(anchor, rel);
       }
     }
     if (!existsSync(abs)) {

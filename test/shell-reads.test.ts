@@ -1,42 +1,60 @@
 //
 // Shell-read provenance, parser level. A wrong "verified" is worse than a
 // missing one, so most of these pin what must NOT count as a complete read.
+// Every case in the "review findings" block reproduced a false `verified`
+// (or a false stale) in an adversarial review of the first version.
 
 import { describe, expect, it } from "vitest";
-import { extractShellReads, shellCommandOf } from "../src/functions/shell-reads.js";
+import {
+  extractShellReads,
+  isLocalShellTool,
+  shellCommandOf,
+} from "../src/functions/shell-reads.js";
 
 const BASE = "/repo";
 const HOME = "/home/me";
-const reads = (cmd: string) => extractShellReads(cmd, BASE, HOME);
+const TMP = "/var/folders/xy/T";
+const reads = (cmd: string) => extractShellReads(cmd, BASE, { home: HOME, tmpdir: TMP });
 
 describe("shell reads: plain viewers are complete evidence", () => {
   it.each([
     ["sed -n '1,60p' src/auth.ts", ["/repo/src/auth.ts"]],
+    ["sed -ne '3p' a.ts", ["/repo/a.ts"]],
+    ["sed -n -e '1p' -e '$p' a.ts", ["/repo/a.ts"]],
     ["cat README.md", ["/repo/README.md"]],
+    ["/bin/cat README.md", ["/repo/README.md"]],
     ["head -n 50 a.ts b.ts", ["/repo/a.ts", "/repo/b.ts"]],
     ["head -20 a.ts", ["/repo/a.ts"]],
     ["tail -n20 logs/x.log", ["/repo/logs/x.log"]],
     ['grep -n "session start" src/hook.ts', ["/repo/src/hook.ts"]],
     ["grep -rn -e pattern -e other src/a.ts", ["/repo/src/a.ts"]],
+    ["grep -A3 -m1 foo a.ts", ["/repo/a.ts"]],
+    ["grep --color=always foo a.ts b.ts", ["/repo/a.ts", "/repo/b.ts"]],
+    ["grep -f pats.txt a.ts", ["/repo/a.ts", "/repo/pats.txt"]],
+    ["grep --file=pats.txt a.ts", ["/repo/a.ts", "/repo/pats.txt"]],
+    ["grep -nf pats.txt a.ts", ["/repo/a.ts", "/repo/pats.txt"]],
     ["rg -n --glob '*.ts' needle src/a.ts", ["/repo/src/a.ts"]],
     ["wc -l src/state/oplog.ts", ["/repo/src/state/oplog.ts"]],
     ["wc -l < src/a.ts", ["/repo/src/a.ts"]],
     ["jq -r '.version' package.json", ["/repo/package.json"]],
+    ["jq --tab . a.json b.json", ["/repo/a.json", "/repo/b.json"]],
     ["jq --arg v 1 '.x' a.json", ["/repo/a.json"]],
+    ["jq --rawfile x b.txt '$x' a.json", ["/repo/a.json", "/repo/b.txt"]],
     ["diff a.txt b.txt", ["/repo/a.txt", "/repo/b.txt"]],
     ["sha256sum dist/x.tgz", ["/repo/dist/x.tgz"]],
     ["awk -F: '{print $1}' /etc/passwd", ["/etc/passwd"]],
+    ["column -t a.txt b.txt", ["/repo/a.txt", "/repo/b.txt"]],
     ["cat ~/.zshrc", ["/home/me/.zshrc"]],
     ["nl -ba src/a.ts | sed -n '10,20p'", ["/repo/src/a.ts"]],
     ["cat a.ts | grep foo | head -5", ["/repo/a.ts"]],
-    ["cd sub && cat x.ts", ["/repo/sub/x.ts"]],
     ["cd /other && sed -n 1,5p y.ts 2>/dev/null", ["/other/y.ts"]],
     ["echo '--- a'; cat a.ts; echo '--- b'; cat b.ts", ["/repo/a.ts", "/repo/b.ts"]],
+    ["set -euo pipefail; cat a.ts", ["/repo/a.ts"]],
     ["sed -n '1,5p' 'app/[id]/page.tsx'", ["/repo/app/[id]/page.tsx"]],
     ["LC_ALL=C sort -u names.txt", ["/repo/names.txt"]],
     ["grep -c x a.ts 2>&1", ["/repo/a.ts"]],
     ["cat a.ts > /dev/null", ["/repo/a.ts"]],
-    ["sed -ne '3p' a.ts", ["/repo/a.ts"]],
+    ["cat a.ts < b.ts", ["/repo/a.ts"]], // stdin is ignored when operands are given
   ])("%s", (cmd, files) => {
     expect(reads(cmd)).toEqual({ files, complete: true });
   });
@@ -49,7 +67,7 @@ describe("shell reads: evidence that cannot vouch for the whole output is incomp
     ['cat "$SP/out.txt"', []],
     ["sed -n '1,5p' app/[id]/page.tsx", []], // unquoted brackets are a glob
     ["sed -i 's/a/b/' a.ts", []],
-    ["sed 's/a/b/' a.ts", []], // no -n: prints every line, but also edits the stream
+    ["sed 's/a/b/' a.ts", []], // no -n
     ["tail -f server.log", []],
     ["sort -o out.txt in.txt", []],
     ["ls src", []],
@@ -72,6 +90,77 @@ describe("shell reads: evidence that cannot vouch for the whole output is incomp
     expect(r.files).toHaveLength(16);
     expect(r.complete).toBe(false);
   });
+
+  it("refuses to analyze very long command lines (the parse must stay cheap)", () => {
+    const huge = `cat ${"x".repeat(9_000)}`;
+    expect(reads(huge)).toBeNull();
+  });
+});
+
+describe("shell reads: review findings (each once produced a false verified)", () => {
+  it.each([
+    // B1: brace expansion reads files that are not operands as written
+    ["cat src/{a,b}.ts src/c.ts", ["/repo/src/c.ts"]],
+    ["cat f{1..3}.txt", []],
+    ["cat a.ts(N) b.ts", ["/repo/b.ts"]],
+    // S1: embedded programs that read, write, or execute
+    ["sed -n '1r b.ts' a.ts", ["/repo/a.ts"]],
+    ["sed -n '/foo/p' a.ts", ["/repo/a.ts"]], // regex addresses are not in the safe grammar
+    ["sed -n 's/a/b/ep' a.ts", ["/repo/a.ts"]],
+    ["sed -n -f script.sed a.ts", ["/repo/a.ts", "/repo/script.sed"]],
+    ["awk '{ while ((getline l < \"b.ts\") > 0) print l }' a.ts", ["/repo/a.ts"]],
+    ["awk '{print > \"out\"}' a.ts", ["/repo/a.ts"]],
+    ["jq -n 'env.HOME'", []],
+    ["jq '$ENV.PATH' a.json", ["/repo/a.json"]],
+    ["jq -L /lib 'import \"x\" as x; .' a.json", []], // -L is refused outright
+    // S3: checksum --check reads the files listed inside
+    ["sha256sum -c SUMS", []],
+    ["shasum --check SUMS", []],
+    // S4: constant commands with dynamic args depend on the environment
+    ["echo $HOME; cat a.ts", ["/repo/a.ts"]],
+    ["echo *; cat a.ts", ["/repo/a.ts"]],
+    // S5: path-qualified or environment-altered commands could be anything
+    ["./cat a.ts", []],
+    ["node_modules/.bin/jq . a.json", []],
+    ["PATH=./bin:$PATH cat a.ts", ["/repo/a.ts"]],
+    ["GREP_OPTIONS=-f/etc/x grep foo a.ts", ["/repo/a.ts"]],
+    // S9: temp files are never evidence
+    ["cat /tmp/out.log", []],
+    ["tail -n 5 /private/tmp/claude-501/x/tasks/b1.output", []],
+    [`cat ${TMP}/scratch.txt`, []],
+    // nits: `..` is resolved through symlinks by the kernel, not lexically
+    ["cat ../other/x.ts", []],
+    // nits: refuse checks survive clustering and attachment
+    ["sed -n -Ei.bak '1p' a.ts", []],
+    ["tail -fn5 x.log", []],
+    ["sort -o/tmp/out in.txt", []],
+    ["rg --pre ./decode foo a.ts", []],
+    ["bat --diff a.ts", []],
+    // nits: redirect targets are never operands; writes cap
+    ["cat a.ts >&out.txt", ["/repo/a.ts"]],
+    ["uniq in.txt out.txt", ["/repo/in.txt"]],
+  ])("%s", (cmd, files) => {
+    const r = reads(cmd);
+    expect(r).not.toBeNull();
+    expect(r!.complete).toBe(false);
+    expect(r!.files).toEqual(files);
+  });
+
+  it("a project that itself lives in a temp dir still counts as the project", () => {
+    const r = extractShellReads("cat src/a.ts", `${TMP}/repo`, { tmpdir: TMP });
+    expect(r).toEqual({ files: [`${TMP}/repo/src/a.ts`], complete: true });
+    const outside = extractShellReads(`cat ${TMP}/other.txt`, `${TMP}/repo`, { tmpdir: TMP });
+    expect(outside).toEqual({ files: [], complete: false });
+  });
+
+  it("an fd other than stdin is not the command's input", () => {
+    expect(reads("cat 3<b.ts")).toEqual({ files: [], complete: true });
+  });
+
+  it("double quotes keep a backslash that escapes nothing; quoted tilde is literal", () => {
+    expect(reads('cat "a\\b.ts"')!.files).toEqual(["/repo/a\\b.ts"]);
+    expect(reads("cat '~/x'")!.files).toEqual(["/repo/~/x"]);
+  });
 });
 
 describe("shell reads: unanalyzable commands yield no evidence at all", () => {
@@ -83,19 +172,45 @@ describe("shell reads: unanalyzable commands yield no evidence at all", () => {
     "cat <<< hello",
     "cat 'unterminated",
     'grep "x $(whoami)" a.ts',
+    // B3: a cd whose effect is not certain
     "cd $DIR && cat a.ts",
     "cd - && cat a.ts",
+    "cd sub && cat x.ts",
+    "cd .. && cat package.json",
+    "cd /abs; cat x.ts",
+    "true || cd /abs && cat x.ts",
+    "cd /abs | true; cat x.ts",
+    "cd ~/proj && cat x.ts",
   ])("%s", (cmd) => {
     expect(reads(cmd)).toBeNull();
   });
 });
 
-describe("shell command shapes hosts send", () => {
-  it("reads a plain string and a Codex bash -lc argv", () => {
+describe("shell tools and command shapes", () => {
+  it("only local shell tools are parsed; remote-exec MCP tools never are", () => {
+    for (const t of ["Bash", "bash", "shell", "exec", "exec_command", "local_shell", "run_shell_command", "run_terminal_cmd", "executeBash"]) {
+      expect(isLocalShellTool(t)).toBe(true);
+    }
+    for (const t of ["mcp__ssh__exec", "mcp__kubernetes__exec_in_pod", "Read", "WebFetch", undefined]) {
+      expect(isLocalShellTool(t)).toBe(false);
+    }
+  });
+
+  it("reads a string, a Codex bash -lc argv, a `cmd` key, and quotes other argv verbatim", () => {
     expect(shellCommandOf({ command: "cat a.ts" })).toBe("cat a.ts");
     expect(shellCommandOf({ command: ["bash", "-lc", "sed -n 1,5p a.ts"] })).toBe("sed -n 1,5p a.ts");
     expect(shellCommandOf({ command: ["/bin/zsh", "-c", "cat b"] })).toBe("cat b");
-    expect(shellCommandOf({ command: ["cat", "my file.ts"] })).toBe("cat 'my file.ts'");
+    expect(shellCommandOf({ cmd: "cat c" })).toBe("cat c");
+    expect(shellCommandOf({ command: ["cat", "my file.ts"] })).toBe("'cat' 'my file.ts'");
+    // -c must be the shell's own flag, not a script's argument
+    expect(shellCommandOf({ command: ["bash", "script.sh", "-c", "cat a.ts"] })).toBe(
+      "'bash' 'script.sh' '-c' 'cat a.ts'",
+    );
     expect(shellCommandOf({ query: "x" })).toBeUndefined();
+  });
+
+  it("an argv command's operands are never tilde-expanded (exec does not expand)", () => {
+    const cmd = shellCommandOf({ command: ["cat", "~/x"] })!;
+    expect(extractShellReads(cmd, BASE, { home: HOME })!.files).toEqual(["/repo/~/x"]);
   });
 });

@@ -188,7 +188,16 @@ async function main(): Promise<void> {
 
   // Shell-read corpus: clean viewer reads (complete evidence) and viewer
   // reads chained after another command (files recorded, never verified).
-  const shellReads: Array<{ project: string; file: string; key: string; mixed: boolean; willGoStale: boolean }> = [];
+  // Chained/adversarial shapes (all must never read as verified): another
+  // command first, a candidate missing at capture, and a remote-exec MCP
+  // tool whose output local files cannot vouch for (so it records no file
+  // evidence at all, and is excluded from the drift-refusal gate).
+  const MIXED_SHAPES = [
+    { tool: "Bash", cmd: (view: string) => `npm run build && ${view}`, evidence: true },
+    { tool: "Bash", cmd: (view: string) => `${view} src/not-there.ts`, evidence: true },
+    { tool: "mcp__ssh__exec", cmd: (view: string) => view, evidence: false },
+  ];
+  const shellReads: Array<{ project: string; file: string; key: string; mixed: boolean; evidence: boolean; willGoStale: boolean }> = [];
   for (let p = 0; p < PROJECTS; p++) {
     const root = projects[p]!;
     for (let i = 0; i < SHELL_PER + SHELL_MIXED_PER; i++) {
@@ -196,8 +205,9 @@ async function main(): Promise<void> {
       const file = `src/shell${i}.ts`;
       const key = `SHL_P${p}_N${i}`;
       writeFileSync(join(root, file), `export const S_${i} = ${i}; // ${key}\n`);
-      shellReads.push({ project: root, file, key, mixed, willGoStale: i % 2 === 0 });
       const view = SHELL_VIEWERS[i % SHELL_VIEWERS.length]!(file);
+      const shape = MIXED_SHAPES[i % MIXED_SHAPES.length]!;
+      shellReads.push({ project: root, file, key, mixed, evidence: !mixed || shape.evidence, willGoStale: i % 2 === 0 });
       await sdk.trigger({
         function_id: "mem::observe",
         payload: {
@@ -207,8 +217,8 @@ async function main(): Promise<void> {
           cwd: root,
           timestamp: new Date().toISOString(),
           data: {
-            tool_name: "Bash",
-            tool_input: { command: mixed ? `npm run build && ${view}` : view },
+            tool_name: mixed ? shape.tool : "Bash",
+            tool_input: { command: mixed ? shape.cmd(view) : view },
             tool_output: { stdout: `export const S_${i} = ${i}; // ${key}` },
           },
         },
@@ -483,10 +493,14 @@ async function main(): Promise<void> {
     const res = await search(r.key, r.project);
     const hit = hitFor(res, r.key);
     countLeaks(res, /SHL_(P\d+)_/.exec(r.key)![1]!);
-    if (r.willGoStale) {
+    if (r.willGoStale && r.evidence) {
       shellRefusable++;
       const unfiltered = hitFor(await search(r.key, r.project, false), r.key);
       if (unfiltered && !hit) shellRefused++;
+    } else if (r.willGoStale) {
+      // remote-exec shape after its local file changed: never verified
+      shellCappable++;
+      if (!hit || hit.trust !== "verified") shellCapped++;
     } else if (!r.mixed) {
       shellVerifiable++;
       if (hit?.trust === "verified") shellVerified++;

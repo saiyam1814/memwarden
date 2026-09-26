@@ -14,15 +14,25 @@ to 1.8GB.
   shell commands and 3% used the Read tool (Codex has no Read tool at all), so every file an agent
   looked at through `sed -n`, `cat`, or `grep … file` was recorded as "sourced by command". It could
   never be verified and was never refused when the file changed: 57 of 1,060 served memories were
-  verified. Capture now parses shell command lines conservatively (see `docs/limitations.md`) and
-  hashes the files a read-only viewer reads, keeping only files that exist and hash at capture.
-  Clean reads verify like Read-tool memories and go stale the same way. Reads chained after another
-  command record their files, so drift is caught, but are capped at `sourced`. Command
-  substitution, heredocs, and bad quoting yield no evidence. Codex `workdir` is honored and no
-  longer recorded as a "file", which had capped every Codex shell capture below verified. On 5,613
-  real shell captures, 43.9% now carry file evidence and 28.9% are complete reads (22.2% verify
-  against today's files). Three new eval gates pin the behavior: `shell-read-verify`,
-  `shell-read-refusal`, and `shell-mixed-capped`.
+  verified. Capture now parses local shell command lines conservatively (see `docs/limitations.md`)
+  and hashes the files a read-only viewer reads. Clean reads verify like Read-tool memories and go
+  stale the same way. Anything the parse cannot vouch for caps the memory at `sourced` while still
+  recording the files it found, so drift is caught. That includes another command in the chain, a
+  candidate that does not hash, a glob or brace expansion, a temp file, or an embedded program that
+  can read more than its operands. Command substitution, heredocs, bad quoting, and uncertain `cd`s
+  yield no evidence. Codex `workdir` (including relative paths) and Gemini `dir_path` are honored,
+  and neither is recorded as a "file" any more; that had capped every Codex shell capture below
+  verified. An adversarial review of the first version reproduced five false-`verified` paths
+  (missing candidates dropped silently, file-valued options, a relative `cd` applied twice, a
+  relative workdir, and remote-exec MCP tools). All five are fixed and pinned by tests. On 5,613
+  real shell captures, 32.4% now carry file evidence and 21.5% are complete reads (17.5% verify
+  against today's files). Three new eval gates pin the behavior, including the adversarial shapes:
+  `shell-read-verify`, `shell-read-refusal`, and `shell-mixed-capped`.
+- **Subdirectory captures are verified against the right file.** Relative evidence was re-rooted
+  at the caller's cwd, so a memory captured in `packages/foo` and recalled from the repo root
+  checked the root `package.json`. The result was a false stale, or a false verified if the two
+  files matched. New captures record where their cwd sat inside the checkout (`cwdInRepo`), and
+  recall re-roots at `<checkout root>/<cwdInRepo>`.
 
 - **`memwarden repair --legacy` fixes memories distilled from pre-0.0.8 captures.** The old
   extractor titled every capture with its tool name and stored raw tool JSON as the body. The

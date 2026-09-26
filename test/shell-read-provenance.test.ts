@@ -20,6 +20,7 @@ import { KV } from "../src/state/schema.js";
 import { registerCoreFunctions, getSearchIndex } from "../src/functions/index.js";
 import { classifyProvenance } from "../src/functions/verify.js";
 import type { CompressedObservation } from "../src/functions/types.js";
+import { __resetGitIdentityCache } from "../src/functions/git-identity.js";
 
 let sdk: Kernel;
 let kv: StateKV;
@@ -117,4 +118,79 @@ describe("shell reads carry verifiable file evidence", () => {
     const obs = await capture({ command: "sed -i 's/1/2/' src/b.ts" });
     expect(obs.provenance?.files).toBeUndefined();
   });
+
+  // --- review findings, end to end ---------------------------------------
+
+  it("a candidate missing at capture caps the memory (it used to vanish and leave `verified`)", async () => {
+    const obs = await capture({ command: "cat src/a.ts src/local.ts" });
+    expect(obs.provenance?.files).toEqual(["src/a.ts"]);
+    expect(obs.provenance?.mixedTrust).toBe(true);
+    expect(classifyProvenance(obs.provenance, repo).status).toBe("sourced_unverified");
+  });
+
+  it("a directory next to a file caps the memory", async () => {
+    const obs = await capture({ command: "grep -rn ROTATE src src/a.ts" });
+    expect(obs.provenance?.files).toEqual(["src/a.ts"]);
+    expect(obs.provenance?.mixedTrust).toBe(true);
+  });
+
+  it("a file named by an option (grep -f) is evidence: changing it makes the memory stale", async () => {
+    writeFileSync(join(repo, "pats.txt"), "ROTATE_MS\n");
+    const obs = await capture({ command: "grep -f pats.txt src/a.ts" });
+    expect(obs.provenance?.files?.sort()).toEqual(["pats.txt", "src/a.ts"]);
+    expect(classifyProvenance(obs.provenance, repo).status).toBe("verified");
+    writeFileSync(join(repo, "pats.txt"), "export\n");
+    expect(classifyProvenance(obs.provenance, repo).status).toBe("stale");
+  });
+
+  it("a relative Codex workdir and a Gemini dir_path resolve against the session cwd", async () => {
+    const codex = await capture({ command: ["bash", "-lc", "cat a.ts"], workdir: "src" }, "exec_command");
+    expect(codex.provenance?.files).toEqual(["src/a.ts"]);
+    expect(classifyProvenance(codex.provenance, repo).status).toBe("verified");
+    const gemini = await capture({ command: "cat b.ts", dir_path: "src" }, "run_shell_command");
+    expect(gemini.provenance?.files).toEqual(["src/b.ts"]);
+  });
+
+  it("a remote-exec MCP tool is never vouched for by local files", async () => {
+    const ssh = await capture({ host: "prod", command: "cat src/a.ts" }, "mcp__ssh__exec");
+    expect(ssh.provenance?.files).toBeUndefined();
+    expect(classifyProvenance(ssh.provenance, repo).status).not.toBe("verified");
+  });
+
+  it("a relative cd yields no evidence rather than a guess", async () => {
+    const obs = await capture({ command: "cd src && cat a.ts" });
+    expect(obs.provenance?.files).toBeUndefined();
+  });
+
+  it("a capture from a subdirectory re-roots at the checkout, not at the caller's cwd", async () => {
+    mkdirSync(join(repo, ".git"));
+    mkdirSync(join(repo, "packages", "foo"), { recursive: true });
+    writeFileSync(join(repo, "package.json"), '{"name":"root"}\n');
+    writeFileSync(join(repo, "packages", "foo", "package.json"), '{"name":"foo"}\n');
+    __resetGitIdentityCache();
+    const sub = join(repo, "packages", "foo");
+    const r = await sdk.trigger<unknown, { observationId: string }>({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "post_tool_use",
+        sessionId: "s-sub",
+        project: sub,
+        cwd: sub,
+        timestamp: new Date().toISOString(),
+        data: { tool_name: "Bash", tool_input: { command: "cat package.json" }, tool_output: '{"name":"foo"}' },
+      },
+    });
+    const obs = (await kv.get<CompressedObservation>(KV.observations("s-sub"), r.observationId))!;
+    expect(obs.provenance?.files).toEqual(["package.json"]);
+    expect(obs.provenance?.cwdInRepo).toBe(join("packages", "foo"));
+
+    // recalled from the repo ROOT of the same project
+    const fromRoot = () => classifyProvenance(obs.provenance, repo, { verifyAgainstRoot: true });
+    expect(fromRoot().status).toBe("verified");
+    writeFileSync(join(repo, "package.json"), '{"name":"root","v":2}\n'); // a DIFFERENT file
+    expect(fromRoot().status).toBe("verified");
+    writeFileSync(join(sub, "package.json"), '{"name":"foo","v":2}\n'); // the file it read
+    expect(fromRoot().status).toBe("stale");
+  });
 });
+

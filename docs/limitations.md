@@ -12,14 +12,19 @@ This file exists so the README does not have to pretend otherwise.
   additionally flags conservative subject/value conflicts as advisories - it never drops them from
   recall.
 - **Shell-read evidence is a conservative parse, not a sandbox trace.** memwarden reads the command
-  line, not the process: it recognizes a fixed set of read-only viewers (`cat`, `sed -n`, `head`,
-  `tail`, `grep`/`rg`/`ag` with file operands, `jq`, `diff`, `wc`, checksum tools, `sort`/`cut`/`awk`
-  with file operands) and resolves relative paths against the tool's working directory. A file is
-  kept only if it exists and hashes at capture. Command or process substitution, heredocs, and
-  unterminated quotes yield no shell evidence at all. Globs, variables, directories, other commands
-  in the chain, and stdout redirects to a file keep whatever files were found (so drift is still
-  caught) but cap the memory at `sourced`. Anything a command reads that is not on its command
-  line (a script reading its own inputs, `make`, test runners) is invisible to this parse.
+  line, not the process, and only for local shell tools (never an MCP tool that runs a command on
+  another machine). It recognizes a fixed set of read-only viewers: `cat`, `sed -n` with an
+  address-and-print script, `head`, `tail`, `grep`/`rg`/`ag` with file operands, `jq`, `diff`, `wc`,
+  checksum tools, and `sort`/`cut`/`awk` with file operands. Files named by options (`grep -f`,
+  `jq --rawfile`) count too. A file is kept only if it hashes at capture, and any candidate that does
+  not hash caps the memory at `sourced`. The following yield no shell evidence at all: command or
+  process substitution, heredocs, unterminated quotes, and any `cd` that is not absolute and
+  followed by `&&`. The following keep the files that were found (so drift is still caught) but cap
+  the memory at `sourced`: globs, brace expansion, variables, `..` segments, temp files, directories,
+  other commands in the chain, stdout redirects to a file, and programs that can read or run more
+  than their operands (sed `r`/`w`/`e`, awk `getline`/`system`, jq `env`/`import`). Two things are
+  invisible to this parse: anything a command reads that is not on its command line (a script's
+  own inputs, `make`, test runners), and shell aliases or functions that shadow a viewer's name.
 - **Injection framing is a mitigation, not a proof.** Recalled content is delimited and framed as
   untrusted data (`<memwarden-memory>` markers, embedded delimiters defanged), which reduces but
   does not eliminate prompt-injection risk from hostile stored text.

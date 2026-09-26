@@ -63,6 +63,24 @@ function findGitEntry(startDir: string): { root: string; entry: string } | null 
   }
 }
 
+const worktreeRootCache = new Map<string, string | null>();
+
+/**
+ * The checkout root (the directory holding `.git`) that contains `dir`, or
+ * null outside a git checkout. Cached: recall asks for it per classified
+ * memory. Relative evidence paths are anchored here, not at whichever
+ * subdirectory a session happened to start in.
+ */
+export function gitWorktreeRoot(dir: string): string | null {
+  const key = resolve(dir);
+  const hit = worktreeRootCache.get(key);
+  if (hit !== undefined) return hit;
+  const root = findGitEntry(key)?.root ?? null;
+  if (worktreeRootCache.size > 1024) worktreeRootCache.clear();
+  worktreeRootCache.set(key, root);
+  return root;
+}
+
 /**
  * Resolve the MAIN .git directory, following a worktree's `.git` file
  * (`gitdir: <main>/.git/worktrees/<name>`) back to `<main>/.git` so all
@@ -155,5 +173,6 @@ export function projectKey(cwd: string): string {
 
 /** Test hook: drop the memo (temp repos are created and deleted per test). */
 export function __resetGitIdentityCache(): void {
+  worktreeRootCache.clear();
   keyCache.clear();
 }
