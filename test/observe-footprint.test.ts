@@ -90,3 +90,35 @@ describe("observe keeps the oplog bounded", () => {
     expect(rows.map((r) => r.id).sort()).toHaveLength(2); // tool capture + one handoff
   });
 });
+
+describe("the opt-in async-compression path still persists raw", () => {
+  it("MEMWARDEN_AUTO_COMPRESS keeps the raw observation for its compressor", async () => {
+    __resetKernelSingleton();
+    getSearchIndex().clear();
+    const store = new StoreMemory();
+    const sdk = registerWorker("in-process", { workerName: "memwarden-autocompress" }, { store });
+    const kv = new StateKV(sdk);
+    registerCoreFunctions(sdk, kv);
+    const prev = process.env["MEMWARDEN_AUTO_COMPRESS"];
+    process.env["MEMWARDEN_AUTO_COMPRESS"] = "true";
+    try {
+      const r = await sdk.trigger<unknown, { observationId: string }>({
+        function_id: "mem::observe",
+        payload: {
+          hookType: "post_tool_use",
+          sessionId: "s-ac",
+          project: "/work/proj",
+          cwd: "/work/proj",
+          timestamp: new Date().toISOString(),
+          data: { tool_name: "Bash", tool_input: { command: "echo hi" }, tool_output: "hi-raw-marker" },
+        },
+      });
+      const stored = await kv.get<{ raw?: unknown }>(KV.observations("s-ac"), r.observationId);
+      expect(stored?.raw).toBeDefined();
+    } finally {
+      if (prev === undefined) delete process.env["MEMWARDEN_AUTO_COMPRESS"];
+      else process.env["MEMWARDEN_AUTO_COMPRESS"] = prev;
+      __resetKernelSingleton();
+    }
+  });
+});

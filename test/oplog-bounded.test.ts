@@ -22,7 +22,7 @@ import { join } from "node:path";
 import { StoreMemory } from "../src/state/store-memory.js";
 import { StoreLibsql } from "../src/state/store-libsql.js";
 import { GENESIS_PREV_HASH, hashOplogEntry } from "../src/state/oplog.js";
-import type { OplogOp, StateStore } from "../src/state/store.js";
+import { OplogChainBrokenError, type OplogOp, type StateStore } from "../src/state/store.js";
 import {
   registerWorker,
   __resetKernelSingleton,
@@ -387,10 +387,84 @@ describe("StoreLibsql: incremental verification for receipts", () => {
       await script(s2);
       expect(await s2.verifyOplog()).toEqual({ ok: true });
       await tamper(join(dir, "w.db"), `UPDATE oplog SET payload = ? WHERE id = ?`, ['{"x":1}', 15]);
-      const now = Date.now();
-      vi.spyOn(Date, "now").mockReturnValue(now + 61_000);
+      const now = performance.now();
+      vi.spyOn(performance, "now").mockReturnValue(now + 61_000);
       expect(await s2.verifyOplog({ incremental: true })).toEqual({ ok: false, brokenAt: 15 });
       await s2.close();
+    } finally {
+      await s.close();
+    }
+  });
+});
+
+describe("StoreLibsql: review follow-ups", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "memwarden-review-"));
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  async function tamper(path: string, sql: string, args: Array<string | number | null>) {
+    const raw = createClient({ url: `file:${path}` });
+    await raw.execute({ sql, args });
+    raw.close();
+  }
+
+  it("compaction REFUSES to re-anchor forged history (it used to launder it)", async () => {
+    const path = join(dir, "forged.db");
+    const s = new StoreLibsql({ url: `file:${path}` });
+    await script(s);
+    await s.close();
+    await tamper(path, `UPDATE oplog SET payload = ? WHERE id = ?`, ['{"forged":true}', 42]);
+
+    const reopened = new StoreLibsql({ url: `file:${path}` });
+    try {
+      await expect(reopened.compactOplog({ pruneSuperseded: true })).rejects.toBeInstanceOf(
+        OplogChainBrokenError,
+      );
+      await expect(reopened.compactOplog({ dryRun: true })).rejects.toMatchObject({ brokenAt: 42 });
+      // nothing was rewritten: the evidence is still there to find
+      expect(await reopened.verifyOplog()).toEqual({ ok: false, brokenAt: 42 });
+    } finally {
+      await reopened.close();
+    }
+  });
+
+  it("the in-memory store refuses the same way (parity)", async () => {
+    const s = new StoreMemory();
+    await script(s);
+    const log = (s as unknown as { oplog: Array<{ payload: unknown }> }).oplog;
+    log[10] = { ...log[10]!, payload: { forged: true } };
+    await expect(s.compactOplog()).rejects.toMatchObject({ brokenAt: 11 });
+  });
+
+  it("an anchor row rewritten after a full walk forces the next incremental check to re-walk", async () => {
+    const path = join(dir, "anchor.db");
+    const s = new StoreLibsql({ url: `file:${path}` });
+    try {
+      await script(s);
+      expect(await s.verifyOplog()).toEqual({ ok: true });
+      const head = (await s.oplogHead())!;
+      await tamper(path, `UPDATE oplog SET hash = ? WHERE id = ?`, ["f".repeat(64), head.id]);
+      expect(await s.verifyOplog({ incremental: true })).toEqual({ ok: false, brokenAt: head.id });
+    } finally {
+      await s.close();
+    }
+  });
+
+  it("pages close on a byte budget: many large rows still verify, and a forged one is found", async () => {
+    const path = join(dir, "big.db");
+    const s = new StoreLibsql({ url: `file:${path}` });
+    try {
+      const blob = "b".repeat(1_000_000);
+      for (let i = 0; i < 40; i++) await s.set(SCOPE_A, `big${i % 3}`, { i, blob });
+      expect(await s.verifyOplog()).toEqual({ ok: true });
+      const r = await s.compactOplog({ pruneSuperseded: true });
+      expect(r.prunedCount).toBe(37);
+      expect(await s.verifyOplog()).toEqual({ ok: true });
     } finally {
       await s.close();
     }

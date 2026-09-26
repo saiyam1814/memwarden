@@ -22,6 +22,7 @@ import { summarizeFirewall } from "../functions/firewall-stats.js";
 import { QuantizedVectorIndex } from "../functions/quantized-vector-index.js";
 import { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
+import { OplogChainBrokenError } from "../state/store.js";
 import { metrics } from "../observability/metrics.js";
 import { exportBundle, importBundle, isBrainBundle } from "../bundle/bundle.js";
 import {
@@ -1039,20 +1040,29 @@ export function registerApiTriggers(
         };
       }
       const keepDays = body.keep_days ?? DEFAULT_KEEP_DAYS;
-      const result = await sdk.trigger({
-        function_id: "state::compact",
-        payload: {
-          dryRun: body.dry_run === true || body.dryRun === true,
-          ...(prune
-            ? {
-                pruneSuperseded: true,
-                keepPayloadsSince: new Date(
-                  Date.now() - keepDays * 86_400_000,
-                ).toISOString(),
-              }
-            : {}),
-        },
-      });
+      let result: unknown;
+      try {
+        result = await sdk.trigger({
+          function_id: "state::compact",
+          payload: {
+            dryRun: body.dry_run === true || body.dryRun === true,
+            ...(prune
+              ? {
+                  pruneSuperseded: true,
+                  keepPayloadsSince: new Date(
+                    Date.now() - keepDays * 86_400_000,
+                  ).toISOString(),
+                }
+              : {}),
+          },
+        });
+      } catch (err) {
+        // A broken chain is refused, not re-anchored (see OplogChainBrokenError).
+        if (err instanceof OplogChainBrokenError) {
+          return { status_code: 409, body: { error: err.message, brokenAt: err.brokenAt } };
+        }
+        throw err;
+      }
       return { status_code: 200, body: result };
     },
   );

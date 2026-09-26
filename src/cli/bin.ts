@@ -394,7 +394,9 @@ async function doctor(rest: string[]): Promise<void> {
         (fail ? `, ${fail} failed` : "") +
         (erase
           ? ". Run `memwarden compact` later to reclaim bytes.\n"
-          : ". Use --erase to also null oplog payloads, then `memwarden compact`.\n"),
+          : ". To remove their content from history too, run `memwarden compact`:\n" +
+            "  one pass erases every forgotten memory's payloads. (--erase does it per\n" +
+            "  memory, re-verifying the whole chain each time, which is slow in bulk.)\n"),
     );
   }
 }
@@ -632,6 +634,11 @@ async function compact(rest: string[]): Promise<void> {
       ...(prune ? { prune_history: true, keep_days: keepDays } : {}),
     }),
   });
+  if (res.status === 409) {
+    // The daemon refused to re-anchor a broken chain; say why, verbatim.
+    const refusal = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(refusal.error ?? "compact refused: the oplog chain is broken");
+  }
   if (!res.ok) throw new Error(`compact failed: HTTP ${res.status}`);
   const r = (await res.json()) as {
     entriesRewritten: number;

@@ -9,6 +9,15 @@ Found by running 0.1.1 for a month on a real machine: the daemon crashed with
 a 4GB out-of-memory error when `memwarden doctor` ran, and the brain had grown
 to 1.8GB.
 
+### Security
+- **`compact` no longer re-anchors tampered history.** Compaction re-chains
+  every entry from genesis. Run over an edited, reordered, or forged chain, it
+  turned a failing verification into a passing one. It now verifies in the
+  same streaming pass and refuses with the broken entry's id (HTTP 409 from
+  `/memwarden/compact`). Unauthorized NULL payloads are still accepted,
+  because compaction is the documented repair for chains erased before erase
+  records existed.
+
 ### Fixed
 - **The daemon no longer loads the whole oplog to answer small questions.**
   Counting entries (doctor, `/memwarden/verify`), reading the chain head and
@@ -29,7 +38,20 @@ to 1.8GB.
   verification from the last minute over the entries appended since, falling
   back to a full walk after any in-place rewrite (erase, compact) or when the
   window lapses. Explicit `memwarden verify` always walks everything. The same
-  1,318 forgets take 24 seconds.
+  1,318 forgets take 24 seconds. `--fix-stale --erase` still re-verifies per
+  memory, since each erase rewrites history in place. For bulk erasure, run
+  `--fix-stale` and then `memwarden compact`, which erases every forgotten
+  memory's payloads in one pass. The CLI now says so.
+- **The cold rebuild after a restart no longer takes the daemon down.** It ran
+  inside the first search, and its done-flag was set only when it finished, so
+  every hook search arriving mid-rebuild started another full rebuild. The
+  vector index was also only saved after a cold rebuild, so a daemon that had
+  been up for weeks re-embedded weeks of captures on restart, and embedding
+  runs synchronously on the main thread. Together these starved the event loop
+  (observed: 40+ minutes unresponsive at 280% CPU, every hook timing out).
+  The rebuild is now single-flight, and searches return as soon as the keyword
+  index is rebuilt. A large embedding backlog runs in the background in small
+  chunks, and the vector index is saved on graceful shutdown.
 - **Raw tool output no longer lands in history.** Each capture wrote the full
   raw observation (the complete tool output, stored twice as `raw` and
   `toolOutput`) and then overwrote it with the bounded synthetic memory. The

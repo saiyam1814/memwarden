@@ -157,6 +157,25 @@ export interface OplogCompactResult {
   vacuum: { ok: boolean; bytesReclaimed: number | null; detail?: string };
 }
 
+/**
+ * Thrown by compactOplog when the chain it was asked to re-anchor is broken.
+ * Compaction re-chains every entry from genesis, so running it over tampered
+ * history would turn a failing verification into a passing one: the one
+ * command that must never launder evidence. Unauthorized NULL payloads are
+ * the exception (the documented migration for chains erased before erase
+ * records existed); edits, reorders, and forged payloads are refused.
+ */
+export class OplogChainBrokenError extends Error {
+  constructor(readonly brokenAt: number) {
+    super(
+      `refusing to compact: the oplog chain is broken at entry ${brokenAt} ` +
+        `(edited, reordered, or forged history). Compacting would re-anchor it ` +
+        `as valid. Inspect it with \`memwarden verify\` first.`,
+    );
+    this.name = "OplogChainBrokenError";
+  }
+}
+
 /** Options for verifyOplog. */
 export interface OplogVerifyOptions {
   /**

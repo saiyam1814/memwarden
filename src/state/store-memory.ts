@@ -12,14 +12,17 @@ import {
   type OplogEntryRef,
   type OplogEraseResult,
   type OplogVerifyOptions,
+  OplogChainBrokenError,
   type StateEventType,
   type StateMutationEvent,
   type StateStore,
   type UpdateOp,
 } from "./store.js";
 import {
+  ChainVerifier,
   GENESIS_PREV_HASH,
   buildEraseRecord,
+  collectEraseAuthorizations,
   hashOplogEntryV2,
   hashPayload,
   planCompaction,
@@ -191,6 +194,14 @@ export class StoreMemory implements StateStore {
   }
 
   async compactOplog(opts?: OplogCompactOptions): Promise<OplogCompactResult> {
+    // Same pre-compaction check as StoreLibsql: never re-anchor tampered history.
+    const verifier = new ChainVerifier(collectEraseAuthorizations(this.oplog), undefined, {
+      allowUnauthorizedNulls: true,
+    });
+    for (const entry of this.oplog) {
+      const brokenAt = verifier.push(entry);
+      if (brokenAt !== null) throw new OplogChainBrokenError(brokenAt);
+    }
     const livePairs = new Set<string>();
     for (const [scope, keys] of this.store) {
       for (const key of keys.keys()) livePairs.add(pairKey(scope, key));

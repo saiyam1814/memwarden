@@ -34,6 +34,7 @@ import {
   type OplogEntryRef,
   type OplogEraseResult,
   type OplogVerifyOptions,
+  OplogChainBrokenError,
   type OplogOp,
   type StateEventType,
   type StateMutationEvent,
@@ -53,11 +54,15 @@ import {
 } from "./oplog.js";
 
 /**
- * Rows per page when walking the oplog. Chain verification and compaction
- * hold one page of decoded payloads at a time, so memory stays bounded by the
- * page (plus a few oversized rows), never by the length of history.
+ * Page limits when walking the oplog. Chain verification and compaction hold
+ * one page of decoded payloads at a time, so memory is bounded by the page,
+ * never by the length of history. Pages close at whichever limit comes first:
+ * a row count, or a payload byte budget (pre-fix history holds 10-20MB raw
+ * tool outputs, so 500 rows of those alone would be gigabytes). A single row
+ * larger than the budget still forms a page of one.
  */
 const OPLOG_PAGE = 500;
+const OPLOG_PAGE_BYTES = 32 * 1024 * 1024;
 
 const OPLOG_COLUMNS = `id, ts, op, scope, key, payload, prev_hash, hash, v, payload_hash`;
 
@@ -126,6 +131,12 @@ export class StoreLibsql implements StateStore {
    */
   private verifiedThrough: { id: number; hash: string; at: number; epoch: number } | null =
     null;
+  /**
+   * Bumped when a full walk starts. A walk may only cache its result if no
+   * newer walk started meanwhile, so a slow walk that passed can never
+   * overwrite a newer one that found a break.
+   */
+  private verifyGeneration = 0;
 
   constructor(options: StoreLibsqlOptions) {
     // For a local `file:` URL, ensure the parent directory exists first.
@@ -294,17 +305,33 @@ export class StoreLibsql implements StateStore {
     await this.init();
     let after = 0;
     for (;;) {
-      const page = await this.client.execute({
-        sql: `SELECT ${OPLOG_COLUMNS} FROM oplog WHERE id > ? ORDER BY id ASC LIMIT ?`,
+      // Size the page first (ids + payload lengths only), then fetch exactly
+      // the rows that fit the byte budget.
+      const sizes = await this.client.execute({
+        sql: `SELECT id, COALESCE(LENGTH(payload), 0) AS n FROM oplog
+              WHERE id > ? ORDER BY id ASC LIMIT ?`,
         args: [after, OPLOG_PAGE],
       });
-      if (page.rows.length === 0) return;
+      if (sizes.rows.length === 0) return;
+      let upTo = Number(sizes.rows[0]!.id);
+      let bytes = 0;
+      for (const row of sizes.rows) {
+        const n = Number(row.n);
+        if (bytes > 0 && bytes + n > OPLOG_PAGE_BYTES) break;
+        bytes += n;
+        upTo = Number(row.id);
+      }
+      const page = await this.client.execute({
+        sql: `SELECT ${OPLOG_COLUMNS} FROM oplog WHERE id > ? AND id <= ? ORDER BY id ASC`,
+        args: [after, upTo],
+      });
       for (const row of page.rows) {
         const entry = rowToEntry(row);
-        after = entry.id;
         yield entry;
       }
-      if (page.rows.length < OPLOG_PAGE) return;
+      after = upTo;
+      const lastSized = Number(sizes.rows[sizes.rows.length - 1]!.id);
+      if (sizes.rows.length < OPLOG_PAGE && upTo === lastSized) return;
     }
   }
 
@@ -365,13 +392,16 @@ export class StoreLibsql implements StateStore {
     // while an erase/compact rewrote history is re-checked, not reported.
     for (let attempt = 0; ; attempt++) {
       const epoch = this.oplogEpoch;
-      const startedAt = Date.now();
+      const generation = ++this.verifyGeneration;
+      const startedAt = performance.now();
       const result = await this.verifyOplogOnce();
       if (result.brokenAt === null) {
-        this.verifiedThrough =
-          this.oplogEpoch === epoch && result.through
-            ? { ...result.through, at: startedAt, epoch }
-            : null;
+        if (generation === this.verifyGeneration) {
+          this.verifiedThrough =
+            this.oplogEpoch === epoch && result.through
+              ? { ...result.through, at: startedAt, epoch }
+              : null;
+        }
         return { ok: true };
       }
       this.verifiedThrough = null;
@@ -396,7 +426,7 @@ export class StoreLibsql implements StateStore {
     if (
       !base ||
       base.epoch !== this.oplogEpoch ||
-      Date.now() - base.at > VERIFY_REUSE_MS
+      performance.now() - base.at > VERIFY_REUSE_MS
     ) {
       return undefined;
     }
@@ -418,12 +448,14 @@ export class StoreLibsql implements StateStore {
     for (const entry of entries) {
       const brokenAt = verifier.push(entry);
       if (brokenAt !== null) {
-        this.verifiedThrough = null;
+        if (this.verifiedThrough === base) this.verifiedThrough = null;
         return brokenAt;
       }
     }
     const last = entries.at(-1);
-    if (last && base.epoch === this.oplogEpoch) {
+    // Extend only the exact walk this check continued: if a newer full walk
+    // replaced (or cleared) it meanwhile, that result stands.
+    if (last && base.epoch === this.oplogEpoch && this.verifiedThrough === base) {
       this.verifiedThrough = { ...base, id: last.id, hash: last.hash };
     }
     return null;
@@ -501,7 +533,10 @@ export class StoreLibsql implements StateStore {
 
       // One batch = one transaction: the nulling and its authorization record
       // land together, or neither does — a crash can never leave the chain
-      // with unauthorized (verification-breaking) nulls.
+      // with unauthorized (verification-breaking) nulls. The epoch moves on
+      // both sides of the commit so a concurrent paged verification can never
+      // straddle it without noticing.
+      this.oplogEpoch++;
       await this.client.batch(
         [
           {
@@ -553,6 +588,15 @@ export class StoreLibsql implements StateStore {
       // oplog up front, which on a mature brain is gigabytes of payloads and
       // exhausted the daemon's heap on the very command meant to shrink it.
       const planner = new CompactionPlanner(index, livePairs, opts);
+      // Verify what is about to be re-anchored, in the same pass.
+      const anchors = await this.client.execute(
+        `SELECT ${OPLOG_COLUMNS} FROM oplog WHERE op IN ('erase', 'compact') ORDER BY id ASC`,
+      );
+      const verifier = new ChainVerifier(
+        collectEraseAuthorizations(anchors.rows.map(rowToEntry)),
+        undefined,
+        { allowUnauthorizedNulls: true },
+      );
 
       // Crash safety: ONE batch = one transaction. Either the whole rewrite
       // plus the anchoring compact record commits, or none of it does — a
@@ -567,6 +611,8 @@ export class StoreLibsql implements StateStore {
       // shape worth handing the driver.
       const nullOnly: number[] = [];
       for await (const before of this.iterateOplog()) {
+        const brokenAt = verifier.push(before);
+        if (brokenAt !== null) throw new OplogChainBrokenError(brokenAt);
         const after = planner.feed(before);
         if (opts?.dryRun) continue;
         const nulled = after.payload === null || after.payload === undefined;
@@ -642,6 +688,7 @@ export class StoreLibsql implements StateStore {
           rec.payload_hash,
         ],
       });
+      this.oplogEpoch++;
       await this.client.batch(stmts, "write");
       this.oplogEpoch++;
 

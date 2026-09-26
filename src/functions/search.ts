@@ -61,10 +61,36 @@ let vectorIndex: VectorIndexLike | null = null;
 // comment at the rebuild site: gating rebuild on index size alone hides
 // pre-restart memories when an observe lands before the first search.
 let coldRebuildDone = false;
+// The cold rebuild in flight, shared by every search that arrives during it.
+// Before this existed, `coldRebuildDone` was only set once a rebuild FINISHED,
+// so every hook search that landed mid-rebuild started another full rebuild.
+// On a large brain each one re-embedded tens of thousands of documents on the
+// main thread; together they starved the event loop, hooks timed out, and the
+// next hook search added yet another rebuild (observed live: 40+ minutes
+// unresponsive at 280% CPU after a restart).
+let coldRebuildInFlight: Promise<void> | null = null;
+// Embedding a large post-restart backlog runs here, in the background, one at
+// a time, so searches are served (keyword + whatever vectors exist) meanwhile.
+let vectorBackfill: Promise<void> | null = null;
+
+// A backlog this small is embedded before the first search returns, so a
+// small brain (and every test corpus) behaves exactly as before.
+const INLINE_BACKFILL_MAX = 256;
+// Background chunks stay small: each chunk runs synchronously on the main
+// thread, so its size bounds how long a hook can wait behind the backfill.
+// Measured on a 44,876-doc backlog: chunks of 16 held requests ~1s (past the
+// 800ms capture deadline); chunks of 4 keep livez ~0.25s and search ~0.7s.
+const BACKGROUND_EMBED_BATCH = 4;
 
 /** Test-only: simulate a fresh process (production restarts reset this). */
 export function __resetColdRebuildForTests(): void {
   coldRebuildDone = false;
+  coldRebuildInFlight = null;
+}
+
+/** Test-only: resolves once any background vector backfill has finished. */
+export function __vectorBackfillForTests(): Promise<void> {
+  return vectorBackfill ?? Promise.resolve();
 }
 let currentEmbeddingProvider: EmbeddingProvider | null = null;
 
@@ -209,13 +235,20 @@ export const EMBED_BATCH_SIZE = 64;
  */
 export async function vectorIndexAddBatchGuarded(
   docs: PendingVectorDoc[],
+  opts?: { batchSize?: number; skipExisting?: boolean },
 ): Promise<number> {
   const vi = vectorIndex;
   const ep = currentEmbeddingProvider;
   if (!vi || !ep || docs.length === 0) return 0;
+  const batchSize = opts?.batchSize ?? EMBED_BATCH_SIZE;
   let added = 0;
-  for (let start = 0; start < docs.length; start += EMBED_BATCH_SIZE) {
-    const chunk = docs.slice(start, start + EMBED_BATCH_SIZE);
+  for (let start = 0; start < docs.length; start += batchSize) {
+    // A background backfill runs alongside live captures: a doc that got its
+    // vector meanwhile (re-indexed handoff, re-add) must not be added twice.
+    const chunk = docs
+      .slice(start, start + batchSize)
+      .filter((d) => !(opts?.skipExisting && vectorIndex?.has(d.id)));
+    if (chunk.length === 0) continue;
     let embeddings: Float32Array[] | null = null;
     try {
       embeddings = await ep.embedBatch(chunk.map((d) => clipEmbedInput(d.text)));
@@ -280,6 +313,21 @@ export async function rebuildIndex(
   kv: StateKV,
   opts?: { preserveVectorIndex?: boolean },
 ): Promise<number> {
+  const { count, pending, liveIds } = await walkIndex(kv, opts);
+  await vectorIndexAddBatchGuarded(pending);
+  evictGhostVectors(liveIds);
+  return count;
+}
+
+/**
+ * The fast half of a rebuild: re-walk KV into BM25 and list the docs whose
+ * vectors are missing, without embedding anything. Keyword search is fully
+ * current once this returns.
+ */
+async function walkIndex(
+  kv: StateKV,
+  opts?: { preserveVectorIndex?: boolean },
+): Promise<{ count: number; pending: PendingVectorDoc[]; liveIds: Set<string> | null }> {
   const preserveVectors = opts?.preserveVectorIndex === true;
   const idx = getSearchIndex();
   idx.clear();
@@ -362,9 +410,59 @@ export async function rebuildIndex(
     }
   }
 
-  await vectorIndexAddBatchGuarded(pending);
+  return { count, pending, liveIds };
+}
+
+/** Run (or join) this process's cold rebuild. See coldRebuildInFlight. */
+function ensureColdRebuild(kv: StateKV): Promise<void> {
+  if (!coldRebuildInFlight) {
+    coldRebuildInFlight = runColdRebuild(kv).finally(() => {
+      coldRebuildInFlight = null;
+    });
+  }
+  return coldRebuildInFlight;
+}
+
+async function runColdRebuild(kv: StateKV): Promise<void> {
+  if (vectorBackfill) await vectorBackfill; // never two backfills at once
+  // Restore persisted quantized codes first (no-op unless a valid blob
+  // exists), then rebuild BM25. With a successful restore the vector side runs
+  // in incremental-sync mode (embed only missing ids, evict ghosts);
+  // afterwards the reconciled index is persisted again so the blob converges
+  // with KV.
+  const restoredVectors = await loadVectorIndex(kv);
+  const { count, pending, liveIds } = await walkIndex(kv, {
+    preserveVectorIndex: restoredVectors,
+  });
   evictGhostVectors(liveIds);
-  return count;
+  coldRebuildDone = true;
+  if (pending.length <= INLINE_BACKFILL_MAX) {
+    await vectorIndexAddBatchGuarded(pending);
+    const persisted = await persistVectorIndex(kv);
+    logger.info("Search index rebuilt", { entries: count, restoredVectors, persisted });
+    return;
+  }
+  logger.info("Search index rebuilt; embedding the vector backlog in the background", {
+    entries: count,
+    restoredVectors,
+    pendingVectors: pending.length,
+  });
+  vectorBackfill = (async () => {
+    const added = await vectorIndexAddBatchGuarded(pending, {
+      batchSize: BACKGROUND_EMBED_BATCH,
+      skipExisting: true,
+    });
+    const persisted = await persistVectorIndex(kv);
+    logger.info("Vector backlog embedded", { added, persisted });
+  })()
+    .catch((err) => {
+      logger.warn("vector backfill failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    })
+    .finally(() => {
+      vectorBackfill = null;
+    });
 }
 
 // In preserve (incremental-sync) mode, removes vector entries whose ids no
@@ -857,23 +955,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       // (The size check stays as an OR for in-process restarts in tests that
       // clear the index directly.)
       if (!coldRebuildDone || idx.size === 0) {
-        // Restore persisted quantized codes first (no-op unless
-        // MEMWARDEN_QUANT_VECTOR is on and a valid blob exists), then
-        // rebuild BM25. With a successful restore the vector side runs in
-        // incremental-sync mode (embed only missing ids, evict ghosts);
-        // afterwards the reconciled index is persisted again so the blob
-        // converges with KV. One blob write per cold rebuild.
-        const restoredVectors = await loadVectorIndex(kv);
-        const count = await rebuildIndex(kv, {
-          preserveVectorIndex: restoredVectors,
-        });
-        const persisted = await persistVectorIndex(kv);
-        coldRebuildDone = true;
-        logger.info("Search index rebuilt", {
-          entries: count,
-          restoredVectors,
-          persisted,
-        });
+        await ensureColdRebuild(kv);
       }
 
       // Inclusion filters over-fetch so a run of excluded high-ranking hits

@@ -482,10 +482,16 @@ export class ChainVerifier {
   private expectedPrev: string;
   private lastId: number;
 
-  /** `resumeFrom` continues a chain already verified through that entry. */
+  /**
+   * `resumeFrom` continues a chain already verified through that entry.
+   * `allowUnauthorizedNulls` accepts a content-committed null with no erase
+   * or compact record vouching for it: only the pre-compaction check uses it,
+   * because compaction is the documented repair for exactly that case.
+   */
   constructor(
     private readonly authorized: EraseAuthorizations,
     resumeFrom?: { id: number; hash: string },
+    private readonly opts?: { allowUnauthorizedNulls?: boolean },
   ) {
     this.expectedPrev = resumeFrom?.hash ?? GENESIS_PREV_HASH;
     this.lastId = resumeFrom?.id ?? -Infinity;
@@ -506,6 +512,7 @@ export class ChainVerifier {
         return entry.id;
       }
       if (
+        !this.opts?.allowUnauthorizedNulls &&
         (entry.payload === null || entry.payload === undefined) &&
         entry.payload_hash !== NULL_PAYLOAD_HASH &&
         !(this.authorized.get(entry.id) ?? []).some(
