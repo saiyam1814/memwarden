@@ -64,6 +64,9 @@ to 1.8GB.
   records existed.
 
 ### Fixed
+- **`doctor` stops flagging pronouns as contradictions.** "There is a race" and "there is no retry
+  budget" were reported as a conflict on the subject "there" (likewise "dates", "it"). Single-word
+  subjects with no referent are no longer claims.
 - **`forget` no longer orphans a memory's retention score.** Consolidation writes one per memory
   and nothing ever removed it.
 - **The daemon no longer loads the whole oplog to answer small questions.**

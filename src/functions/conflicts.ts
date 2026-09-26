@@ -108,9 +108,20 @@ function words(raw: string): string[] {
     .filter((w) => w.length > 1 && !STOP_WORDS.has(w));
 }
 
+// Single-word "subjects" that carry no referent: pronouns and expletives
+// ("there is…", "it was…") and generic nouns that name a slot, not a thing.
+// Observed live: doctor flagged "there" and "dates" as contradictions.
+const VAGUE_SUBJECTS = new Set([
+  "there", "here", "it", "its", "this", "that", "these", "those", "they", "we", "you",
+  "he", "she", "what", "which", "who", "one", "everything", "something", "nothing",
+  "dates", "date", "time", "today", "now", "output", "result", "results", "file",
+  "files", "line", "lines", "value", "values", "thing", "things", "answer", "status",
+]);
+
 function subjectKey(raw: string): string {
   const ws = words(raw);
-  return ws.slice(-5).join(" ");
+  const key = ws.slice(-5).join(" ");
+  return ws.length === 1 && VAGUE_SUBJECTS.has(key) ? "" : key;
 }
 
 function valueWords(raw: string): string[] {
