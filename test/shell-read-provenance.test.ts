@@ -43,7 +43,11 @@ afterEach(() => {
   rmSync(repo, { recursive: true, force: true });
 });
 
-async function capture(toolInput: Record<string, unknown>, toolName = "Bash"): Promise<CompressedObservation> {
+async function capture(
+  toolInput: Record<string, unknown>,
+  toolName = "Bash",
+  agent?: string,
+): Promise<CompressedObservation> {
   const r = await sdk.trigger<unknown, { observationId: string }>({
     function_id: "mem::observe",
     payload: {
@@ -52,6 +56,7 @@ async function capture(toolInput: Record<string, unknown>, toolName = "Bash"): P
       project: repo,
       cwd: repo,
       timestamp: new Date().toISOString(),
+      ...(agent ? { agent } : {}),
       data: { tool_name: toolName, tool_input: toolInput, tool_output: { stdout: "export const ROTATE_MS = 900_000;" } },
     },
   });
@@ -109,6 +114,7 @@ describe("shell reads carry verifiable file evidence", () => {
     const obs = await capture(
       { command: ["bash", "-lc", "sed -n 1,2p a.ts"], workdir: join(repo, "src") },
       "exec_command",
+      "codex",
     );
     expect(obs.provenance?.files).toEqual(["src/a.ts"]);
     expect(classifyProvenance(obs.provenance, repo).status).toBe("verified");
@@ -144,11 +150,17 @@ describe("shell reads carry verifiable file evidence", () => {
   });
 
   it("a relative Codex workdir and a Gemini dir_path resolve against the session cwd", async () => {
-    const codex = await capture({ command: ["bash", "-lc", "cat a.ts"], workdir: "src" }, "exec_command");
+    const codex = await capture({ command: ["bash", "-lc", "cat a.ts"], workdir: "src" }, "exec_command", "codex");
     expect(codex.provenance?.files).toEqual(["src/a.ts"]);
     expect(classifyProvenance(codex.provenance, repo).status).toBe("verified");
-    const gemini = await capture({ command: "cat b.ts", dir_path: "src" }, "run_shell_command");
+    const gemini = await capture({ command: "cat b.ts", dir_path: "src" }, "run_shell_command", "gemini");
     expect(gemini.provenance?.files).toEqual(["src/b.ts"]);
+  });
+
+  it("a generic `exec` tool from a host that is not known to own it is not a local shell", async () => {
+    // e.g. a Gemini CLI MCP server surfacing a remote-exec tool as bare `exec`
+    const obs = await capture({ host: "prod-1", command: "cat src/a.ts" }, "exec", "gemini");
+    expect(obs.provenance?.files).toBeUndefined();
   });
 
   it("a remote-exec MCP tool is never vouched for by local files", async () => {
@@ -191,6 +203,60 @@ describe("shell reads carry verifiable file evidence", () => {
     expect(fromRoot().status).toBe("verified");
     writeFileSync(join(sub, "package.json"), '{"name":"foo","v":2}\n'); // the file it read
     expect(fromRoot().status).toBe("stale");
+  });
+
+  it("absolute evidence inside the checkout but outside the capture cwd re-roots at the caller's worktree", async () => {
+    const main = join(repo, "main");
+    const wt = join(repo, "wt");
+    for (const top of [main, wt]) {
+      mkdirSync(join(top, "src"), { recursive: true });
+      mkdirSync(join(top, "packages", "foo"), { recursive: true });
+      writeFileSync(join(top, "src", "x.ts"), "export const QUOKKA = 1;\n");
+    }
+    mkdirSync(join(main, ".git"));
+    writeFileSync(join(wt, ".git"), `gitdir: ${join(main, ".git", "worktrees", "wt")}\n`);
+    __resetGitIdentityCache();
+    const sub = join(main, "packages", "foo");
+    const r = await sdk.trigger<unknown, { observationId: string }>({
+      function_id: "mem::observe",
+      payload: {
+        hookType: "post_tool_use",
+        sessionId: "s-wt",
+        project: sub,
+        cwd: sub,
+        timestamp: new Date().toISOString(),
+        data: { tool_name: "Read", tool_input: { file_path: join(main, "src", "x.ts") }, tool_output: "QUOKKA" },
+      },
+    });
+    const obs = (await kv.get<CompressedObservation>(KV.observations("s-wt"), r.observationId))!;
+    expect(obs.provenance?.files).toEqual([join(main, "src", "x.ts")]);
+    expect(obs.provenance?.cwdInRepo).toBe(join("packages", "foo"));
+
+    const fromWt = () => classifyProvenance(obs.provenance, wt, { verifyAgainstRoot: true });
+    expect(fromWt().status).toBe("verified");
+    writeFileSync(join(main, "src", "x.ts"), "export const QUOKKA = 2;\n"); // the OTHER worktree
+    expect(fromWt().status).toBe("verified");
+    writeFileSync(join(wt, "src", "x.ts"), "export const QUOKKA = 3;\n"); // this worktree's copy
+    expect(fromWt().status).toBe("stale");
+  });
+
+  it("a hostile cwdInRepo (absolute or climbing) is ignored", () => {
+    mkdirSync(join(repo, ".git"));
+    __resetGitIdentityCache();
+    const hash = classifyProvenance(
+      { files: ["src/a.ts"], fileHashes: {}, cwd: repo, userConfirmed: false },
+      repo,
+    );
+    expect(hash.status).toBe("sourced_unverified");
+    for (const bad of ["../..", "/etc", "a/../../b"]) {
+      const v = classifyProvenance(
+        { files: ["a.ts"], fileHashes: { "a.ts": "0".repeat(64) }, cwd: join(repo, "src"), cwdInRepo: bad, userConfirmed: false },
+        repo,
+        { verifyAgainstRoot: true },
+      );
+      // falls back to the caller root: repo/a.ts does not exist -> stale, never an escape
+      expect(v.status).toBe("stale");
+    }
   });
 });
 

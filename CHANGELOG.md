@@ -24,8 +24,17 @@ to 1.8GB.
   and neither is recorded as a "file" any more; that had capped every Codex shell capture below
   verified. An adversarial review of the first version reproduced five false-`verified` paths
   (missing candidates dropped silently, file-valued options, a relative `cd` applied twice, a
-  relative workdir, and remote-exec MCP tools). All five are fixed and pinned by tests. On 5,613
-  real shell captures, 32.4% now carry file evidence and 21.5% are complete reads (17.5% verify
+  relative workdir, and remote-exec MCP tools). A second round found more:
+  - long options the parser did not know, including GNU/BSD abbreviations (`sha256sum --ch`),
+    optional-argument options, and file-list options;
+  - awk swapping its input through `ARGV`;
+  - generic tool names;
+  - newline continuations and backgrounded `cd` lists;
+  - absolute evidence outside the capture cwd.
+
+  All of these are fixed and pinned by tests. Viewers now take options from a strict allowlist,
+  and shell tools are recognized per host. On 5,613
+  real shell captures, 32.3% now carry file evidence and 21.5% are complete reads (17.5% verify
   against today's files). Three new eval gates pin the behavior, including the adversarial shapes:
   `shell-read-verify`, `shell-read-refusal`, and `shell-mixed-capped`.
 - **Plain reads age out instead of becoming permanent memories.** The retention sweep promoted
@@ -37,8 +46,9 @@ to 1.8GB.
 - **Subdirectory captures are verified against the right file.** Relative evidence was re-rooted
   at the caller's cwd, so a memory captured in `packages/foo` and recalled from the repo root
   checked the root `package.json`. The result was a false stale, or a false verified if the two
-  files matched. New captures record where their cwd sat inside the checkout (`cwdInRepo`), and
-  recall re-roots at `<checkout root>/<cwdInRepo>`.
+  files matched. New captures record where their cwd sat inside the checkout (`cwdInRepo`). Recall
+  re-roots relative files at `<checkout root>/<cwdInRepo>`, and re-roots absolute files inside the
+  capture's checkout at the caller's checkout.
 
 - **`memwarden repair --legacy` fixes memories distilled from pre-0.0.8 captures.** The old
   extractor titled every capture with its tool name and stored raw tool JSON as the body. The

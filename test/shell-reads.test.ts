@@ -135,6 +135,7 @@ describe("shell reads: review findings (each once produced a false verified)", (
     ["tail -fn5 x.log", []],
     ["sort -o/tmp/out in.txt", []],
     ["rg --pre ./decode foo a.ts", []],
+    ["ag foo a.ts", []], // ag's flags differ from grep's; not a known viewer
     ["bat --diff a.ts", []],
     // nits: redirect targets are never operands; writes cap
     ["cat a.ts >&out.txt", ["/repo/a.ts"]],
@@ -151,6 +152,54 @@ describe("shell reads: review findings (each once produced a false verified)", (
     expect(r).toEqual({ files: [`${TMP}/repo/src/a.ts`], complete: true });
     const outside = extractShellReads(`cat ${TMP}/other.txt`, `${TMP}/repo`, { tmpdir: TMP });
     expect(outside).toEqual({ files: [], complete: false });
+  });
+
+  it.each([
+    // N1: long options outside the allowlist (incl. GNU/BSD abbreviations)
+    ["/usr/bin/grep --context x a.txt b.txt"],
+    ["grep -C 2 foo a.txt"],
+    ["sha256sum --ch SUMS"],
+    ["shasum --chec SUMS"],
+    ["sort --files0-from list0"],
+    ["grep --reg=x a.txt b.txt"],
+    ["sed -n 1p --expr='1r b.ts' a.ts"],
+    ["awk --file=prog.awk a.ts b.ts"],
+    ["awk -E prog.awk a.ts b.ts"],
+    ["wc --files0-from list0"],
+    ["sed -n --in-pl 1p a.ts"],
+    ["sort --out=x a.txt"],
+    ["tail --fo a.log"],
+    ["cat --frobnicate a.ts"],
+    // N2: awk swaps its input through ARGV
+    ["awk 'BEGIN{ARGV[1]=\"b.txt\"} {print}' a.txt"],
+    // nits: environment-dependent output
+    ["jq -n 'get_search_list'"],
+    ["jq 'now | localtime' a.json"],
+    ["printf '%(%F)T\\n' -1; cat a.ts"],
+    ["set -o; cat a.ts"],
+  ])("never complete: %s", (cmd) => {
+    const r = reads(cmd);
+    expect(r === null || r.complete === false).toBe(true);
+  });
+
+  it("known optional/attached forms still work", () => {
+    expect(reads("diff --unified=3 a.txt b.txt")).toEqual({ files: ["/repo/a.txt", "/repo/b.txt"], complete: true });
+    // optional in GNU and Apple diff alike: the bare form consumes nothing (it used to eat a.txt)
+    expect(reads("diff --unified a.txt b.txt")).toEqual({ files: ["/repo/a.txt", "/repo/b.txt"], complete: true });
+    expect(reads("grep -C2 foo a.txt")).toEqual({ files: ["/repo/a.txt"], complete: true });
+    expect(reads("grep --context=2 foo a.txt")).toEqual({ files: ["/repo/a.txt"], complete: true });
+    expect(reads("grep --color foo a.txt b.txt")).toEqual({ files: ["/repo/a.txt", "/repo/b.txt"], complete: true });
+  });
+
+  it("N4: a newline after && / || / | continues the list; a backgrounded cd list yields nothing", () => {
+    expect(reads("echo hi ||\ncd /abs && cat f.txt")).toBeNull();
+    expect(reads("cd /abs && true & cat f.txt")).toBeNull();
+    expect(reads("cat a.ts |\ngrep x")).toEqual({ files: ["/repo/a.ts"], complete: true });
+  });
+
+  it("nits: `00<` is stdin; `-` as an option value is not a stdin operand", () => {
+    expect(reads("cat - 00<b.ts")).toEqual({ files: ["/repo/b.ts"], complete: true });
+    expect(reads("cut -d - -f1 a.txt < b.txt")).toEqual({ files: ["/repo/a.txt"], complete: true });
   });
 
   it("an fd other than stdin is not the command's input", () => {
@@ -187,13 +236,19 @@ describe("shell reads: unanalyzable commands yield no evidence at all", () => {
 });
 
 describe("shell tools and command shapes", () => {
-  it("only local shell tools are parsed; remote-exec MCP tools never are", () => {
-    for (const t of ["Bash", "bash", "shell", "exec", "exec_command", "local_shell", "run_shell_command", "run_terminal_cmd", "executeBash"]) {
-      expect(isLocalShellTool(t)).toBe(true);
-    }
-    for (const t of ["mcp__ssh__exec", "mcp__kubernetes__exec_in_pod", "Read", "WebFetch", undefined]) {
-      expect(isLocalShellTool(t)).toBe(false);
-    }
+  it("only a host's own local shell tool is parsed; generic and MCP names never are", () => {
+    const yes: Array<[string, string | undefined]> = [
+      ["Bash", "claude-code"], ["Bash", "codex"], ["exec_command", "codex"], ["local_shell", "codex"],
+      ["run_shell_command", "gemini"], ["run_terminal_cmd", "cursor"], ["executeBash", "kiro"],
+      ["bash", "opencode"], ["Bash", undefined],
+    ];
+    for (const [t, h] of yes) expect(isLocalShellTool(t, h)).toBe(true);
+    const no: Array<[string | undefined, string | undefined]> = [
+      ["exec", "gemini"], ["exec", undefined], ["shell", undefined], ["run_command", "claude-code"],
+      ["mcp__ssh__exec", "codex"], ["mcp__kubernetes__exec_in_pod", "claude-code"], ["Read", "claude-code"],
+      [undefined, "codex"], ["Bash", "some-new-host"],
+    ];
+    for (const [t, h] of no) expect(isLocalShellTool(t, h)).toBe(false);
   });
 
   it("reads a string, a Codex bash -lc argv, a `cmd` key, and quotes other argv verbatim", () => {

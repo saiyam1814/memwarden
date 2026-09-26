@@ -12,8 +12,11 @@ This file exists so the README does not have to pretend otherwise.
   additionally flags conservative subject/value conflicts as advisories - it never drops them from
   recall.
 - **Shell-read evidence is a conservative parse, not a sandbox trace.** memwarden reads the command
-  line, not the process, and only for local shell tools (never an MCP tool that runs a command on
-  another machine). It recognizes a fixed set of read-only viewers: `cat`, `sed -n` with an
+  line, not the process. It does this only for each host's own local shell tool (Claude Code `Bash`,
+  Codex `shell`/`exec_command`, Gemini `run_shell_command`, …), never for a generic or MCP tool name
+  that could run a command on another machine. Each viewer has an allowlist of the options it
+  accepts. Any other option, a long-option abbreviation, or a value whose spaced form GNU and BSD
+  tools parse differently makes the read incomplete. It recognizes a fixed set of read-only viewers: `cat`, `sed -n` with an
   address-and-print script, `head`, `tail`, `grep`/`rg`/`ag` with file operands, `jq`, `diff`, `wc`,
   checksum tools, and `sort`/`cut`/`awk` with file operands. Files named by options (`grep -f`,
   `jq --rawfile`) count too. A file is kept only if it hashes at capture, and any candidate that does

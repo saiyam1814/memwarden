@@ -138,7 +138,12 @@ function addShellReadEvidence(prov: Provenance, payload: HookPayload, cwd: strin
       : {};
   // Local shells only: an MCP tool that runs a command on another machine
   // (ssh, kubectl exec) must never be vouched for by files on this one.
-  if (!isLocalShellTool(typeof data["tool_name"] === "string" ? data["tool_name"] : undefined)) {
+  if (
+    !isLocalShellTool(
+      typeof data["tool_name"] === "string" ? data["tool_name"] : undefined,
+      typeof payload.agent === "string" ? payload.agent : undefined,
+    )
+  ) {
     return;
   }
   const input = data["tool_input"];
@@ -627,7 +632,7 @@ export function registerObserveFunction(
           }
         }
         if (!payload.adopted && payload.cwd) addShellReadEvidence(prov, payload, payload.cwd);
-        if (payload.cwd && prov.files?.some((f) => !isAbsolute(f))) {
+        if (payload.cwd && prov.files && prov.files.length > 0) {
           // Anchor relative evidence at the checkout, not at this cwd (see
           // Provenance.cwdInRepo).
           const top = gitWorktreeRoot(payload.cwd);

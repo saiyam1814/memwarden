@@ -45,19 +45,27 @@ const MAX_SHELL_FILES = 16;
 /** Longer command lines are not analyzed (the parse must stay cheap). */
 const MAX_COMMAND_CHARS = 8_000;
 
-// Local shell tools, by normalized name (lowercase, alphanumerics only).
-// Hosts spell them differently: Claude Code `Bash`, Codex `shell`/`exec`/
-// `exec_command`/`local_shell`, Gemini `run_shell_command`, Cursor
-// `run_terminal_cmd`, Kiro `executeBash`, OpenCode `bash`.
-const LOCAL_SHELL_TOOLS = new Set([
-  "bash", "shell", "sh", "zsh", "exec", "execcommand", "localshell", "runshellcommand",
-  "runterminalcmd", "executecommand", "executebash", "terminal", "runcommand",
-]);
+// Local shell tools per host, by the exact tool name each host's hooks send.
+// Keyed by host because the bare names are generic: a Gemini CLI MCP server
+// can surface a remote-exec tool as plain `exec`, and local files must never
+// vouch for output produced on another machine. Observed live: Claude Code
+// and Codex hooks both send `Bash`.
+const LOCAL_SHELL_TOOLS: Readonly<Record<string, readonly string[]>> = {
+  "claude-code": ["Bash"],
+  codex: ["Bash", "shell", "exec", "exec_command", "local_shell"],
+  cursor: ["Shell", "run_terminal_cmd", "Bash"],
+  gemini: ["run_shell_command"],
+  kiro: ["executeBash", "execute_bash"],
+  opencode: ["bash"],
+};
+// Payloads that do not name their host: only the unambiguous Claude-style name.
+const UNKNOWN_HOST_SHELL_TOOLS = ["Bash"];
 
 /** True for a tool that runs its command in a local shell on this machine. */
-export function isLocalShellTool(toolName: string | undefined): boolean {
+export function isLocalShellTool(toolName: string | undefined, host?: string): boolean {
   if (!toolName || toolName.startsWith("mcp__")) return false;
-  return LOCAL_SHELL_TOOLS.has(toolName.toLowerCase().replace(/[^a-z0-9]/g, ""));
+  const allowed = host ? LOCAL_SHELL_TOOLS[host] : UNKNOWN_HOST_SHELL_TOOLS;
+  return !!allowed?.includes(toolName);
 }
 
 interface Token {
@@ -163,7 +171,12 @@ function lex(command: string): Lexeme[] | null {
     }
     if (c === "\n" || c === ";") {
       flush();
-      out.push({ kind: "op", op: ";" });
+      // A newline right after `&&`, `||`, or `|` continues the list; only a
+      // newline elsewhere ends a command (as `;` does).
+      const prev = out[out.length - 1];
+      const continues =
+        c === "\n" && prev?.kind === "op" && (prev.op === "&&" || prev.op === "||" || prev.op === "|");
+      if (!continues) out.push({ kind: "op", op: ";" });
       i++;
       continue;
     }
@@ -268,7 +281,7 @@ function stages(lexemes: Lexeme[]): Stage[] | null {
       continue;
     }
     if (kind === "<") {
-      if (fd === "" || fd === "0") cur.inputs.push(target.token);
+      if (/^0*$/.test(fd)) cur.inputs.push(target.token); // "", "0", "00" are stdin
       continue; // other fds are never the command's stdin
     }
     if (target.token.text !== "/dev/null") cur.writes = true;
@@ -279,10 +292,23 @@ function stages(lexemes: Lexeme[]): Stage[] | null {
 }
 
 interface ViewerSpec {
-  /** Options that consume a value (spaced, `=`, or attached). */
+  /**
+   * Every option the viewer is allowed to carry, as an allowlist. An option
+   * that is not listed (including a GNU/BSD long-option ABBREVIATION such as
+   * `--ch` for `--check`) makes the read incomplete: its meaning, whether it
+   * consumes the next word, and whether it reads another file are unknown.
+   */
+  flags?: readonly string[];
+  /** Options that require a value (spaced, `=`, or attached). */
   valueFlags?: readonly string[];
-  /** Options whose value is a FILE the command reads (also value flags). */
+  /** Options whose value is a FILE the command reads (also value options). */
   fileFlags?: readonly string[];
+  /** Options with an OPTIONAL value: only the `=`/attached form carries one;
+   * the bare form never consumes the next word. */
+  optionalFlags?: readonly string[];
+  /** Options where implementations disagree on whether a spaced value is
+   * consumed (GNU requires it, BSD makes it optional): bare = incomplete. */
+  ambiguousFlags?: readonly string[];
   /** Options that consume two values; the second is a file (jq --rawfile). */
   pairFileFlags?: readonly string[];
   /** Options that consume two values, neither a file (jq --arg name value). */
@@ -303,41 +329,79 @@ interface ViewerSpec {
   programCheck?: "sed" | "awk" | "jq";
   /** Only the first operand is an input (uniq in [out]); more is a write. */
   singleInput?: boolean;
+  /** `-20` style numeric options (head/tail line counts). */
+  numericShort?: boolean;
 }
 
-const GREP_BASE: ViewerSpec = {
+const GREP: ViewerSpec = {
   searchesTree: ["-r", "-R", "--recursive", "--dereference-recursive"],
   firstIsProgram: true,
   programFlags: ["-e", "-f", "--regexp", "--file"],
   fileFlags: ["-f", "--file"],
-  valueFlags: [
-    "-e", "-f", "-m", "-A", "-B", "-C", "-d", "-D", "--regexp", "--file", "--max-count",
-    "--context", "--after-context", "--before-context", "--include", "--exclude",
-    "--exclude-dir", "--label", "--binary-files", "--devices", "--directories",
+  flags: [
+    "-i", "-v", "-w", "-x", "-c", "-l", "-L", "-n", "-h", "-H", "-o", "-q", "-s", "-r", "-R",
+    "-E", "-F", "-G", "-P", "-z", "-Z", "-a", "-I", "-b", "-U", "--ignore-case",
+    "--invert-match", "--word-regexp", "--line-regexp", "--count", "--files-with-matches",
+    "--files-without-match", "--line-number", "--no-filename", "--with-filename",
+    "--only-matching", "--quiet", "--silent", "--no-messages", "--recursive",
+    "--dereference-recursive", "--extended-regexp", "--fixed-strings", "--basic-regexp",
+    "--perl-regexp", "--text", "--null", "--null-data", "--byte-offset", "--binary",
   ],
+  valueFlags: [
+    "-e", "-m", "-A", "-B", "--regexp", "--max-count", "--after-context", "--before-context",
+    "--include", "--exclude", "--exclude-dir", "--label",
+  ],
+  optionalFlags: ["--color", "--colour"],
+  // GNU grep: `-C NUM` / `--context NUM` require the number; BSD (macOS)
+  // makes it optional, so there `-C 2 foo f` treats 2 as the PATTERN.
+  ambiguousFlags: ["-C", "--context"],
 };
 
 const RG: ViewerSpec = {
-  ...GREP_BASE,
   searchesTree: true,
-  valueFlags: [
-    ...(GREP_BASE.valueFlags ?? []), "-g", "-t", "-T", "-M", "-j", "--glob", "--iglob",
-    "--type", "--type-not", "--max-columns", "--threads", "--max-depth", "--sort", "--sortr",
-    "--colors", "--encoding", "-E",
+  firstIsProgram: true,
+  programFlags: ["-e", "-f", "--regexp", "--file"],
+  fileFlags: ["-f", "--file"],
+  flags: [
+    "-i", "-S", "-s", "-v", "-w", "-x", "-c", "-l", "-n", "-N", "-H", "-I", "-o", "-q", "-F",
+    "-U", "-P", "-a", "-L", "-u", "--ignore-case", "--smart-case", "--case-sensitive",
+    "--invert-match", "--word-regexp", "--line-regexp", "--count", "--count-matches",
+    "--files-with-matches", "--files-without-match", "--line-number", "--no-line-number",
+    "--with-filename", "--no-filename", "--only-matching", "--quiet", "--fixed-strings",
+    "--multiline", "--pcre2", "--text", "--follow", "--hidden", "--no-ignore", "--no-heading",
+    "--heading", "--vimgrep", "--json", "--trim", "--no-messages", "--column", "--byte-offset",
   ],
-  refuseFlags: ["--pre", "--pre-glob", "-z", "--search-zip"],
+  valueFlags: [
+    "-e", "-g", "-t", "-T", "-m", "-A", "-B", "-C", "-M", "-j", "-E", "--regexp", "--glob",
+    "--iglob", "--type", "--type-not", "--max-count", "--after-context", "--before-context",
+    "--context", "--max-columns", "--threads", "--max-depth", "--sort", "--sortr", "--color",
+    "--colors", "--encoding",
+  ],
 };
+
+const HEAD_TAIL_VALUES = ["-n", "-c", "--lines", "--bytes"];
 
 // Commands that only ever read their file operands and print derived output.
 const VIEWERS: Readonly<Record<string, ViewerSpec>> = {
-  cat: {},
-  tac: {},
-  nl: { valueFlags: ["-b", "-w", "-s", "-v", "-i", "-n"] },
-  head: { valueFlags: ["-n", "-c"] },
-  tail: { valueFlags: ["-n", "-c"], refuseFlags: ["-f", "-F", "--follow"] },
-  wc: {},
+  cat: {
+    flags: ["-n", "-b", "-s", "-v", "-e", "-t", "-A", "-E", "-T", "-u", "--number",
+      "--number-nonblank", "--squeeze-blank", "--show-all", "--show-ends", "--show-tabs",
+      "--show-nonprinting"],
+  },
+  tac: { flags: ["-b", "-r", "--before", "--regex"], valueFlags: ["-s", "--separator"] },
+  nl: { flags: ["-p"], valueFlags: ["-b", "-w", "-s", "-v", "-i", "-n", "-h", "-f", "-d", "-l"] },
+  head: { flags: ["-q", "-v", "--quiet", "--silent", "--verbose"], valueFlags: HEAD_TAIL_VALUES, numericShort: true },
+  tail: {
+    flags: ["-q", "-v", "-r", "--quiet", "--silent", "--verbose", "-f", "-F", "--follow"],
+    valueFlags: HEAD_TAIL_VALUES,
+    refuseFlags: ["-f", "-F", "--follow"],
+    numericShort: true,
+  },
+  wc: { flags: ["-l", "-w", "-c", "-m", "-L", "--lines", "--words", "--bytes", "--chars", "--max-line-length"] },
   bat: {
-    valueFlags: ["-l", "--language", "-r", "--line-range", "-H", "--highlight-line", "--style"],
+    flags: ["-n", "-p", "-A", "-P", "--plain", "--number", "--show-all", "-d", "--diff"],
+    valueFlags: ["-l", "--language", "-r", "--line-range", "-H", "--highlight-line", "--style",
+      "--theme", "--paging", "--color", "--wrap", "--tabs", "--terminal-width"],
     refuseFlags: ["-d", "--diff"],
   },
   sed: {
@@ -345,48 +409,67 @@ const VIEWERS: Readonly<Record<string, ViewerSpec>> = {
     firstIsProgram: true,
     programFlags: ["-e", "-f", "--expression", "--file"],
     fileFlags: ["-f", "--file"],
-    valueFlags: ["-e", "-f", "--expression", "--file", "-l"],
+    flags: ["-n", "-E", "-r", "-s", "-u", "-z", "--quiet", "--silent", "--regexp-extended",
+      "--posix", "--separate", "--null-data", "--unbuffered", "-i", "--in-place"],
+    valueFlags: ["-e", "--expression", "-l", "--line-length"],
     refuseFlags: ["-i", "--in-place"],
     attachedOnlyFlags: ["-i"],
     programCheck: "sed",
   },
-  grep: GREP_BASE,
-  egrep: GREP_BASE,
-  fgrep: GREP_BASE,
+  grep: GREP,
+  egrep: GREP,
+  fgrep: GREP,
   rg: RG,
-  ag: { ...RG, refuseFlags: ["-z", "--search-zip"] },
   jq: {
     firstIsProgram: true,
     programFlags: ["--from-file", "-f"],
     fileFlags: ["--from-file", "-f"],
-    valueFlags: ["--indent", "--from-file", "-f"],
+    flags: ["-r", "-j", "-c", "-n", "-s", "-e", "-S", "-C", "-M", "-a", "-R", "--raw-output",
+      "--join-output", "--compact-output", "--null-input", "--slurp", "--exit-status",
+      "--sort-keys", "--color-output", "--monochrome-output", "--ascii-output", "--tab",
+      "--seq", "--stream", "--raw-input", "--args", "--jsonargs", "-L"],
+    valueFlags: ["--indent"],
     pairFlags: ["--arg", "--argjson"],
     pairFileFlags: ["--slurpfile", "--rawfile"],
     refuseFlags: ["--args", "--jsonargs", "-L"],
     programCheck: "jq",
   },
   diff: {
-    valueFlags: ["-U", "-C", "--label", "-L", "--unified", "--context", "--from-file", "--to-file"],
+    flags: ["-u", "-c", "-q", "-s", "-r", "-N", "-a", "-b", "-w", "-B", "-i", "-y", "-e", "-n",
+      "--brief", "--report-identical-files", "--recursive", "--new-file", "--text",
+      "--ignore-space-change", "--ignore-all-space", "--ignore-blank-lines", "--ignore-case",
+      "--side-by-side", "--normal"],
+    valueFlags: ["-U", "-C", "-L", "--label", "--from-file", "--to-file"],
     fileFlags: ["--from-file", "--to-file"],
+    optionalFlags: ["--unified", "--context"],
   },
-  cmp: {},
-  sha256sum: { refuseFlags: ["-c", "--check"] },
-  sha1sum: { refuseFlags: ["-c", "--check"] },
-  md5sum: { refuseFlags: ["-c", "--check"] },
-  shasum: { valueFlags: ["-a", "--algorithm"], refuseFlags: ["-c", "--check"] },
-  md5: {},
+  cmp: { flags: ["-l", "-s", "-b", "--verbose", "--silent", "--quiet"], valueFlags: ["-i", "-n"] },
+  sha256sum: { flags: ["-b", "-t", "-z", "--binary", "--text", "--tag", "--zero", "-c", "--check"], refuseFlags: ["-c", "--check"] },
+  sha1sum: { flags: ["-b", "-t", "-z", "--binary", "--text", "--tag", "--zero", "-c", "--check"], refuseFlags: ["-c", "--check"] },
+  md5sum: { flags: ["-b", "-t", "-z", "--binary", "--text", "--tag", "--zero", "-c", "--check"], refuseFlags: ["-c", "--check"] },
+  shasum: { flags: ["-b", "-t", "-0", "-p", "-c", "--check"], valueFlags: ["-a", "--algorithm"], refuseFlags: ["-c", "--check"] },
+  md5: { flags: ["-q", "-r", "-n"] },
   sort: {
-    valueFlags: ["-k", "-t", "-S", "-T", "-o", "--key", "--field-separator", "--output"],
-    refuseFlags: ["-o", "--output"],
+    flags: ["-r", "-n", "-u", "-f", "-b", "-d", "-i", "-M", "-h", "-V", "-g", "-R", "-s", "-c",
+      "-m", "-z", "--reverse", "--numeric-sort", "--unique", "--ignore-case",
+      "--human-numeric-sort", "--version-sort", "--general-numeric-sort", "--stable", "--merge",
+      "-o", "--output", "--files0-from"],
+    valueFlags: ["-k", "-t", "-S", "-T", "--key", "--field-separator", "--buffer-size",
+      "--temporary-directory", "-o", "--output", "--files0-from"],
+    refuseFlags: ["-o", "--output", "--files0-from"],
   },
-  uniq: { valueFlags: ["-f", "-s", "-w"], singleInput: true },
-  cut: { valueFlags: ["-d", "-f", "-c", "-b", "--delimiter", "--fields"] },
-  column: { valueFlags: ["-s", "-c", "-o"] },
-  awk: { firstIsProgram: true, programFlags: ["-f"], fileFlags: ["-f"], valueFlags: ["-F", "-v", "-f"], programCheck: "awk" },
-  xxd: { valueFlags: ["-l", "-s", "-c", "-g"], singleInput: true },
-  od: { valueFlags: ["-A", "-t", "-N", "-j"] },
-  hexdump: { valueFlags: ["-n", "-s", "-e"] },
-  strings: { valueFlags: ["-n"] },
+  uniq: { flags: ["-c", "-d", "-u", "-i", "-D"], valueFlags: ["-f", "-s", "-w"], singleInput: true },
+  cut: {
+    flags: ["-s", "-n", "--complement", "--only-delimited"],
+    valueFlags: ["-d", "-f", "-c", "-b", "--delimiter", "--fields", "--characters", "--bytes",
+      "--output-delimiter"],
+  },
+  column: { flags: ["-t", "-x", "-n"], valueFlags: ["-s", "-c", "-o"] },
+  awk: { firstIsProgram: true, programFlags: ["-f"], fileFlags: ["-f"], valueFlags: ["-F", "-v"], programCheck: "awk" },
+  xxd: { flags: ["-p", "-u", "-e", "-i", "-b", "-r"], valueFlags: ["-l", "-s", "-c", "-g", "-o"], refuseFlags: ["-r"], singleInput: true },
+  od: { flags: ["-c", "-x", "-o", "-d", "-v", "-b"], valueFlags: ["-A", "-t", "-N", "-j"] },
+  hexdump: { flags: ["-C", "-c", "-b", "-d", "-o", "-x", "-v"], valueFlags: ["-n", "-s", "-e"], fileFlags: ["-f"] },
+  strings: { flags: ["-a"], valueFlags: ["-n", "-t"] },
 };
 
 /** Commands whose output does not depend on any file (`echo ---`). */
@@ -423,8 +506,8 @@ function resolveOperand(tok: Token, base: string, home: string | undefined): str
 // addresses, and every command that reads, writes, or executes (r R w W e,
 // and the s///w and s///e flags) are refused by construction.
 const SAFE_SED = /^\s*(?:(?:\d+|\$)(?:\s*(?:,|~)\s*(?:\d+|\$|\+\d+|~\d+))?)?\s*!?\s*[pl=qQ]\s*(?:;\s*(?:(?:\d+|\$)(?:\s*(?:,|~)\s*(?:\d+|\$|\+\d+|~\d+))?)?\s*!?\s*[pl=qQ]\s*)*;?\s*$/;
-const AWK_UNSAFE = /getline|system|ENVIRON|>|\||close\s*\(|fflush|@include|@load/;
-const JQ_UNSAFE = /\benv\b|\$ENV|input_filename|\bimport\b|\binclude\b|\binputs?\b|\bnow\b|\bdebug\b|\bstderr\b|\$__loc__|\bgetpath\b.*\$ENV/;
+const AWK_UNSAFE = /getline|system|ENVIRON|ARGV|ARGC|PROCINFO|>|\||close\s*\(|fflush|@include|@load/;
+const JQ_UNSAFE = /\benv\b|\$ENV|input_filename|\bimport\b|\binclude\b|\binputs?\b|\bnow\b|\bdebug\b|\bstderr\b|\$__loc__|\$__prog_args\b|\bget_search_list\b|\bbuiltins\b|\blocaltime\b|\bstrflocaltime\b|\bmktime\b|\bhalt_error\b|\binput_line_number\b/;
 
 function programIsSafe(kind: "sed" | "awk" | "jq", program: string): boolean {
   if (kind === "sed") return SAFE_SED.test(program);
@@ -441,6 +524,10 @@ interface ParsedViewer {
   programs: Token[];
   /** The program came from a file (`sed -f`, `awk -f`): it cannot be checked. */
   programFromFile: boolean;
+  /** An explicit `-` operand (read stdin). */
+  dashOperand: boolean;
+  /** An option outside the allowlist, or an ambiguous spaced value. */
+  unknown: boolean;
 }
 
 /**
@@ -455,21 +542,33 @@ function parseViewer(spec: ViewerSpec, args: Token[]): ParsedViewer | null {
   let programGiven = false;
   let programFromFile = false;
   let endOfOptions = false;
-  const takesValue = (f: string): boolean =>
-    !!spec.valueFlags?.includes(f) || !!spec.fileFlags?.includes(f);
+  let dashOperand = false;
+  let unknown = false;
+  const has = (list: readonly string[] | undefined, f: string): boolean => !!list?.includes(f);
+  const requiresValue = (f: string): boolean => has(spec.valueFlags, f) || has(spec.fileFlags, f);
+  const known = (f: string): boolean =>
+    has(spec.flags, f) ||
+    requiresValue(f) ||
+    has(spec.optionalFlags, f) ||
+    has(spec.ambiguousFlags, f) ||
+    has(spec.pairFlags, f) ||
+    has(spec.pairFileFlags, f) ||
+    has(spec.refuseFlags, f) ||
+    has(spec.attachedOnlyFlags, f);
   const noteValue = (flag: string, value: Token | undefined): void => {
-    const isFile = !!spec.fileFlags?.includes(flag);
-    if (spec.programFlags?.includes(flag)) {
+    const isFile = has(spec.fileFlags, flag);
+    if (has(spec.programFlags, flag)) {
       programGiven = true;
       if (isFile) programFromFile = true;
       else if (value) programs.push(value);
     }
     if (value && isFile) optionFiles.push(value);
   };
-  for (let i = 0; i < args.length; i++) {
+  for (let i = 0; i < args.length && !unknown; i++) {
     const a = args[i]!;
     const t = a.text;
     if (endOfOptions || !t.startsWith("-") || t === "-") {
+      if (t === "-") dashOperand = true;
       positional.push(a);
       continue;
     }
@@ -480,27 +579,47 @@ function parseViewer(spec: ViewerSpec, args: Token[]): ParsedViewer | null {
     if (t.startsWith("--")) {
       const eq = t.indexOf("=");
       const name = eq === -1 ? t : t.slice(0, eq);
+      if (!known(name)) {
+        unknown = true; // includes abbreviations: exact names only
+        break;
+      }
       flags.add(name);
-      if (spec.pairFlags?.includes(name) || spec.pairFileFlags?.includes(name)) {
-        if (spec.pairFileFlags?.includes(name) && args[i + 2]) optionFiles.push(args[i + 2]!);
+      if (has(spec.pairFlags, name) || has(spec.pairFileFlags, name)) {
+        if (eq !== -1) {
+          unknown = true;
+          break;
+        }
+        if (has(spec.pairFileFlags, name) && args[i + 2]) optionFiles.push(args[i + 2]!);
         i += 2;
         continue;
       }
       if (eq !== -1) {
         noteValue(name, { ...a, text: t.slice(eq + 1) });
-      } else if (takesValue(name)) {
+      } else if (has(spec.ambiguousFlags, name)) {
+        unknown = true;
+        break;
+      } else if (requiresValue(name)) {
         noteValue(name, args[i + 1]);
         i += 1;
       }
       continue;
     }
-    // A short-option cluster: `-rn`, `-A3`, `-nf pats`, `-i.bak`, `-20`.
+    if (spec.numericShort && /^-\d+$/.test(t)) continue; // head -20
+    // A short-option cluster: `-rn`, `-A3`, `-nf pats`, `-i.bak`.
     for (let k = 1; k < t.length; k++) {
       const flag = `-${t[k]}`;
+      if (!known(flag)) {
+        unknown = true;
+        break;
+      }
       flags.add(flag);
-      if (spec.attachedOnlyFlags?.includes(flag)) break; // the rest is its value
-      if (takesValue(flag)) {
-        const attached = t.slice(k + 1);
+      if (has(spec.attachedOnlyFlags, flag)) break; // the rest is its value
+      const attached = t.slice(k + 1);
+      if (has(spec.ambiguousFlags, flag)) {
+        if (!attached) unknown = true; // `-C 2`: GNU consumes it, BSD does not
+        break;
+      }
+      if (requiresValue(flag)) {
         if (attached) {
           noteValue(flag, { ...a, text: attached });
         } else {
@@ -512,11 +631,11 @@ function parseViewer(spec: ViewerSpec, args: Token[]): ParsedViewer | null {
     }
   }
   if (spec.refuseFlags?.some((f) => flags.has(f))) return null;
-  if (spec.requireFlag && !flags.has(spec.requireFlag)) return null;
+  if (!unknown && spec.requireFlag && !flags.has(spec.requireFlag)) return null;
   const hasProgram = spec.firstIsProgram && !programGiven;
   if (hasProgram && positional[0]) programs.push(positional[0]);
   const operands = (hasProgram ? positional.slice(1) : positional).filter((f) => f.text !== "-");
-  return { operands, optionFiles, flags, programs, programFromFile };
+  return { operands, optionFiles, flags, programs, programFromFile, dashOperand, unknown };
 }
 
 /**
@@ -568,7 +687,8 @@ export function extractShellReads(
     files.add(abs);
   };
 
-  for (const part of parts) {
+  for (let pi = 0; pi < parts.length; pi++) {
+    const part = parts[pi]!;
     let argv = part.argv;
     // Inline assignments: harmless ones are stripped; anything else (PATH,
     // GREP_OPTIONS, LESSOPEN, …) can change what the command does.
@@ -607,14 +727,15 @@ export function extractShellReads(
         part.stage !== 0 ||
         part.joinAfter !== "&&" ||
         part.joinBefore === "||" ||
-        part.joinBefore === "|"
+        part.joinBefore === "|" ||
+        listIsBackgrounded(parts, pi)
       ) {
         return null;
       }
       cwd = resolve(target.text);
       continue;
     }
-    if (cmd === "set" && args.every((a) => /^[-+][euxo]+$|^pipefail$/.test(a.text))) {
+    if (cmd === "set" && isQuietSet(args)) {
       continue; // `set -euo pipefail` changes failure handling, not output
     }
     if (cmd === "export" || cmd === "set" || cmd === "local") {
@@ -622,7 +743,11 @@ export function extractShellReads(
       continue;
     }
     if (CONSTANT.has(cmd)) {
-      if (args.some((a) => a.dynamic)) complete = false; // `echo $HOME`, `echo *`
+      // `echo $HOME`, `echo *`, and printf's `%(…)T` time format all depend
+      // on the environment, not on any file.
+      if (args.some((a) => a.dynamic || (cmd === "printf" && a.text.includes("%(")))) {
+        complete = false;
+      }
       continue;
     }
 
@@ -634,6 +759,12 @@ export function extractShellReads(
     const parsed = parseViewer(spec, args);
     if (!parsed) {
       complete = false; // not a pure read (sed -i, tail -f, sha256sum -c, …)
+      continue;
+    }
+    if (parsed.unknown) {
+      // An option we cannot interpret: nothing about this invocation is
+      // trusted, not even which words are files.
+      complete = false;
       continue;
     }
     if (spec.programCheck) {
@@ -661,12 +792,39 @@ export function extractShellReads(
     for (const op of parsed.operands) add(op);
     for (const f of parsed.optionFiles) add(f);
     // stdin is read only when there are no operands (or an explicit `-`).
-    const readsStdin =
-      parsed.operands.length === 0 || args.some((a) => a.text === "-");
+    const readsStdin = parsed.operands.length === 0 || parsed.dashOperand;
     if (readsStdin) for (const input of part.inputs) add(input);
   }
 
   return { files: [...files], complete };
+}
+
+/** True when the and-or list containing parts[i] ends in `&`: the whole
+ * list (and any `cd` in it) then runs in a background subshell, and nothing
+ * after it sees the directory change. */
+function listIsBackgrounded(parts: Stage[], i: number): boolean {
+  for (let j = i; j < parts.length; j++) {
+    const join = parts[j]!.joinAfter;
+    if (join === "&&" || join === "||" || join === "|") continue;
+    return join === "&";
+  }
+  return false;
+}
+
+/** `set -e`, `set -eu`, `set -euo pipefail`, `set +x`: no output. A bare
+ * `set -o` (which PRINTS the option table) is not quiet. */
+function isQuietSet(args: Token[]): boolean {
+  if (args.length === 0) return false;
+  for (let i = 0; i < args.length; i++) {
+    const t = args[i]!.text;
+    if (/^[-+][eux]+$/.test(t)) continue;
+    if (/^[-+][eux]*o$/.test(t) && /^[a-z]+$/.test(args[i + 1]?.text ?? "")) {
+      i++;
+      continue;
+    }
+    return false;
+  }
+  return true;
 }
 
 /**

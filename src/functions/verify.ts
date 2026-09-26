@@ -161,16 +161,33 @@ export function classifyProvenance(
   // <caller checkout root>/<cwdInRepo>, never the caller's own cwd: a memory
   // captured in packages/foo and recalled from the repo root used to resolve
   // "package.json" to the ROOT package.json (false stale, or false verified).
+  const captureCwd = prov?.cwd && isAbsolute(prov.cwd) ? prov.cwd : undefined;
+  // A stored offset is data (bundles and canon can carry it): only a plain
+  // relative path inside the checkout is honored.
+  const cwdInRepo =
+    typeof prov?.cwdInRepo === "string" &&
+    !isAbsolute(prov.cwdInRepo) &&
+    !prov.cwdInRepo.split(/[\\/]/).includes("..")
+      ? prov.cwdInRepo
+      : undefined;
   let anchor = root;
-  if (opts?.verifyAgainstRoot && typeof prov?.cwdInRepo === "string") {
-    const top = gitWorktreeRoot(root);
-    if (top) anchor = resolve(top, prov.cwdInRepo);
+  let callerTop: string | null = null;
+  let captureTop: string | undefined;
+  if (opts?.verifyAgainstRoot && cwdInRepo !== undefined) {
+    callerTop = gitWorktreeRoot(root);
+    if (callerTop) {
+      anchor = resolve(callerTop, cwdInRepo);
+      if (captureCwd) {
+        const suffix = cwdInRepo ? `${sep}${cwdInRepo}` : "";
+        if (!suffix) captureTop = captureCwd;
+        else if (captureCwd.endsWith(suffix)) captureTop = captureCwd.slice(0, -suffix.length);
+      }
+    }
   }
   const base =
     !opts?.verifyAgainstRoot && prov?.cwd && isAbsolute(prov.cwd)
       ? prov.cwd
       : anchor;
-  const captureCwd = prov?.cwd && isAbsolute(prov.cwd) ? prov.cwd : undefined;
   const deleted: string[] = [];
   const changed: string[] = [];
   let exactMatched = 0; // existing files whose raw bytes still match
@@ -186,9 +203,18 @@ export function classifyProvenance(
     // own identity: re-rooting those would point a cross-project reference
     // at the wrong repo.
     if (opts?.verifyAgainstRoot && captureCwd && isAbsolute(f)) {
+      const inside = (r: string): boolean =>
+        !!r && r !== ".." && !r.startsWith(`..${sep}`) && !isAbsolute(r);
       const rel = relative(captureCwd, f);
-      if (rel && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) {
+      if (inside(rel)) {
         abs = resolve(anchor, rel);
+      } else if (captureTop && callerTop) {
+        // Inside the capture's checkout but outside its cwd (a Read of
+        // <repo>/src/x.ts from <repo>/packages/foo): re-root at the caller's
+        // checkout too, or recall from another worktree verifies against the
+        // capture worktree's copy.
+        const relTop = relative(captureTop, f);
+        if (inside(relTop)) abs = resolve(callerTop, relTop);
       }
     }
     if (!existsSync(abs)) {

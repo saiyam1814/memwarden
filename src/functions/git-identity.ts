@@ -63,7 +63,10 @@ function findGitEntry(startDir: string): { root: string; entry: string } | null 
   }
 }
 
-const worktreeRootCache = new Map<string, string | null>();
+const worktreeRootCache = new Map<string, { root: string | null; at: number }>();
+// A directory that is not in git yet may become one (`git init`): negative
+// answers are only trusted briefly.
+const NEGATIVE_TTL_MS = 60_000;
 
 /**
  * The checkout root (the directory holding `.git`) that contains `dir`, or
@@ -74,10 +77,10 @@ const worktreeRootCache = new Map<string, string | null>();
 export function gitWorktreeRoot(dir: string): string | null {
   const key = resolve(dir);
   const hit = worktreeRootCache.get(key);
-  if (hit !== undefined) return hit;
+  if (hit && (hit.root !== null || Date.now() - hit.at < NEGATIVE_TTL_MS)) return hit.root;
   const root = findGitEntry(key)?.root ?? null;
   if (worktreeRootCache.size > 1024) worktreeRootCache.clear();
-  worktreeRootCache.set(key, root);
+  worktreeRootCache.set(key, { root, at: Date.now() });
   return root;
 }
 
