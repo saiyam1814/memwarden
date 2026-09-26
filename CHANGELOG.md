@@ -39,6 +39,28 @@ to 1.8GB.
   The default path now writes only the synthetic memory. The raw form is still
   persisted on the opt-in async-compression path, which needs it. Existing
   raw history is dropped by `memwarden compact --prune-history`.
+- **Memories from web, MCP, and subagent tools say what they did.** Re-running
+  extraction over 7,961 real captures: titles that were just the tool name
+  fell from 18.4% to 3.0%. Web fetch and search (including the lowercase and
+  Codex `webrun` variants), MCP, subagent, and skill tools are titled from
+  their intent field (URL, query, description), so you get titles like
+  `Fetched arxiv.org/abs/2608.21230` and `Searched web: "…"`. Command titles
+  skip `cd` and `VAR=` setup clauses, and background `<task-notification>`
+  messages captured through the prompt hook are titled by their summary and
+  ranked below real prompts.
+- **Tool-envelope keys are no longer mined as concepts.** 61% of recent
+  captures listed `isImage`/`noOutputExpected` (or `codeText`,
+  `durationSeconds`) among their searchable concepts, because the symbol
+  miner read JSON keys as identifiers. Keys are now stripped before mining (to
+  0.0%). Fetched hosts become concepts, web search bodies list result titles,
+  and a command body no longer repeats its own `ran:` fact.
+- **Glob patterns are never file evidence.** A Glob pattern or a Grep `glob`
+  filter (`**/*.ts`) was recorded as a referenced file, failed the existence
+  check forever, and got the memory refused as stale for life. Those refusals
+  were also listed as firewall evidence at the start of every session. New
+  captures no longer record globs, and verification ignores them in existing
+  memories. Real bracketed paths such as Next.js `app/[id]/page.tsx` still
+  count.
 
 ## 0.1.1 - 2026-08-28
 

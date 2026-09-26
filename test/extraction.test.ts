@@ -357,3 +357,211 @@ describe("extraction: the regression gate", () => {
     }
   });
 });
+
+// --- gaps found by inspecting a month of live 0.1.1 captures ----------------
+//
+// Real September captures, 7,000+ of them titled with a bare tool name:
+// WebFetch (1,250), web_search (910), webfetch (633), WebSearch (546),
+// todo/MCP/subagent tools, 300 `<task-notification>` prompts, and hundreds of
+// commands titled by a `SP=/private/tmp/…` variable assignment. Envelope KEYS
+// (`isImage`, `noOutputExpected`, `codeText`, `durationSeconds`) were mined
+// as concepts on thousands of unrelated memories.
+
+import { extractProvenance } from "../src/functions/provenance.js";
+import { classifyProvenance } from "../src/functions/verify.js";
+
+describe("extraction: web, MCP, and subagent tools say what they did", () => {
+  it("WebFetch is titled by what was fetched, with the host as a concept", () => {
+    const c = buildSyntheticCompression(
+      raw({
+        toolName: "WebFetch",
+        toolInput: { url: "https://learn.chatgpt.com/docs/changelog?x=1", prompt: "find memory entries" },
+        toolOutput: { bytes: 1542032, code: 200, codeText: "OK", result: "# Changelog\nSeptember 25: /import added" },
+      }),
+    );
+    expect(c.title).toBe("Fetched learn.chatgpt.com/docs/changelog");
+    expect(c.concepts).toContain("learn.chatgpt.com");
+    expect(c.concepts).not.toContain("codeText");
+    expect(c.narrative).toContain("September 25");
+  });
+
+  it("WebSearch (and lowercase host variants) name the query and the result titles", () => {
+    for (const toolName of ["WebSearch", "web_search"]) {
+      const c = buildSyntheticCompression(
+        raw({
+          toolName,
+          toolInput: { query: "OWASP ASI06 memory poisoning" },
+          toolOutput: {
+            query: "OWASP ASI06 memory poisoning",
+            results: [
+              { tool_use_id: "srvtoolu_1", content: [
+                { title: "OWASP Top 10 for Agentic Applications", url: "https://genai.owasp.org/" },
+                { title: "Memory & Context Poisoning", url: "https://example.org/asi06" },
+              ] },
+            ],
+            durationSeconds: 3.2,
+          },
+        }),
+      );
+      expect(c.title).toBe('Searched web: "OWASP ASI06 memory poisoning"');
+      expect(c.narrative).toContain("results: OWASP Top 10 for Agentic Applications; Memory & Context Poisoning");
+      expect(c.concepts).not.toContain("durationSeconds");
+    }
+    const lower = buildSyntheticCompression(
+      raw({ toolName: "webfetch", toolInput: { url: "https://arxiv.org/abs/2608.21230" } }),
+    );
+    expect(lower.title).toBe("Fetched arxiv.org/abs/2608.21230");
+  });
+
+  it("MCP and subagent tools are titled by their intent field", () => {
+    const slack = buildSyntheticCompression(
+      raw({
+        toolName: "mcp__claude_ai_Slack__slack_search_public_and_private",
+        toolInput: { query: "release notes 0.1.1" },
+      }),
+    );
+    expect(slack.title).toBe('slack_search_public_and_private: "release notes 0.1.1"');
+    const agent = buildSyntheticCompression(
+      raw({ toolName: "Agent", toolInput: { description: "Research agent-memory space", prompt: "long…" } }),
+    );
+    expect(agent.title).toBe("Agent: Research agent-memory space");
+    const nav = buildSyntheticCompression(
+      raw({ toolName: "mcp__claude-in-chrome__navigate", toolInput: { url: "https://github.com/saiyam1814/memwarden" } }),
+    );
+    expect(nav.title).toBe("navigate: github.com/saiyam1814/memwarden");
+    const click = buildSyntheticCompression(
+      raw({ toolName: "mcp__claude-in-chrome__computer", toolInput: { action: "screenshot", tabId: 3 } }),
+    );
+    expect(click.title).toBe("computer: screenshot");
+  });
+
+  it("a background task notification is titled by its summary and ranked below real prompts", () => {
+    const c = buildSyntheticCompression(
+      raw({
+        hookType: "user_prompt",
+        userPrompt:
+          "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n<summary>Background command \"Run tests\" completed (exit code 0)</summary>\n</task-notification>",
+      }),
+    );
+    expect(c.title).toBe('Background command "Run tests" completed (exit code 0)');
+    expect(c.importance).toBeLessThan(6);
+    const real = buildSyntheticCompression(raw({ hookType: "user_prompt", userPrompt: "fix the login bug" }));
+    expect(real.importance).toBe(6);
+  });
+});
+
+describe("extraction: command titles skip setup clauses", () => {
+  it.each([
+    ['SP=/private/tmp/claude-501/x/scratchpad && cat "$SP/out.txt"', 'cat "$SP/out.txt"'],
+    ["cd /repo && npm test -- --run", "npm test -- --run"],
+    ["FOO=1 BAR=2 npm run build", "npm run build"],
+    ["export NODE_ENV=test; vitest run", "vitest run"],
+    ["git status --short", "git status --short"],
+  ])("%s -> %s", (command, title) => {
+    const c = buildSyntheticCompression(raw({ toolName: "Bash", toolInput: { command } }));
+    expect(c.title).toBe(title);
+  });
+
+  it("the body does not repeat the command as a `ran:` fact", () => {
+    const c = buildSyntheticCompression(
+      raw({ toolName: "Bash", toolInput: { command: "wc -l src/a.ts" }, toolOutput: { stdout: "42 src/a.ts" } }),
+    );
+    expect(c.facts).toContain("ran: wc -l src/a.ts");
+    expect(c.narrative).toBe("wc -l src/a.ts. 42 src/a.ts");
+  });
+
+  it("does not mine tool-envelope keys as concepts", () => {
+    const c = buildSyntheticCompression(
+      raw({
+        toolName: "Bash",
+        toolInput: { command: "grep -rn readOplog src" },
+        toolOutput: {
+          stdout: "src/state/store.ts:180: readOplog(sinceId?: number): Promise<OplogEntry[]>;",
+          stderr: "",
+          interrupted: false,
+          isImage: false,
+          noOutputExpected: false,
+        },
+      }),
+    );
+    expect(c.concepts).toContain("readOplog");
+    expect(c.concepts).toContain("OplogEntry");
+    expect(c.concepts).not.toContain("isImage");
+    expect(c.concepts).not.toContain("noOutputExpected");
+  });
+});
+
+describe("globs are never file evidence", () => {
+  it("a Glob pattern is not recorded as a file, in the memory or its provenance", () => {
+    const c = buildSyntheticCompression(raw({ toolName: "Glob", toolInput: { pattern: "**/*.test.ts" } }));
+    expect(c.title).toBe('Searched "**/*.test.ts"');
+    expect(c.files).toEqual([]);
+    const prov = extractProvenance({
+      cwd: "/repo",
+      data: { tool_name: "Glob", tool_input: { pattern: "**/*.test.ts", path: "/repo/src" } },
+    });
+    expect(prov.files).toEqual(["src"]);
+  });
+
+  it("a Grep `glob` filter is not a file either", () => {
+    const prov = extractProvenance({
+      cwd: "/repo",
+      data: {
+        tool_name: "Grep",
+        tool_input: { pattern: "", glob: "**/.github/workflows/*.{yml,yaml}", output_mode: "files_with_matches" },
+      },
+    });
+    expect(prov.files ?? []).toEqual([]);
+  });
+
+  it("legacy memories carrying a glob as a file are not refused as stale", () => {
+    const v = classifyProvenance(
+      { files: ["**/*.ts"], command: "Glob", cwd: "/definitely/not/here", userConfirmed: false },
+      "/definitely/not/here",
+    );
+    expect(v.status).not.toBe("stale");
+    expect(v.status).toBe("sourced_unverified");
+    // a real missing file is still stale
+    const real = classifyProvenance(
+      { files: ["gone.ts"], fileHashes: { "gone.ts": "ab" }, command: "Read", cwd: "/definitely/not/here", userConfirmed: false },
+      "/definitely/not/here",
+    );
+    expect(real.status).toBe("stale");
+  });
+
+  it("a real path with brackets (a Next.js route) is still a file", () => {
+    const prov = extractProvenance({
+      cwd: "/repo",
+      data: { tool_name: "Read", tool_input: { file_path: "/repo/app/[id]/page.tsx" } },
+    });
+    expect(prov.files).toEqual(["app/[id]/page.tsx"]);
+  });
+});
+
+describe("extraction: the regression gate covers every tool family seen live", () => {
+  const LIVE_TOOLS: Array<[string, Record<string, unknown>]> = [
+    ["WebFetch", { url: "https://example.com/a" }],
+    ["webfetch", { url: "https://example.com/b" }],
+    ["WebSearch", { query: "q" }],
+    ["web_search", { query: "q" }],
+    ["Agent", { description: "d" }],
+    ["run_subagent", { task: "t" }],
+    ["mcp__claude_ai_Slack__slack_read_thread", { channel_id: "C1", message: "m" }],
+    ["mcp__claude_ai_Slack__slack_search_public_and_private", { keywords: ["KubeAI"], natural_language_query: "inference demo" }],
+    ["webrun", { search_query: [{ q: "KubeWorld github" }, { q: "ClusterWorld agent" }] }],
+    ["Skill", { skill: "last30days:last30days", args: "agent memory" }],
+  ];
+  it("list-shaped queries are joined", () => {
+    const c = buildSyntheticCompression(
+      raw({ toolName: "webrun", toolInput: { search_query: [{ q: "KubeWorld github" }, { q: "ClusterWorld agent" }] } }),
+    );
+    expect(c.title).toBe('Searched web: "KubeWorld github | ClusterWorld agent"');
+  });
+
+  it("none of them is titled with its bare tool name", () => {
+    for (const [toolName, toolInput] of LIVE_TOOLS) {
+      const c = buildSyntheticCompression(raw({ toolName, toolInput }));
+      expect(c.title).not.toBe(toolName);
+    }
+  });
+});
