@@ -44,11 +44,13 @@ to 1.8GB.
   extractor titled every capture with its tool name and stored raw tool JSON as the body. The
   durability contract later promoted those observations into permanent memories, and on one real
   brain they were 4,450 of 7,538 memories (59%). Repair re-extracts each one with today's extractor
-  (recovering keys from JSON that was clipped at capture) and re-distills it through the standard
-  path, so the successor gets correct fingerprints and keeps the original provenance, capture-time
-  hashes, sessions, and timestamps. The legacy row is retired through `forget` with a receipt. It
-  is a dry run unless `--apply` is passed. Measured on a snapshot of that brain: 4,446 repaired in
-  3m23s, chain verified, distinct titles 1,912 → 5,033.
+  (recovering keys from JSON that was clipped at capture) and brings the store to what today's
+  pipeline would have produced. Edits, writes, errors, and anything with a real fact are
+  re-distilled through the standard path, so the successor gets correct fingerprints and keeps the
+  original provenance, capture-time hashes, sessions, and timestamps. Plain reads, which today's
+  retention ages out, are retired. Every legacy row goes through `forget` with a receipt. It is a
+  dry run unless `--apply` is passed. On a snapshot of that brain: 509 repaired, 3,937 retired, 4
+  left as is.
 
 - **Session start shows what happened lately, not what resembles a sentence.** SessionStart recall
   was a similarity search for the fixed phrase "recent work and decisions in this project". On a

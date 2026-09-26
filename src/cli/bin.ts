@@ -307,6 +307,7 @@ async function repair(rest: string[]): Promise<void> {
     scanned: number;
     legacy: number;
     repaired: number;
+    retired: number;
     unrecoverable: number;
     failed: number;
     samples: Array<{ id: string; before: string; after: string }>;
@@ -318,13 +319,14 @@ async function repair(rest: string[]): Promise<void> {
   console.log(`\n  memwarden repair --legacy${apply ? "" : " (dry run)"}\n`);
   console.log(`    memories scanned    ${r.scanned}`);
   console.log(`    legacy-shaped       ${r.legacy} (tool-name title, raw JSON body, no facts/concepts)`);
-  console.log(`    ${apply ? "repaired          " : "would repair      "}  ${r.repaired}`);
+  console.log(`    ${apply ? "repaired          " : "would repair      "}  ${r.repaired} (re-extracted: edits, writes, errors, facts)`);
+  console.log(`    ${apply ? "retired           " : "would retire      "}  ${r.retired} (plain reads; the file is its own record)`);
   if (r.unrecoverable) console.log(`    left as is          ${r.unrecoverable} (nothing readable to recover)`);
   if (r.failed) console.log(`    failed              ${r.failed} (left untouched; safe to rerun)`);
   for (const s of r.samples) console.log(`      ${s.before.padEnd(18)} -> ${s.after}`);
   console.log(
     apply
-      ? `\n  Each legacy row was replaced by a re-extracted successor carrying its original\n  evidence, and retired with a delete receipt. Run \`memwarden compact\` to drop the\n  old payloads from history.\n`
+      ? `\n  Repaired rows were replaced by re-extracted successors carrying their original\n  evidence; every legacy row was retired with a delete receipt. Run\n  \`memwarden compact\` to drop the old payloads from history.\n`
       : `\n  Nothing was changed. Rerun with --apply to repair.\n`,
   );
 }

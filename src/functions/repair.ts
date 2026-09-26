@@ -8,11 +8,14 @@
 //
 //   title: "exec"   content: {"command":"git status"} | {"success":true,…}
 //
-// which rank on JSON tokens and read as noise. This module re-extracts each
-// one with today's extractor and re-distills it through the standard path
-// (distillMembers), so the successor gets correct claim/evidence fingerprints
-// and keeps the original provenance, file hashes, sessions, and timestamps.
-// The legacy row is then retired through mem::forget, with its receipt.
+// which rank on JSON tokens and read as noise. This module brings each one to
+// what today's pipeline would have produced: re-extracted, and re-distilled
+// through the standard path (distillMembers) when it holds knowledge its
+// files do not (a change, an error, a fact), so the successor gets correct
+// claim/evidence fingerprints and keeps the original provenance, file hashes,
+// sessions, and timestamps. Plain reads, which today's retention ages out,
+// are retired instead. Either way the legacy row goes through mem::forget,
+// with its receipt.
 // Nothing is invented: the successor is built only from what the legacy row
 // already stored.
 
@@ -22,6 +25,7 @@ import { KV } from "../state/schema.js";
 import type { CompressedObservation, Memory, RawObservation, Session } from "./types.js";
 import { buildSyntheticCompression } from "./compress-synthetic.js";
 import { distillMembers } from "./consolidate.js";
+import { worthDistilling } from "./forget.js";
 import { resolveMemoryIdentity } from "./memory-identity.js";
 import { logger } from "./logger.js";
 
@@ -119,7 +123,10 @@ export function reextractLegacyMemory(m: Memory): CompressedObservation | null {
 export interface RepairReport {
   scanned: number;
   legacy: number;
+  /** Re-extracted into a readable successor (edits, writes, errors, facts). */
   repaired: number;
+  /** Plain reads the retention policy would never have kept: forgotten. */
+  retired: number;
   unrecoverable: number;
   failed: number;
   applied: boolean;
@@ -140,6 +147,7 @@ export function registerRepairFunction(sdk: ISdk, kv: StateKV): void {
         scanned: memories.length,
         legacy: 0,
         repaired: 0,
+        retired: 0,
         unrecoverable: 0,
         failed: 0,
         applied: apply,
@@ -148,10 +156,28 @@ export function registerRepairFunction(sdk: ISdk, kv: StateKV): void {
       for (const memory of memories) {
         if (!isLegacyJunkMemory(memory)) continue;
         report.legacy++;
-        if (report.repaired + report.failed >= limit) continue;
+        if (report.repaired + report.retired + report.failed >= limit) continue;
         const obs = reextractLegacyMemory(memory);
         if (!obs) {
           report.unrecoverable++;
+          continue;
+        }
+        // A plain read is not knowledge its file lacks: today's retention
+        // policy ages those out rather than keeping them (worthDistilling),
+        // so repair retires them instead of re-creating them.
+        if (!worthDistilling(obs)) {
+          if (!apply) {
+            report.retired++;
+            continue;
+          }
+          const forgot = await sdk
+            .trigger<{ observationId: string }, { deleted?: boolean }>({
+              function_id: "mem::forget",
+              payload: { observationId: memory.id },
+            })
+            .catch(() => null);
+          if (forgot?.deleted) report.retired++;
+          else report.failed++;
           continue;
         }
         if (report.samples.length < 8) {

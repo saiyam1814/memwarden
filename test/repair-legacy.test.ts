@@ -113,12 +113,13 @@ describe("mem::repair-legacy", () => {
     const r = await sdk.trigger<unknown, RepairReport>({ function_id: "mem::repair-legacy", payload: {} });
     expect(r.applied).toBe(false);
     expect(r.legacy).toBe(2);
-    expect(r.repaired).toBe(2);
-    expect(r.samples.map((x) => x.after).sort()).toEqual([
+    expect(r.repaired).toBe(1); // the edit: a change its file alone does not record
+    expect(r.retired).toBe(1); // the command with no fact beyond `ran:`
+    expect(r.samples.map((x) => x.after)).toEqual([
       "auth.ts: ROTATE_MS = 900_000 → ROTATE_MS = 3_600_000",
-      "npm test -- --run",
     ]);
     expect(await kv.get(KV.memories, "mem_legacy_edit")).not.toBeNull();
+    expect(await kv.get(KV.memories, "mem_legacy_exec")).not.toBeNull();
   });
 
   it("apply replaces each legacy row with a readable successor that keeps its evidence", async () => {
@@ -127,7 +128,8 @@ describe("mem::repair-legacy", () => {
       function_id: "mem::repair-legacy",
       payload: { apply: true },
     });
-    expect(r.repaired).toBe(2);
+    expect(r.repaired).toBe(1);
+    expect(r.retired).toBe(1);
     expect(r.failed).toBe(0);
     expect(await kv.get(KV.memories, "mem_legacy_edit")).toBeNull();
     expect(await kv.get(KV.memories, "mem_legacy_exec")).toBeNull();
@@ -144,9 +146,8 @@ describe("mem::repair-legacy", () => {
     expect(edit.sessionIds).toEqual(["sess-old"]);
     expect(edit.claimFingerprint).toMatch(/^[0-9a-f]{64}$/);
 
-    const exec = all.find((m) => m.title === "npm test -- --run")!;
-    expect(exec).toBeDefined();
-    expect(exec.content).toContain("12 passed");
+    // the plain command result was retired, not re-created
+    expect(all.find((m) => m.title === "npm test -- --run")).toBeUndefined();
 
     // untouched: the good memory, and nothing legacy-shaped remains
     expect(await kv.get(KV.memories, "mem_good")).not.toBeNull();
@@ -163,7 +164,21 @@ describe("mem::repair-legacy", () => {
       function_id: "mem::repair-legacy",
       payload: { apply: true, limit: 1 },
     });
-    expect(r.repaired).toBe(1);
+    expect(r.repaired + r.retired).toBe(1);
     expect(r.legacy).toBe(2);
+  });
+
+  it("retires a legacy plain read", async () => {
+    await kv.set(KV.memories, "mem_legacy_read", legacy(
+      "mem_legacy_read",
+      "Read",
+      '{"file_path":"/work/app/src/auth.ts"} | {"type":"text","file":{"content":"…"}}',
+    ));
+    const r = await sdk.trigger<unknown, RepairReport>({
+      function_id: "mem::repair-legacy",
+      payload: { apply: true },
+    });
+    expect(r.retired).toBe(1);
+    expect(await kv.list(KV.memories)).toEqual([]);
   });
 });
