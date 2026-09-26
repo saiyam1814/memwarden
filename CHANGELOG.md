@@ -9,6 +9,21 @@ Found by running 0.1.1 for a month on a real machine: the daemon crashed with
 a 4GB out-of-memory error when `memwarden doctor` ran, and the brain had grown
 to 1.8GB.
 
+### Added
+- **Shell file reads carry file evidence.** On a month of real captures, 72% of tool calls were
+  shell commands and 3% used the Read tool (Codex has no Read tool at all), so every file an agent
+  looked at through `sed -n`, `cat`, or `grep … file` was recorded as "sourced by command". It could
+  never be verified and was never refused when the file changed: 57 of 1,060 served memories were
+  verified. Capture now parses shell command lines conservatively (see `docs/limitations.md`) and
+  hashes the files a read-only viewer reads, keeping only files that exist and hash at capture.
+  Clean reads verify like Read-tool memories and go stale the same way. Reads chained after another
+  command record their files, so drift is caught, but are capped at `sourced`. Command
+  substitution, heredocs, and bad quoting yield no evidence. Codex `workdir` is honored and no
+  longer recorded as a "file", which had capped every Codex shell capture below verified. On 5,613
+  real shell captures, 43.9% now carry file evidence and 28.9% are complete reads (22.2% verify
+  against today's files). Three new eval gates pin the behavior: `shell-read-verify`,
+  `shell-read-refusal`, and `shell-mixed-capped`.
+
 ### Security
 - **`compact` no longer re-anchors tampered history.** Compaction re-chains
   every entry from genesis. Run over an edited, reordered, or forged chain, it

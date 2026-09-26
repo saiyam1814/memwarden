@@ -20,6 +20,7 @@ import type {
   HookPayload,
   Session,
   CompressedObservation,
+  Provenance,
 } from "./types.js";
 import { projectKey } from "./git-identity.js";
 import { canonicalizePath } from "./paths.js";
@@ -31,7 +32,11 @@ import { withKeyedLock } from "./keyed-mutex.js";
 import { isAutoCompressEnabled, getAgentId } from "./config.js";
 import { buildSyntheticCompression } from "./compress-synthetic.js";
 import { buildSessionHandoff, MAX_STORED_PROMPT_CHARS } from "./handoff.js";
-import { extractProvenance } from "./provenance.js";
+import { extractProvenance, relativizeUnder } from "./provenance.js";
+import { extractShellReads, shellCommandOf } from "./shell-reads.js";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute } from "node:path";
 import { recordFleetActivity } from "./fleet.js";
 import { hashFileCommitments } from "./verify.js";
 import { recordFix, looksLikeResolvedFix } from "./dejafix.js";
@@ -114,6 +119,51 @@ export function extractImage(d: unknown): string | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * File evidence for shell reads (`sed -n 1,60p src/auth.ts`, `cat`, `grep …
+ * file`): the same capture-time hashes a Read-tool capture carries, so the
+ * memory can be verified and, more importantly, refused once the file
+ * changes. Parsing is conservative (see shell-reads.ts); here a candidate is
+ * kept only if it exists and hashes now, which also drops any token the
+ * parse misread as a path. Evidence that cannot vouch for the whole output
+ * (another command in the chain, a directory, a glob, an oversized file)
+ * still records the files, so drift is caught, but marks the memory
+ * mixedTrust so it can never read as verified.
+ */
+function addShellReadEvidence(prov: Provenance, payload: HookPayload, cwd: string): void {
+  const data =
+    typeof payload.data === "object" && payload.data !== null
+      ? (payload.data as Record<string, unknown>)
+      : {};
+  const input = data["tool_input"];
+  const command = shellCommandOf(input);
+  if (!command) return;
+  const record = (input ?? {}) as Record<string, unknown>;
+  const workdir = [record["workdir"], record["cwd"]].find(
+    (v): v is string => typeof v === "string" && isAbsolute(v),
+  );
+  const reads = extractShellReads(command, workdir ?? cwd, homedir());
+  if (!reads || reads.files.length === 0) return;
+  const rel = reads.files.map((f) => relativizeUnder(cwd, f));
+  const commitments = hashFileCommitments(rel, cwd);
+  const kept = rel.filter((f) => commitments.fileHashes[f] !== undefined);
+  if (kept.length === 0) return;
+  const unhashable = rel.some(
+    (f, i) => commitments.fileHashes[f] === undefined && existsSync(reads.files[i]!),
+  );
+  prov.files = Array.from(new Set([...(prov.files ?? []), ...kept]));
+  const hashes = { ...(prov.fileHashes ?? {}) };
+  const normalized = { ...(prov.fileHashesNormalized ?? {}) };
+  for (const f of kept) {
+    hashes[f] = commitments.fileHashes[f]!;
+    const n = commitments.fileHashesNormalized[f];
+    if (n !== undefined) normalized[f] = n;
+  }
+  prov.fileHashes = hashes;
+  if (Object.keys(normalized).length > 0) prov.fileHashesNormalized = normalized;
+  if (!reads.complete || unhashable) prov.mixedTrust = true;
 }
 
 export function registerObserveFunction(
@@ -556,6 +606,7 @@ export function registerObserveFunction(
             prov.fileHashesNormalized = commitments.fileHashesNormalized;
           }
         }
+        if (!payload.adopted && payload.cwd) addShellReadEvidence(prov, payload, payload.cwd);
         synthetic.provenance = prov;
         metrics.recordObserve(JSON.stringify(raw), JSON.stringify(synthetic));
 

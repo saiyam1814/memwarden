@@ -465,9 +465,9 @@ npm test 2>&1 | npx memwarden <span class="a">dejafix lookup</span></pre>
     <h2>Measured, not claimed</h2>
     <p class="lead">The launch claim is a <b>memory firewall</b>, so the first number is the firewall
       itself - not retrieval. A deterministic corpus of 250 memories (file-backed, command-sourced,
-      and unsourced) across 5 projects with 50 controlled staleness events, 5 poisoned-handoff traps,
-      and 5 delimiter forgeries. Reproduce with <code>npm run eval</code> (CI-gated at 100% on all
-      eight gates).</p>
+      and unsourced) plus 60 shell-command file reads, across 5 projects with 80 controlled staleness
+      events, 20 formatting-only rewrites, 5 poisoned-handoff traps, and 5 delimiter forgeries.
+      Reproduce with <code>npm run eval</code> (CI-gated at 100% on all thirteen gates).</p>
     <table>
       <tr><th>Firewall eval</th><th>Result</th></tr>
       <tr><td>Stale retrievable - each stale memory first proven retrievable unfiltered (so "blocked" measures work, not absence)</td><td class="ok">100%</td></tr>
@@ -477,6 +477,8 @@ npm test 2>&1 | npx memwarden <span class="a">dejafix lookup</span></pre>
       <tr><td>Label accuracy - labels match ground truth across all three classes</td><td class="ok">100%</td></tr>
       <tr><td>Handoff traps - hostile prompts beside fresh file hashes never laundered to <code>verified</code></td><td class="ok">0 laundered</td></tr>
       <tr><td>Verified-only policy - sourced/unsourced/handoff refused; verified still flows</td><td class="ok">100%</td></tr>
+      <tr><td>Formatting-only changes - line endings/trailing whitespace stay current as <code>cosmetic</code>; real drift in the same files is still refused</td><td class="ok">100%</td></tr>
+      <tr><td>Shell reads - <code>cat</code>/<code>sed -n</code>/<code>grep</code> file reads verify when current and are refused when the file changes; reads chained after another command are never labeled verified</td><td class="ok">100%</td></tr>
       <tr><td>Injection containment - forged delimiters can't escape the untrusted-data block on any surface</td><td class="ok">100%</td></tr>
     </table>
     <p class="lead" style="margin-top:30px">Retrieval next. Real on-device model
