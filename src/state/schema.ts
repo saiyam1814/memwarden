@@ -60,6 +60,9 @@ export const KV = {
   // Liveness: last-seen timestamp per agent host, updated by every hook
   // invocation that reaches the daemon (`memwarden status` reads it back).
   hostHeartbeats: "mem:hosts",
+  // Maintenance bookkeeping (last compaction), so `status` can tell "run
+  // compact" apart from "you just did; the rest is the recency window".
+  maintenance: "mem:maintenance",
   // Fleet mode: one row per active agent instance (keyed by sessionId),
   // upserted on every capture (see fleet.ts / mem::observe). Unlike
   // hostHeartbeats (per-host, e.g. "claude-code"), this is per-project-agent

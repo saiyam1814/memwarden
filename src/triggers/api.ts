@@ -829,6 +829,7 @@ export function registerApiTriggers(
         // What the firewall actually did — the difference between claiming
         // protection and showing it.
         firewall: await summarizeFirewall(kv, 30).catch(() => null),
+        lastCompact: await kv.get(KV.maintenance, "compact").catch(() => null),
       };
       if (vec instanceof QuantizedVectorIndex) {
         const { dims, paddedDims, bits, rescoreDepth } = vec.params;
@@ -1104,6 +1105,17 @@ export function registerApiTriggers(
           return { status_code: 409, body: { error: err.message, brokenAt: err.brokenAt } };
         }
         throw err;
+      }
+      const dryRun = body.dry_run === true || body.dryRun === true;
+      if (!dryRun) {
+        // Best-effort bookkeeping for `status`; never fails the compaction.
+        await new StateKV(sdk)
+          .set(KV.maintenance, "compact", {
+            at: new Date().toISOString(),
+            pruned: prune,
+            keepDays: prune ? keepDays : null,
+          })
+          .catch(() => undefined);
       }
       return { status_code: 200, body: result };
     },

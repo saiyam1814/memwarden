@@ -72,6 +72,10 @@ to 1.8GB.
   records existed.
 
 ### Fixed
+- **`status` stops telling you to compact right after you did.** After a pruning compaction, the
+  remaining size is mostly history inside the recency window, so repeating "run compact" was noise.
+  `status` now shows when the last compaction ran and the date after which another one reclaims
+  more (`/memwarden/stats` exposes `lastCompact`).
 - **`doctor` stops flagging pronouns as contradictions.** "There is a race" and "there is no retry
   budget" were reported as a conflict on the subject "there" (likewise "dates", "it"). Single-word
   subjects with no referent are no longer claims.

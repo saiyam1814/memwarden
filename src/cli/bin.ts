@@ -2101,6 +2101,8 @@ async function fleetStatus(rest: string[]): Promise<void> {
 // not yet trust-pinned).
 
 interface StatsBody {
+  /** When `memwarden compact` last ran, and the recency window it kept. */
+  lastCompact?: { at: string; pruned: boolean; keepDays: number | null } | null;
   memories?: number;
   observations?: number;
   sessions?: number;
@@ -2316,8 +2318,21 @@ async function status(rest: string[]): Promise<void> {
           `              ${human(dbBytes)} memory + oplog · ${human(runtimeBytes)} embedding runtime`,
         );
       }
-      // Only advise the lever that would actually help the dominant cost.
-      if (dbBytes >= 150 * MB) {
+      // Only advise the lever that would actually help the dominant cost. Right
+      // after a pruning compaction the remainder is mostly history inside the
+      // recency window, so repeating the advice would be noise: say when the
+      // next run will actually reclaim something instead.
+      const last = stats?.lastCompact;
+      const windowEnds =
+        last?.pruned && typeof last.keepDays === "number"
+          ? Date.parse(last.at) + last.keepDays * 86_400_000
+          : NaN;
+      if (dbBytes >= 150 * MB && Number.isFinite(windowEnds) && windowEnds > Date.now()) {
+        console.log(
+          `              compacted ${last!.at.slice(0, 10)}; the last ${last!.keepDays} days of history are kept,` +
+            ` so 'memwarden compact --prune-history' reclaims more after ${new Date(windowEnds).toISOString().slice(0, 10)}`,
+        );
+      } else if (dbBytes >= 150 * MB) {
         console.log(
           `              shrink the oplog: 'memwarden compact --prune-history'` +
             ` (drops superseded payload copies; the chain still verifies)`,
