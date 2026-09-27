@@ -3,11 +3,29 @@
 All notable changes to memwarden. Dates are release dates; the format loosely follows
 [Keep a Changelog](https://keepachangelog.com/).
 
-## Unreleased
+## 0.2.0 - 2026-09-27
 
-Found by running 0.1.1 for a month on a real machine: the daemon crashed with
-a 4GB out-of-memory error when `memwarden doctor` ran, and the brain had grown
-to 1.8GB.
+This release comes from running 0.1.1 for a month on a real machine and reading
+the brain row by row. Four things were wrong:
+
+- The daemon crashed with a 4GB out-of-memory error when `memwarden doctor` ran.
+- After a restart it was unresponsive for 40+ minutes.
+- The brain held 1.8GB of history against 60MB of live state.
+- Only 57 of 1,060 served memories were ever verified, because 72% of tool calls
+  were shell commands and file reads through the shell carried no evidence.
+
+This release fixes all four, and adds the tools to clean up an existing brain:
+
+```
+npm i -g memwarden@0.2.0 && memwarden up    # restarts the daemon on the new build
+memwarden repair --legacy                   # dry run: what it would repair / retire
+memwarden repair --legacy --apply
+memwarden compact --prune-history           # drop superseded history; the chain still verifies
+```
+
+On the machine these defects were found on, those steps took the brain from
+1.78GB to 355MB and from 7,539 memories (59% junk) to 3,602 readable ones.
+`doctor` went from crashing the daemon to 1.7s.
 
 ### Added
 - **Shell file reads carry file evidence.** On a month of real captures, 72% of tool calls were
@@ -37,21 +55,6 @@ to 1.8GB.
   real shell captures, 32.3% now carry file evidence and 21.5% are complete reads (17.5% verify
   against today's files). Three new eval gates pin the behavior, including the adversarial shapes:
   `shell-read-verify`, `shell-read-refusal`, and `shell-mixed-capped`.
-- **Plain reads age out instead of becoming permanent memories.** The retention sweep promoted
-  every expiring observation that had file evidence, including bare reads. Despite a comment
-  saying low-importance reads "age out", that is how one brain accumulated 1,100+ "Read X"
-  memories. With shell reads now carrying file evidence, every `cat`/`sed -n` would have been
-  promoted too. Edits, writes, errors, decisions, handoffs, and anything with a real fact are still
-  distilled. A plain read's file is its own record, so it is deleted at the TTL.
-- **Subdirectory captures are verified against the right file.** Relative evidence was re-rooted
-  at the caller's cwd, so a memory captured in `packages/foo` and recalled from the repo root
-  checked the root `package.json`. The result was a false stale, or a false verified if the two
-  files matched. New captures record where their cwd sat inside the checkout (`cwdInRepo`). Recall
-  re-roots relative files at `<checkout root>/<cwdInRepo>`, and re-roots absolute files inside the
-  capture's checkout at the caller's checkout. Paths are compared with symlinks resolved, so a
-  symlinked checkout, `/var` vs `/private/var`, or a trailing slash cannot defeat the match. Files
-  in a different checkout nested inside this one keep their own identity.
-
 - **`memwarden repair --legacy` fixes memories distilled from pre-0.0.8 captures.** The old
   extractor titled every capture with its tool name and stored raw tool JSON as the body. The
   durability contract later promoted those observations into permanent memories, and on one real
@@ -84,6 +87,21 @@ to 1.8GB.
   records existed.
 
 ### Fixed
+- **Plain reads age out instead of becoming permanent memories.** The retention sweep promoted
+  every expiring observation that had file evidence, including bare reads. Despite a comment
+  saying low-importance reads "age out", that is how one brain accumulated 1,100+ "Read X"
+  memories. With shell reads now carrying file evidence, every `cat`/`sed -n` would have been
+  promoted too. Edits, writes, errors, decisions, handoffs, and anything with a real fact are still
+  distilled. A plain read's file is its own record, so it is deleted at the TTL.
+- **Subdirectory captures are verified against the right file.** Relative evidence was re-rooted
+  at the caller's cwd, so a memory captured in `packages/foo` and recalled from the repo root
+  checked the root `package.json`. The result was a false stale, or a false verified if the two
+  files matched. New captures record where their cwd sat inside the checkout (`cwdInRepo`). Recall
+  re-roots relative files at `<checkout root>/<cwdInRepo>`, and re-roots absolute files inside the
+  capture's checkout at the caller's checkout. Paths are compared with symlinks resolved, so a
+  symlinked checkout, `/var` vs `/private/var`, or a trailing slash cannot defeat the match. Files
+  in a different checkout nested inside this one keep their own identity.
+
 - **`status` stops telling you to compact right after you did.** After a pruning compaction, the
   remaining size is mostly history inside the recency window, so repeating "run compact" was noise.
   `status` now shows when the last compaction ran and the date after which another one reclaims

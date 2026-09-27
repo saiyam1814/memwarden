@@ -1,7 +1,7 @@
 {
   "name": "memwarden",
-  "version": "0.1.1",
-  "description": "The memory firewall for AI coding agents. Verified, self-custodied, tamper-evident — one brain across every tool.",
+  "version": "0.2.0",
+  "description": "Memory for AI coding agents that checks itself against your code. A memory whose source files changed is refused, not recalled. Local, shared by all your agents, tamper-evident.",
   "type": "module",
   "engines": {
     "node": ">=20.0.0"
