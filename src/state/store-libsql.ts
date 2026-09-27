@@ -22,7 +22,7 @@
 // kernel; a multi-process memwarden would need a real lock (the same caveat
 // as withKeyedLock).
 
-import { createClient, type Client, type InStatement } from "@libsql/client";
+import { createClient, type Client, type InStatement, type Row } from "@libsql/client";
 import { chmodSync, mkdirSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import {
@@ -31,7 +31,10 @@ import {
   type OplogCompactOptions,
   type OplogCompactResult,
   type OplogEntry,
+  type OplogEntryRef,
   type OplogEraseResult,
+  type OplogVerifyOptions,
+  OplogChainBrokenError,
   type OplogOp,
   type StateEventType,
   type StateMutationEvent,
@@ -39,14 +42,32 @@ import {
   type UpdateOp,
 } from "./store.js";
 import {
+  ChainVerifier,
+  CompactionPlanner,
   GENESIS_PREV_HASH,
+  buildCompactionIndex,
   buildEraseRecord,
+  collectEraseAuthorizations,
   hashOplogEntryV2,
   hashPayload,
-  planCompaction,
   pairKey,
-  verifyChain,
 } from "./oplog.js";
+
+/**
+ * Page limits when walking the oplog. Chain verification and compaction hold
+ * one page of decoded payloads at a time, so memory is bounded by the page,
+ * never by the length of history. Pages close at whichever limit comes first:
+ * a row count, or a payload byte budget (pre-fix history holds 10-20MB raw
+ * tool outputs, so 500 rows of those alone would be gigabytes). A single row
+ * larger than the budget still forms a page of one.
+ */
+const OPLOG_PAGE = 500;
+const OPLOG_PAGE_BYTES = 32 * 1024 * 1024;
+
+const OPLOG_COLUMNS = `id, ts, op, scope, key, payload, prev_hash, hash, v, payload_hash`;
+
+/** How long a full verification may be extended by incremental ones. */
+const VERIFY_REUSE_MS = 60_000;
 
 const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS kv (
@@ -97,6 +118,25 @@ export class StoreLibsql implements StateStore {
   private closed = false;
   /** Local db path (file: URL) so init() can tighten its mode post-create. */
   private readonly dbPath: string | null = null;
+  /**
+   * Bumped whenever history is rewritten in place (erase, compact). A paged
+   * verification that races one of those can read half of each version; it
+   * compares epochs and re-runs instead of reporting a false break.
+   */
+  private oplogEpoch = 0;
+  /**
+   * The newest entry covered by the last successful FULL verification, when
+   * it ran, and the epoch it ran under. Incremental verification continues
+   * the chain from here instead of re-walking all of history.
+   */
+  private verifiedThrough: { id: number; hash: string; at: number; epoch: number } | null =
+    null;
+  /**
+   * Bumped when a full walk starts. A walk may only cache its result if no
+   * newer walk started meanwhile, so a slow walk that passed can never
+   * overwrite a newer one that found a break.
+   */
+  private verifyGeneration = 0;
 
   constructor(options: StoreLibsqlOptions) {
     // For a local `file:` URL, ensure the parent directory exists first.
@@ -230,30 +270,218 @@ export class StoreLibsql implements StateStore {
   async readOplog(sinceId?: number): Promise<OplogEntry[]> {
     await this.init();
     const res = await this.client.execute({
-      sql: `SELECT id, ts, op, scope, key, payload, prev_hash, hash, v, payload_hash
-            FROM oplog WHERE id > ? ORDER BY id ASC`,
+      sql: `SELECT ${OPLOG_COLUMNS} FROM oplog WHERE id > ? ORDER BY id ASC`,
       args: [sinceId ?? 0],
     });
+    return res.rows.map(rowToEntry);
+  }
+
+  /** id/op/scope/key for every entry, paged, without touching payloads. */
+  private async readOplogIndexRows(): Promise<
+    Array<Pick<OplogEntry, "id" | "op" | "scope" | "key">>
+  > {
+    const rows: Array<Pick<OplogEntry, "id" | "op" | "scope" | "key">> = [];
+    let after = 0;
+    for (;;) {
+      const page = await this.client.execute({
+        sql: `SELECT id, op, scope, key FROM oplog WHERE id > ? ORDER BY id ASC LIMIT ?`,
+        args: [after, OPLOG_PAGE * 20],
+      });
+      for (const row of page.rows) {
+        after = Number(row.id);
+        rows.push({
+          id: after,
+          op: String(row.op) as OplogOp,
+          scope: String(row.scope),
+          key: String(row.key),
+        });
+      }
+      if (page.rows.length < OPLOG_PAGE * 20) return rows;
+    }
+  }
+
+  /** Walk the oplog in id order one page at a time (payloads decoded per page). */
+  private async *iterateOplog(): AsyncGenerator<OplogEntry> {
+    await this.init();
+    let after = 0;
+    for (;;) {
+      // Size the page first (ids + payload lengths only), then fetch exactly
+      // the rows that fit the byte budget.
+      const sizes = await this.client.execute({
+        sql: `SELECT id, COALESCE(LENGTH(payload), 0) AS n FROM oplog
+              WHERE id > ? ORDER BY id ASC LIMIT ?`,
+        args: [after, OPLOG_PAGE],
+      });
+      if (sizes.rows.length === 0) return;
+      let upTo = Number(sizes.rows[0]!.id);
+      let bytes = 0;
+      for (const row of sizes.rows) {
+        const n = Number(row.n);
+        if (bytes > 0 && bytes + n > OPLOG_PAGE_BYTES) break;
+        bytes += n;
+        upTo = Number(row.id);
+      }
+      const page = await this.client.execute({
+        sql: `SELECT ${OPLOG_COLUMNS} FROM oplog WHERE id > ? AND id <= ? ORDER BY id ASC`,
+        args: [after, upTo],
+      });
+      for (const row of page.rows) {
+        const entry = rowToEntry(row);
+        yield entry;
+      }
+      after = upTo;
+      const lastSized = Number(sizes.rows[sizes.rows.length - 1]!.id);
+      if (sizes.rows.length < OPLOG_PAGE && upTo === lastSized) return;
+    }
+  }
+
+  async oplogCount(): Promise<number> {
+    await this.init();
+    const res = await this.client.execute(`SELECT COUNT(*) AS n FROM oplog`);
+    return Number(res.rows[0]?.n ?? 0);
+  }
+
+  async oplogHead(): Promise<{ id: number; hash: string } | null> {
+    await this.init();
+    const res = await this.client.execute(
+      `SELECT id, hash FROM oplog ORDER BY id DESC LIMIT 1`,
+    );
+    const row = res.rows[0];
+    return row ? { id: Number(row.id), hash: String(row.hash) } : null;
+  }
+
+  async findOplogEntries(key: string, scope?: string): Promise<OplogEntryRef[]> {
+    await this.init();
+    const res = await this.client.execute(
+      scope === undefined
+        ? {
+            sql: `SELECT id, ts, op, scope, key, hash, prev_hash FROM oplog
+                  WHERE key = ? ORDER BY id ASC`,
+            args: [key],
+          }
+        : {
+            sql: `SELECT id, ts, op, scope, key, hash, prev_hash FROM oplog
+                  WHERE scope = ? AND key = ? ORDER BY id ASC`,
+            args: [scope, key],
+          },
+    );
     return res.rows.map((row) => ({
       id: Number(row.id),
       ts: String(row.ts),
       op: String(row.op) as OplogOp,
       scope: String(row.scope),
       key: String(row.key),
-      payload: row.payload === null ? null : decode<unknown>(row.payload),
-      v: row.v === null || row.v === undefined ? 1 : Number(row.v),
-      payload_hash: row.payload_hash === null || row.payload_hash === undefined
-        ? null
-        : String(row.payload_hash),
-      prev_hash: String(row.prev_hash),
       hash: String(row.hash),
+      prev_hash: String(row.prev_hash),
     }));
   }
 
-  async verifyOplog(): Promise<{ ok: true } | { ok: false; brokenAt: number }> {
-    const entries = await this.readOplog();
-    const brokenAt = verifyChain(entries);
-    return brokenAt === null ? { ok: true } : { ok: false, brokenAt };
+  async verifyOplog(
+    opts?: OplogVerifyOptions,
+  ): Promise<{ ok: true } | { ok: false; brokenAt: number }> {
+    if (opts?.incremental) {
+      const tail = await this.verifyAppendedSince();
+      if (tail !== undefined) {
+        return tail === null ? { ok: true } : { ok: false, brokenAt: tail };
+      }
+    }
+    // Paged, so verification memory is bounded by a page rather than by the
+    // log. The single-SELECT version read (and JSON-decoded) every payload in
+    // history at once; on a month-old brain that is gigabytes and exhausts
+    // the daemon's heap. Reads are not one snapshot, so a break observed
+    // while an erase/compact rewrote history is re-checked, not reported.
+    for (let attempt = 0; ; attempt++) {
+      const epoch = this.oplogEpoch;
+      const generation = ++this.verifyGeneration;
+      const startedAt = performance.now();
+      const result = await this.verifyOplogOnce();
+      if (result.brokenAt === null) {
+        if (generation === this.verifyGeneration) {
+          this.verifiedThrough =
+            this.oplogEpoch === epoch && result.through
+              ? { ...result.through, at: startedAt, epoch }
+              : null;
+        }
+        return { ok: true };
+      }
+      this.verifiedThrough = null;
+      if (this.oplogEpoch === epoch || attempt >= 2) {
+        return { ok: false, brokenAt: result.brokenAt };
+      }
+    }
+  }
+
+  /**
+   * Continue the last full verification over the entries appended since.
+   * Returns undefined when that is not safe and a full walk is required:
+   * no recent full verification, history rewritten in place since (erase,
+   * compact), or an erase/compact record in the tail — those authorize
+   * earlier nulls, which only a full walk can re-judge. Only appends are
+   * trusted to the incremental path, and only for VERIFY_REUSE_MS after a
+   * full walk, so a change to already-verified rows is caught by the next
+   * full verification within that window.
+   */
+  private async verifyAppendedSince(): Promise<number | null | undefined> {
+    const base = this.verifiedThrough;
+    if (
+      !base ||
+      base.epoch !== this.oplogEpoch ||
+      performance.now() - base.at > VERIFY_REUSE_MS
+    ) {
+      return undefined;
+    }
+    await this.init();
+    const tail = await this.client.execute({
+      sql: `SELECT ${OPLOG_COLUMNS} FROM oplog WHERE id > ? ORDER BY id ASC`,
+      args: [base.id],
+    });
+    const entries = tail.rows.map(rowToEntry);
+    if (entries.some((e) => e.op === "erase" || e.op === "compact")) return undefined;
+    // The anchor row itself must still be the one we verified: a rewritten
+    // or deleted anchor means history changed underneath the cached result.
+    const anchor = await this.client.execute({
+      sql: `SELECT hash FROM oplog WHERE id = ?`,
+      args: [base.id],
+    });
+    if (String(anchor.rows[0]?.hash ?? "") !== base.hash) return undefined;
+    const verifier = new ChainVerifier(new Map(), base);
+    for (const entry of entries) {
+      const brokenAt = verifier.push(entry);
+      if (brokenAt !== null) {
+        if (this.verifiedThrough === base) this.verifiedThrough = null;
+        return brokenAt;
+      }
+    }
+    const last = entries.at(-1);
+    // Extend only the exact walk this check continued: if a newer full walk
+    // replaced (or cleared) it meanwhile, that result stands.
+    if (last && base.epoch === this.oplogEpoch && this.verifiedThrough === base) {
+      this.verifiedThrough = { ...base, id: last.id, hash: last.hash };
+    }
+    return null;
+  }
+
+  private async verifyOplogOnce(): Promise<{
+    brokenAt: number | null;
+    through: { id: number; hash: string } | null;
+  }> {
+    await this.init();
+    // Authorizations first: a null payload is only legitimate when a LATER
+    // erase/compact record vouches for it, so those (few) rows are needed
+    // before the walk reaches the entries they authorize.
+    const anchors = await this.client.execute(
+      `SELECT ${OPLOG_COLUMNS} FROM oplog WHERE op IN ('erase', 'compact') ORDER BY id ASC`,
+    );
+    const verifier = new ChainVerifier(
+      collectEraseAuthorizations(anchors.rows.map(rowToEntry)),
+    );
+    let through: { id: number; hash: string } | null = null;
+    for await (const entry of this.iterateOplog()) {
+      const brokenAt = verifier.push(entry);
+      if (brokenAt !== null) return { brokenAt, through: null };
+      through = { id: entry.id, hash: entry.hash };
+    }
+    return { brokenAt: null, through };
   }
 
   async eraseOplogPayloads(scope: string, key: string): Promise<OplogEraseResult> {
@@ -305,7 +533,10 @@ export class StoreLibsql implements StateStore {
 
       // One batch = one transaction: the nulling and its authorization record
       // land together, or neither does — a crash can never leave the chain
-      // with unauthorized (verification-breaking) nulls.
+      // with unauthorized (verification-breaking) nulls. The epoch moves on
+      // both sides of the commit so a concurrent paged verification can never
+      // straddle it without noticing.
+      this.oplogEpoch++;
       await this.client.batch(
         [
           {
@@ -331,6 +562,7 @@ export class StoreLibsql implements StateStore {
         ],
         "write",
       );
+      this.oplogEpoch++;
       // Flush the WAL so the erased bytes do not linger in the -wal file
       // (secure_delete handles the freed bytes inside the main db pages).
       await this.checkpointWal();
@@ -341,7 +573,9 @@ export class StoreLibsql implements StateStore {
   async compactOplog(opts?: OplogCompactOptions): Promise<OplogCompactResult> {
     return this.serializeWrite(async () => {
       await this.init();
-      const entries = await this.readOplog();
+      // Pass 1 — the per-key index, from id/op/scope/key only. No payload is
+      // read, so this stays small however long history grows.
+      const index = buildCompactionIndex(await this.readOplogIndexRows());
       // Belt-and-braces: the planner only erases delete-tailed pairs, and we
       // ADDITIONALLY require the kv row to be absent right now.
       const liveRows = await this.client.execute(`SELECT scope, key FROM kv`);
@@ -349,8 +583,70 @@ export class StoreLibsql implements StateStore {
         liveRows.rows.map((r) => pairKey(String(r.scope), String(r.key))),
       );
       const compactedAt = new Date().toISOString();
-      // Same planner, same options as StoreMemory (parity by construction).
-      const plan = planCompaction(entries, livePairs, compactedAt, opts);
+      // Same planner, same options as StoreMemory (parity by construction),
+      // fed one page at a time: the pre-streaming version decoded the entire
+      // oplog up front, which on a mature brain is gigabytes of payloads and
+      // exhausted the daemon's heap on the very command meant to shrink it.
+      const planner = new CompactionPlanner(index, livePairs, opts);
+      // Verify what is about to be re-anchored, in the same pass.
+      const anchors = await this.client.execute(
+        `SELECT ${OPLOG_COLUMNS} FROM oplog WHERE op IN ('erase', 'compact') ORDER BY id ASC`,
+      );
+      const verifier = new ChainVerifier(
+        collectEraseAuthorizations(anchors.rows.map(rowToEntry)),
+        undefined,
+        { allowUnauthorizedNulls: true },
+      );
+
+      // Crash safety: ONE batch = one transaction. Either the whole rewrite
+      // plus the anchoring compact record commits, or none of it does — a
+      // crash mid-compact leaves the previous (still-verifying) chain
+      // untouched. No temp-file swap is needed because SQLite's journal
+      // already gives us the atomic all-or-nothing.
+      const stmts: InStatement[] = [];
+      // Rows where the ONLY change is the payload going away (already v2, so
+      // every hash column stays byte-identical) are nulled in id batches
+      // instead of one statement each: a pruning compaction touches most of a
+      // mature oplog, and 100k+ single-row statements in one batch is not a
+      // shape worth handing the driver.
+      const nullOnly: number[] = [];
+      for await (const before of this.iterateOplog()) {
+        const brokenAt = verifier.push(before);
+        if (brokenAt !== null) throw new OplogChainBrokenError(brokenAt);
+        const after = planner.feed(before);
+        if (opts?.dryRun) continue;
+        const nulled = after.payload === null || after.payload === undefined;
+        const sameColumns =
+          before.v === after.v &&
+          before.payload_hash === after.payload_hash &&
+          before.prev_hash === after.prev_hash &&
+          before.hash === after.hash;
+        if (sameColumns && (before.payload ?? null) === (after.payload ?? null)) {
+          continue; // byte-identical row — skip the write
+        }
+        if (sameColumns && before.v === 2 && nulled) {
+          nullOnly.push(after.id);
+          continue;
+        }
+        // The planner only ever keeps a payload verbatim or nulls it, so the
+        // payload column is either left alone or set NULL. Statements never
+        // carry payload text, which keeps a v1 -> v2 migration of a large log
+        // as bounded as a prune.
+        stmts.push(
+          nulled
+            ? {
+                sql: `UPDATE oplog SET payload = NULL, v = 2, payload_hash = ?, prev_hash = ?, hash = ?
+                      WHERE id = ?`,
+                args: [after.payload_hash, after.prev_hash, after.hash, after.id],
+              }
+            : {
+                sql: `UPDATE oplog SET v = 2, payload_hash = ?, prev_hash = ?, hash = ?
+                      WHERE id = ?`,
+                args: [after.payload_hash, after.prev_hash, after.hash, after.id],
+              },
+        );
+      }
+      const plan = planner.finish(compactedAt);
 
       if (opts?.dryRun) {
         return {
@@ -366,54 +662,6 @@ export class StoreLibsql implements StateStore {
         };
       }
 
-      // Crash safety: ONE batch = one transaction. Either the whole rewrite
-      // plus the anchoring compact record commits, or none of it does — a
-      // crash mid-compact leaves the previous (still-verifying) chain
-      // untouched. No temp-file swap is needed because SQLite's journal
-      // already gives us the atomic all-or-nothing.
-      const stmts: InStatement[] = [];
-      // Rows where the ONLY change is the payload going away (already v2, so
-      // every hash column stays byte-identical) are nulled in id batches
-      // instead of one statement each: a pruning compaction touches most of a
-      // mature oplog, and 100k+ single-row statements in one batch is not a
-      // shape worth handing the driver.
-      const nullOnly: number[] = [];
-      for (let i = 0; i < entries.length; i++) {
-        const before = entries[i]!;
-        const after = plan.entries[i]!;
-        if (
-          before.v === after.v &&
-          before.payload_hash === after.payload_hash &&
-          before.prev_hash === after.prev_hash &&
-          before.hash === after.hash &&
-          (before.payload ?? null) === (after.payload ?? null)
-        ) {
-          continue; // byte-identical row — skip the write
-        }
-        if (
-          before.v === 2 &&
-          before.payload_hash === after.payload_hash &&
-          before.prev_hash === after.prev_hash &&
-          before.hash === after.hash &&
-          (after.payload === null || after.payload === undefined)
-        ) {
-          nullOnly.push(after.id);
-          continue;
-        }
-        stmts.push({
-          sql: `UPDATE oplog SET payload = ?, v = 2, payload_hash = ?, prev_hash = ?, hash = ?
-                WHERE id = ?`,
-          args: [
-            after.payload === null || after.payload === undefined
-              ? null
-              : encode(after.payload),
-            after.payload_hash,
-            after.prev_hash,
-            after.hash,
-            after.id,
-          ],
-        });
-      }
       // Order is irrelevant (every statement touches a distinct id), and all
       // of them still ride in the one batch = one transaction below.
       const NULL_CHUNK = 400;
@@ -440,7 +688,9 @@ export class StoreLibsql implements StateStore {
           rec.payload_hash,
         ],
       });
+      this.oplogEpoch++;
       await this.client.batch(stmts, "write");
+      this.oplogEpoch++;
 
       // Shrink: checkpoint the WAL (erased frames would otherwise survive in
       // the -wal file), then VACUUM to rewrite the db file without the freed
@@ -650,4 +900,22 @@ function encode(value: unknown): string {
 
 function decode<T>(value: unknown): T {
   return JSON.parse(String(value)) as T;
+}
+
+function rowToEntry(row: Row): OplogEntry {
+  return {
+    id: Number(row.id),
+    ts: String(row.ts),
+    op: String(row.op) as OplogOp,
+    scope: String(row.scope),
+    key: String(row.key),
+    payload: row.payload === null ? null : decode<unknown>(row.payload),
+    v: row.v === null || row.v === undefined ? 1 : Number(row.v),
+    payload_hash:
+      row.payload_hash === null || row.payload_hash === undefined
+        ? null
+        : String(row.payload_hash),
+    prev_hash: String(row.prev_hash),
+    hash: String(row.hash),
+  };
 }

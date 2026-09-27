@@ -30,6 +30,15 @@ const URL_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
 function isUrl(value: string): boolean {
   return URL_RE.test(value.trim());
 }
+// A search glob (a double-star pattern, `*.{yml,yaml}`) names many files or
+// none, never one. Grep/Glob inputs carry them in `glob`/`pattern` fields that
+// the top-level scan below reads as paths, and a glob is never a file on disk:
+// it was recorded as one, failed existsSync forever, and every such memory was
+// refused as `stale — deleted: **/*.ts` for life (surfaced as firewall
+// evidence at the start of every session).
+export function isGlobPattern(value: string): boolean {
+  return /[*?]|\{[^}]*,[^}]*\}/.test(value);
+}
 // Bounded, best-effort extraction: hosts can nest arbitrarily deep and wide;
 // provenance only needs the referenced files, not a full input walk.
 //
@@ -68,7 +77,13 @@ export function collectFilesBounded(toolInput: unknown): {
     const obj = node as Record<string, unknown>;
     for (const k of FILE_KEYS) {
       const v = obj[k];
-      if (typeof v === "string" && v.trim() && !isUrl(v) && files.size < limit) {
+      if (
+        typeof v === "string" &&
+        v.trim() &&
+        !isUrl(v) &&
+        !isGlobPattern(v) &&
+        files.size < limit
+      ) {
         files.add(v.trim());
       }
     }
@@ -84,6 +99,7 @@ export function collectFilesBounded(toolInput: unknown): {
           !FILE_KEYS.includes(k) &&
           v.length < 400 &&
           !isUrl(v) &&
+          !isGlobPattern(v) &&
           PATH_RE.test(v) &&
           !v.includes(" ") &&
           files.size < limit

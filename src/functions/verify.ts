@@ -21,7 +21,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { TextDecoder } from "node:util";
 import type { Provenance } from "./types.js";
-import { isUnsourced } from "./provenance.js";
+import { isGlobPattern, isUnsourced } from "./provenance.js";
 
 // Don't hash enormous files; treat them as unhashed (existence-only).
 const MAX_HASH_BYTES = 2_000_000;
@@ -140,7 +140,11 @@ export function classifyProvenance(
   if (isUnsourced(prov)) {
     return { status: "unsourced", reason: "no file, command, or user-confirmation evidence" };
   }
-  const files = prov?.files ?? [];
+  // Memories captured before globs were excluded at capture carry patterns
+  // like `**/*.ts` as "files". A pattern is not a file that can be deleted,
+  // so it is not evidence either way — without this, each one is refused as
+  // stale forever.
+  const files = (prov?.files ?? []).filter((f) => !isGlobPattern(f));
   const hashes = prov?.fileHashes ?? {};
   const normalizedHashes = prov?.fileHashesNormalized ?? {};
   // Resolve RELATIVE files against the cwd the memory was captured in, not

@@ -215,18 +215,24 @@ export class Kernel implements ISdk {
       }
       case "state::verify": {
         // Tamper-evidence: verify the whole oplog hash chain. Read-only.
-        return (await this.store.verifyOplog()) as R;
+        // `incremental` is for per-deletion receipts only (see
+        // OplogVerifyOptions); an explicit verify always walks everything.
+        const p = (payload ?? {}) as { incremental?: boolean };
+        return (await this.store.verifyOplog(
+          p.incremental === true ? { incremental: true } : undefined,
+        )) as R;
       }
       case "state::oplog-count": {
-        const entries = await this.store.readOplog();
-        return { count: entries.length } as R;
+        // COUNT(*), never a full read: the oplog is the one table that grows
+        // with every write, and decoding it all just to count exhausted the
+        // daemon's heap on a month-old brain (doctor/verify call this).
+        return { count: await this.store.oplogCount() } as R;
       }
       case "state::oplog-head": {
         // The current chain head — receipts record it so they can say WHICH
         // chain their cited entries live in (compaction re-chains hashes).
-        const entries = await this.store.readOplog();
-        const head = entries[entries.length - 1];
-        return (head ? { id: head.id, hash: head.hash } : { id: 0, hash: "" }) as R;
+        const head = await this.store.oplogHead();
+        return (head ?? { id: 0, hash: "" }) as R;
       }
       case "state::oplog-erase": {
         // In-place payload erasure for one (scope, key). The store refuses
@@ -258,19 +264,7 @@ export class Kernel implements ISdk {
         // guarantee, so a key-only match could cite an unrelated entry from
         // another scope and produce a wrong (but self-consistent) receipt.
         const p = payload as { key: string; scope?: string };
-        const entries = await this.store.readOplog();
-        const matches = entries
-          .filter((e) => e.key === p.key && (p.scope === undefined || e.scope === p.scope))
-          .map((e) => ({
-            id: e.id,
-            ts: e.ts,
-            op: e.op,
-            scope: e.scope,
-            key: e.key,
-            hash: e.hash,
-            prev_hash: e.prev_hash,
-          }));
-        return { entries: matches } as R;
+        return { entries: await this.store.findOplogEntries(p.key, p.scope) } as R;
       }
       case "stream::set":
       case "stream::send": {

@@ -9,6 +9,7 @@ import type {
   CompressedObservation,
   ObservationType,
 } from "./types.js";
+import { isGlobPattern } from "./provenance.js";
 
 // tool-name keyword -> observation type, in priority order
 const TOOL_KINDS: ReadonlyArray<readonly [ObservationType, readonly string[]]> = [
@@ -21,7 +22,9 @@ const TOOL_KINDS: ReadonlyArray<readonly [ObservationType, readonly string[]]> =
   ["subagent", ["task", "agent"]],
 ];
 
-const FILE_KEYS = ["file_path", "filepath", "path", "filePath", "file", "pattern"];
+const FILE_KEYS = ["file_path", "filepath", "path", "filePath", "file"];
+
+
 
 // split camelCase / kebab / spaces into a normalized underscore form
 function normalizeToolName(name: string): string {
@@ -59,7 +62,9 @@ function filePaths(input: unknown): string[] {
   const found = new Set<string>();
   for (const key of FILE_KEYS) {
     const v = o[key];
-    if (typeof v === "string" && v.length > 0 && v.length < 512) found.add(v);
+    if (typeof v === "string" && v.length > 0 && v.length < 512 && !isGlobPattern(v)) {
+      found.add(v);
+    }
   }
   return [...found];
 }
@@ -118,8 +123,15 @@ function oneLine(s: string): string {
 function commandSummary(cmd: string): string {
   const first = oneLine(cmd.split("\n").find((l) => l.trim())?.trim() ?? cmd);
   // Heredocs and long pipelines carry no title value past the first clause.
-  const clause = first.split(/\s*(?:\|\||&&|\||;|<<)\s*/)[0] ?? first;
-  return clip(oneLine(clause), 70);
+  const clauses = first.split(/\s*(?:\|\||&&|\||;|<<)\s*/).filter(Boolean);
+  // Setup clauses say nothing about what ran: `cd repo && npm test` is
+  // "npm test", and `SP=/tmp/scratch && cat "$SP/x"` is the cat, not a
+  // 70-char variable assignment (observed titling hundreds of captures).
+  const setup = /^(?:cd\s+\S+|pushd\s+\S+|export\s+\w+=\S*|\w+=\S*|set\s+-\w+)$/;
+  const clause = clauses.find((c) => !setup.test(c.trim())) ?? clauses[0] ?? first;
+  // Leading inline assignments (`FOO=1 npm test`) are prefixes, not the command.
+  const command = clause.replace(/^(?:\w+=\S*\s+)+/, "") || clause;
+  return clip(oneLine(command), 70);
 }
 
 /**
@@ -169,7 +181,14 @@ function conceptsFrom(paths: string[], text: string): string[] {
   // Escape sequences in JSON-encoded tool output fuse into the identifier that
   // follows them: "\tisPremium" was being mined as the symbol "tisPremium", and
   // "\nTHE" as "nTHE". Neutralize them before matching.
-  const scrubbed = oneLine(text).replace(/\\[tnrfv0]/g, " ");
+  // Object KEYS are schema, not topic: every Bash capture's envelope carried
+  // `isImage`/`noOutputExpected`, every fetch `codeText`, every web search
+  // `durationSeconds`/`searchCount`, and those were mined as the "concepts" of
+  // thousands of unrelated memories. Values are kept (a read file's symbols
+  // live there); only `"key":` shapes are dropped.
+  const scrubbed = oneLine(text)
+    .replace(/\\[tnrfv0]/g, " ")
+    .replace(/\\?"[A-Za-z_$][\w$]*\\?"\s*:/g, " ");
 
   // Code-shaped symbols. CONSTANT_CASE deliberately requires an underscore or a
   // digit: without that, ordinary shouty English ("THE", "PASS", "GATE") from
@@ -271,6 +290,7 @@ function titleFor(args: {
   }
   const pattern = str(input, "pattern");
   if (pattern) return clip(`Searched "${oneLine(pattern)}"`, 80);
+  const url = str(input, "url");
   if (file) {
     const verb =
       type === "file_write"
@@ -282,7 +302,78 @@ function titleFor(args: {
             : "Touched";
     return clip(`${verb} ${file}`, 80);
   }
+  // No command, file, or pattern: name what the tool was asked to do. Web,
+  // MCP, subagent, and host-specific tools (web_search, webfetch, Agent,
+  // mcp__slack__search, collaboration.send_message, …) all carry their intent
+  // in one of a few input fields; a bare tool name is the last resort.
+  const label = toolLabel(toolName);
+  if (url) {
+    return clip(type === "web_fetch" ? `Fetched ${urlLabel(url)}` : `${label}: ${urlLabel(url)}`, 80);
+  }
+  const query = firstString(input, [
+    "query", "q", "search_query", "searchQuery", "natural_language_query", "keywords",
+  ]);
+  if (query) {
+    return clip(
+      type === "web_fetch" ? `Searched web: "${query}"` : `${label}: "${query}"`,
+      80,
+    );
+  }
+  const intent = firstString(input, INTENT_KEYS);
+  if (intent) return clip(`${label}: ${intent}`, 80);
   return clip(toolName || "observation", 80);
+}
+
+// Input fields that state a tool call's purpose, most specific first.
+const INTENT_KEYS = [
+  "description", "task", "instruction", "prompt", "message", "text", "title",
+  "subject", "skill", "name", "action", "selector", "target", "id",
+];
+
+/**
+ * First short, single-line, non-JSON string among `keys`. Hosts also send
+ * lists (`keywords: ["KubeAI"]`, Codex `search_query: [{q: …}, …]`); the first
+ * few entries are joined.
+ */
+function firstString(input: Record<string, unknown>, keys: readonly string[]): string {
+  const line = (v: string): string => oneLine(v.split("\n").find((l) => l.trim()) ?? "");
+  for (const key of keys) {
+    const v = input[key];
+    if (typeof v === "string") {
+      const l = line(v);
+      if (l && !isJsonish(l)) return l;
+    } else if (Array.isArray(v)) {
+      const parts = v
+        .map((item) =>
+          typeof item === "string"
+            ? item
+            : item && typeof item === "object" && typeof (item as { q?: unknown }).q === "string"
+              ? (item as { q: string }).q
+              : "",
+        )
+        .map(line)
+        .filter((l) => l && !isJsonish(l))
+        .slice(0, 3);
+      if (parts.length > 0) return parts.join(" | ");
+    }
+  }
+  return "";
+}
+
+/** `mcp__claude-in-chrome__navigate` -> `navigate`; other names unchanged. */
+function toolLabel(toolName: string): string {
+  const mcp = /^mcp__.+?__(.+)$/.exec(toolName);
+  return mcp?.[1] ?? toolName;
+}
+
+/** host + path, no scheme or query: `arxiv.org/abs/2608.21230`. */
+function urlLabel(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.host}${u.pathname === "/" ? "" : u.pathname}`;
+  } catch {
+    return oneLine(url);
+  }
 }
 
 /**
@@ -301,7 +392,9 @@ function narrativeFor(args: {
   outputText: string;
 }): string {
   const parts: string[] = [args.title];
-  if (args.facts.length > 0) parts.push(args.facts.join("; "));
+  // A command's title IS its `ran:` fact; saying it twice only adds noise.
+  const facts = args.facts.filter((f) => f !== `ran: ${args.title}`);
+  if (facts.length > 0) parts.push(facts.join("; "));
   const out = summarizeOutput(args.outputText);
   if (out) parts.push(out);
   return clip(parts.join(". "), 600);
@@ -342,7 +435,29 @@ function summarizeOutput(text: string): string {
       return clip(line, 220);
     }
   }
+  // Search envelopes: the result TITLES are the readable part.
+  const titles = resultTitles(o["results"]);
+  if (titles.length > 0) return clip(`results: ${titles.join("; ")}`, 220);
   return "";
+}
+
+/** Titles from a search result list, flat or nested one level (`content[]`). */
+function resultTitles(results: unknown): string[] {
+  if (!Array.isArray(results)) return [];
+  const out: string[] = [];
+  const visit = (item: unknown, depth: number): void => {
+    if (out.length >= 5 || !item || typeof item !== "object") return;
+    const rec = item as Record<string, unknown>;
+    if (typeof rec["title"] === "string" && rec["title"].trim()) {
+      out.push(oneLine(rec["title"]));
+      return;
+    }
+    if (depth === 0 && Array.isArray(rec["content"])) {
+      for (const c of rec["content"]) visit(c, 1);
+    }
+  };
+  for (const r of results) visit(r, 0);
+  return out;
 }
 
 export function buildSyntheticCompression(raw: RawObservation): CompressedObservation {
@@ -355,8 +470,17 @@ export function buildSyntheticCompression(raw: RawObservation): CompressedObserv
   // prompt itself — never a clipped tool_input/tool_output concatenation.
   const prompt = typeof raw.userPrompt === "string" ? raw.userPrompt.trim() : "";
   if (prompt.length > 0) {
-    const intent =
-      prompt.split("\n").find((l) => l.trim().length > 0)?.trim() ?? prompt;
+    // Harness notifications arrive through the prompt hook but are not the
+    // user's intent: `<task-notification>` wraps a finished background task
+    // (observed as 300 identical titles in one month). Title them by their
+    // summary and rank them below what the user actually asked.
+    const notification = /^<(task-notification|system-reminder)>/.exec(prompt)?.[1];
+    const summary = notification
+      ? /<summary>([\s\S]*?)<\/summary>/.exec(prompt)?.[1]?.trim()
+      : undefined;
+    const intent = notification
+      ? summary || `${notification} (background task)`
+      : (prompt.split("\n").find((l) => l.trim().length > 0)?.trim() ?? prompt);
     const result: CompressedObservation = {
       id: raw.id,
       sessionId: raw.sessionId,
@@ -368,8 +492,9 @@ export function buildSyntheticCompression(raw: RawObservation): CompressedObserv
       concepts: [],
       files: [],
       // Slightly above the tool-trace default: what the USER asked for is
-      // the best signal of session intent for later recall.
-      importance: 6,
+      // the best signal of session intent for later recall. A harness
+      // notification is not something the user asked for.
+      importance: notification ? 4 : 6,
       confidence: 0.5,
     };
     if (raw.modality) result.modality = raw.modality;
@@ -393,6 +518,17 @@ export function buildSyntheticCompression(raw: RawObservation): CompressedObserv
     paths,
     `${str(input, "old_string")} ${str(input, "new_string")} ${str(input, "command")} ${outputText}`,
   );
+  // A fetched page's host is its topic handle ("arxiv.org", "github.com").
+  const fetched = str(input, "url");
+  if (fetched) {
+    try {
+      const host = new URL(fetched).host;
+      if (host && !concepts.includes(host)) concepts.unshift(host);
+      concepts.splice(16);
+    } catch {
+      // not a URL; nothing to add
+    }
+  }
 
   // A bare read with no extractable signal is a log line, not knowledge.
   // Below the retention floor (5) it ages out instead of being promoted into a

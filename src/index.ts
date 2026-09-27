@@ -22,6 +22,7 @@ import {
   setEmbeddingProvider,
   setVectorIndex,
   makeConfiguredVectorIndex,
+  persistVectorIndex,
 } from "./functions/index.js";
 import {
   isProxyEnabled,
@@ -341,6 +342,11 @@ async function main(): Promise<void> {
     // them explicitly before Node tears down native mutexes; an immediate
     // process.exit here used to crash after an otherwise-clean `down`.
     if (embeddingWarmup) await embeddingWarmup.catch(() => undefined);
+    // Save the vector index before tearing it down. It was only ever persisted
+    // after a cold rebuild, so every restart (upgrade, reboot, `down`)
+    // re-embedded everything captured since the daemon started: weeks of
+    // captures on a long-lived daemon.
+    await persistVectorIndex(new StateKV(sdk)).catch(() => false);
     const provider = getEmbeddingProvider();
     if (provider?.dispose) {
       await Promise.resolve(provider.dispose()).catch((err: unknown) => {

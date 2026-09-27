@@ -1,10 +1,11 @@
 //
 // The write path (mem::observe). Accepts a HookPayload, validates it, optionally
 // dedups, privacy-strips the raw payload, builds a RawObservation, then — inside
-// a per-session keyed lock — enforces the per-session cap, persists the raw
-// observation, updates/creates the session row (observationCount++, updatedAt,
-// firstPrompt), and runs the default zero-LLM synthetic compression: write the
-// synthetic over the same obsId and add it to the BM25 and vector indexes.
+// a per-session keyed lock — enforces the per-session cap, updates/creates the
+// session row (observationCount++, updatedAt, firstPrompt), and runs the
+// default zero-LLM synthetic compression: persist the synthetic under the
+// obsId and add it to the BM25 and vector indexes. The unbounded raw payload
+// is persisted only on the opt-in async-compression path.
 // Referenced files are hashed into provenance for Verified Recall. Returns
 // { observationId }.
 //
@@ -306,7 +307,17 @@ export function registerObserveFunction(
         raw.agentId = inheritedAgentId;
       }
 
-      await kv.set(KV.observations(payload.sessionId), obsId, raw);
+      // The raw observation is persisted only when an asynchronous compressor
+      // will replace it later (the opt-in LLM path). On the default path the
+      // synthetic memory (or, for session_end, the handoff) is written under
+      // this same obsId moments later inside this lock, so writing raw first
+      // only left the full, unbounded tool output behind in the append-only
+      // oplog: whole files and PDFs as base64, stored twice (raw and
+      // toolOutput). That was 1.2GB of 1.35GB in one real month-old brain,
+      // and a privacy leak the synthetic record never had.
+      if (payload.hookType !== "session_end" && isAutoCompressEnabled()) {
+        await kv.set(KV.observations(payload.sessionId), obsId, raw);
+      }
 
       // Fleet registry (#25): record this agent as active in the project.
       // Mirrors the observation write above — every hookType that reaches
@@ -465,9 +476,8 @@ export function registerObserveFunction(
         });
 
         if (existingHandoff) {
-          // Refresh in place: drop the just-persisted raw session_end row
-          // (subsumed by the refreshed handoff) and re-index the same id.
-          await kv.delete(KV.observations(payload.sessionId), obsId);
+          // Refresh in place: re-index the same id (the raw session_end row
+          // is never persisted, so there is nothing else to drop).
           getSearchIndex().remove(handoffId);
           vectorIndexRemove(handoffId);
         }

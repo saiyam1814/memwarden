@@ -158,6 +158,49 @@ export interface OplogCompactResult {
 }
 
 /**
+ * Thrown by compactOplog when the chain it was asked to re-anchor is broken.
+ * Compaction re-chains every entry from genesis, so running it over tampered
+ * history would turn a failing verification into a passing one: the one
+ * command that must never launder evidence. Unauthorized NULL payloads are
+ * the exception (the documented migration for chains erased before erase
+ * records existed); edits, reorders, and forged payloads are refused.
+ */
+export class OplogChainBrokenError extends Error {
+  constructor(readonly brokenAt: number) {
+    super(
+      `refusing to compact: the oplog chain is broken at entry ${brokenAt} ` +
+        `(edited, reordered, or forged history). Compacting would re-anchor it ` +
+        `as valid. Inspect it with \`memwarden verify\` first.`,
+    );
+    this.name = "OplogChainBrokenError";
+  }
+}
+
+/** Options for verifyOplog. */
+export interface OplogVerifyOptions {
+  /**
+   * Allow reusing a FULL verification from the last minute, provided history
+   * was not rewritten in place since (no erase, no compact), and verify only
+   * the entries appended after it. For per-deletion receipts: a bulk
+   * `doctor --fix-stale` issues one receipt per memory, and a full walk of a
+   * large chain for each one made it effectively unrunnable. Explicit
+   * verification (`memwarden verify`) never sets this.
+   */
+  incremental?: boolean;
+}
+
+/** One oplog entry's chain position without its payload (receipt evidence). */
+export interface OplogEntryRef {
+  id: number;
+  ts: string;
+  op: OplogOp;
+  scope: string;
+  key: string;
+  hash: string;
+  prev_hash: string;
+}
+
+/**
  * The single persistence chokepoint. All five methods mirror the original
  * StateKV semantics exactly. Implementations: StoreLibsql (durable, libSQL)
  * and StoreMemory (in-process Map mirror, used for parity tests).
@@ -176,14 +219,34 @@ export interface StateStore {
    */
   onMutation(listener: MutationListener): () => void;
 
-  /** Read the append-only oplog in id order (optionally from `sinceId`, exclusive). */
+  /**
+   * Read the append-only oplog in id order (optionally from `sinceId`,
+   * exclusive). Loads every payload: fine for tests and small logs, never
+   * for a daemon hot path — a mature brain's oplog is gigabytes. Use the
+   * payload-free accessors below for counts, the head, and receipts.
+   */
   readOplog(sinceId?: number): Promise<OplogEntry[]>;
+
+  /** Number of oplog entries. Reads no payloads. */
+  oplogCount(): Promise<number>;
+
+  /** The newest entry's id + hash, or null for an empty log. Reads no payloads. */
+  oplogHead(): Promise<{ id: number; hash: string } | null>;
+
+  /**
+   * Chain positions for one key, oldest first, payloads stripped (a receipt
+   * proves an entry existed without re-disclosing its content). `scope`
+   * narrows the match: keys carry no cross-scope uniqueness guarantee.
+   */
+  findOplogEntries(key: string, scope?: string): Promise<OplogEntryRef[]>;
 
   /**
    * Verify the oplog hash chain end to end. Returns the id of the first
-   * broken link, or null if the chain is intact (or empty).
+   * broken link, or null if the chain is intact (or empty). With
+   * `incremental`, a store MAY reuse a recent full verification and check
+   * only what was appended since (see OplogVerifyOptions).
    */
-  verifyOplog(): Promise<{ ok: true } | { ok: false; brokenAt: number }>;
+  verifyOplog(opts?: OplogVerifyOptions): Promise<{ ok: true } | { ok: false; brokenAt: number }>;
 
   /**
    * Null the payload of every oplog row for (scope, key) IN PLACE, keeping

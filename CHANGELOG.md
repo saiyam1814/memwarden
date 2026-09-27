@@ -5,13 +5,88 @@ All notable changes to memwarden. Dates are release dates; the format loosely fo
 
 ## Unreleased
 
+Found by running 0.1.1 for a month on a real machine: the daemon crashed with
+a 4GB out-of-memory error when `memwarden doctor` ran, and the brain had grown
+to 1.8GB.
+
+### Security
+- **`compact` no longer re-anchors tampered history.** Compaction re-chains
+  every entry from genesis. Run over an edited, reordered, or forged chain, it
+  turned a failing verification into a passing one. It now verifies in the
+  same streaming pass and refuses with the broken entry's id (HTTP 409 from
+  `/memwarden/compact`). Unauthorized NULL payloads are still accepted,
+  because compaction is the documented repair for chains erased before erase
+  records existed.
+
 ### Fixed
-- **Firewall served counts now say what was actually returned.** Balanced recall no longer reports
-  sourced or unsourced results as verified. `/memwarden/stats` and `status --json` expose a complete
-  versioned breakdown for verified, cosmetic, sourced, unsourced, and legacy/unclassified values;
-  human status shows the preserved total plus its nonzero classes. Counting occurs after token-budget
-  packing and once per memory per event. Existing aggregate-only buckets remain readable but are never
-  promoted to verified ([#78](https://github.com/saiyam1814/memwarden/issues/78)).
+- **The daemon no longer loads the whole oplog to answer small questions.**
+  Counting entries (doctor, `/memwarden/verify`), reading the chain head and
+  per-key evidence (delete receipts), verification, and compaction each
+  decoded every payload in history at once. On a brain with 459k oplog entries
+  and 1.35GB of payloads, `doctor` pushed the daemon from 212MB to its 4GB heap
+  limit, and it crashed. Counts, the head, and receipt evidence are now single
+  indexed SQL queries. Verification and compaction page through the log with
+  one page of payloads in memory, sharing streaming forms of the same planner
+  and verifier (`CompactionPlanner`, `ChainVerifier`), so both stores still
+  plan identically by construction. Measured on that brain: doctor peaks at
+  340MB instead of ~4GB, and `compact --prune-history` completes in 48s
+  (1.78GB to 719MB, chain verified end to end) where it previously could not
+  run at all.
+- **`doctor --fix-stale` finishes.** Every delete receipt ran a full chain
+  verification, so forgetting 1,318 stale memories meant 1,318 full walks (and,
+  before the paging fix, a crash on the first). Receipts now extend a full
+  verification from the last minute over the entries appended since, falling
+  back to a full walk after any in-place rewrite (erase, compact) or when the
+  window lapses. Explicit `memwarden verify` always walks everything. The same
+  1,318 forgets take 24 seconds. `--fix-stale --erase` still re-verifies per
+  memory, since each erase rewrites history in place. For bulk erasure, run
+  `--fix-stale` and then `memwarden compact`, which erases every forgotten
+  memory's payloads in one pass. The CLI now says so.
+- **The cold rebuild after a restart no longer takes the daemon down.** It ran
+  inside the first search, and its done-flag was set only when it finished, so
+  every hook search arriving mid-rebuild started another full rebuild. The
+  vector index was also only saved after a cold rebuild, so a daemon that had
+  been up for weeks re-embedded weeks of captures on restart, and embedding
+  runs synchronously on the main thread. Together these starved the event loop
+  (observed: 40+ minutes unresponsive at 280% CPU, every hook timing out).
+  The rebuild is now single-flight, and searches return as soon as the keyword
+  index is rebuilt. A large embedding backlog runs in the background in small
+  chunks, and the vector index is saved on graceful shutdown.
+- **Raw tool output no longer lands in history.** Each capture wrote the full
+  raw observation (the complete tool output, stored twice as `raw` and
+  `toolOutput`) and then overwrote it with the bounded synthetic memory. The
+  live row was fine, but the oplog kept every raw version: a 10MB PDF read
+  became a 20MB history entry, and raw payloads were 1.2GB of the 1.35GB
+  total. Whole file bodies also sat in history that no recall path ever reads.
+  The default path now writes only the synthetic memory. The raw form is still
+  persisted on the opt-in async-compression path, which needs it. Existing
+  raw history is dropped by `memwarden compact --prune-history`.
+- **Host heartbeats are throttled.** Every capture and every recall persisted a
+  "this host is live" row, which was 184k oplog rows (a quarter of all history)
+  in one month. Now each host writes at most once per 30 seconds, and the
+  `live` column in `status` stays accurate to that interval.
+- **Memories from web, MCP, and subagent tools say what they did.** Re-running
+  extraction over 7,961 real captures: titles that were just the tool name
+  fell from 18.4% to 3.0%. Web fetch and search (including the lowercase and
+  Codex `webrun` variants), MCP, subagent, and skill tools are titled from
+  their intent field (URL, query, description), so you get titles like
+  `Fetched arxiv.org/abs/2608.21230` and `Searched web: "…"`. Command titles
+  skip `cd` and `VAR=` setup clauses, and background `<task-notification>`
+  messages captured through the prompt hook are titled by their summary and
+  ranked below real prompts.
+- **Tool-envelope keys are no longer mined as concepts.** 61% of recent
+  captures listed `isImage`/`noOutputExpected` (or `codeText`,
+  `durationSeconds`) among their searchable concepts, because the symbol
+  miner read JSON keys as identifiers. Keys are now stripped before mining (to
+  0.0%). Fetched hosts become concepts, web search bodies list result titles,
+  and a command body no longer repeats its own `ran:` fact.
+- **Glob patterns are never file evidence.** A Glob pattern or a Grep `glob`
+  filter (`**/*.ts`) was recorded as a referenced file, failed the existence
+  check forever, and got the memory refused as stale for life. Those refusals
+  were also listed as firewall evidence at the start of every session. New
+  captures no longer record globs, and verification ignores them in existing
+  memories. Real bracketed paths such as Next.js `app/[id]/page.tsx` still
+  count.
 
 ## 0.1.1 - 2026-08-28
 

@@ -22,6 +22,7 @@ import { summarizeFirewall } from "../functions/firewall-stats.js";
 import { QuantizedVectorIndex } from "../functions/quantized-vector-index.js";
 import { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
+import { OplogChainBrokenError } from "../state/store.js";
 import { metrics } from "../observability/metrics.js";
 import { exportBundle, importBundle, isBrainBundle } from "../bundle/bundle.js";
 import {
@@ -79,6 +80,9 @@ export function checkAuth(
   return null;
 }
 
+/** Minimum interval between persisted heartbeats for one host. */
+const HEARTBEAT_MIN_MS = 30_000;
+
 /** A host heartbeat row: which agent host last reached the daemon, when. */
 export interface HostHeartbeat {
   host: string;
@@ -103,9 +107,21 @@ export function registerApiTriggers(
   // field naming their host; persist last-seen per host so `memwarden status`
   // can show wired-vs-actually-flowing. Best-effort — a failed write never
   // fails the request it rode in on.
+  //
+  // Throttled per host: every capture and every recall carried a heartbeat,
+  // so a busy month wrote 184k oplog rows (a quarter of all history) whose only
+  // job is "live (5s ago)". One write per host per HEARTBEAT_MIN_MS keeps the
+  // status column accurate to within that interval.
+  const lastHeartbeatWrite = new Map<string, number>();
   async function recordHostHeartbeat(agent: unknown): Promise<void> {
     if (typeof agent !== "string" || !agent.trim()) return;
     const host = agent.trim().slice(0, 64);
+    const now = Date.now();
+    const last = lastHeartbeatWrite.get(host);
+    if (last !== undefined && now - last < HEARTBEAT_MIN_MS) return;
+    // Bounded: host names come from callers, so never let the map grow unchecked.
+    if (lastHeartbeatWrite.size >= 256) lastHeartbeatWrite.clear();
+    lastHeartbeatWrite.set(host, now);
     const kv = new StateKV(sdk);
     await kv
       .set<HostHeartbeat>(KV.hostHeartbeats, host, {
@@ -1024,20 +1040,29 @@ export function registerApiTriggers(
         };
       }
       const keepDays = body.keep_days ?? DEFAULT_KEEP_DAYS;
-      const result = await sdk.trigger({
-        function_id: "state::compact",
-        payload: {
-          dryRun: body.dry_run === true || body.dryRun === true,
-          ...(prune
-            ? {
-                pruneSuperseded: true,
-                keepPayloadsSince: new Date(
-                  Date.now() - keepDays * 86_400_000,
-                ).toISOString(),
-              }
-            : {}),
-        },
-      });
+      let result: unknown;
+      try {
+        result = await sdk.trigger({
+          function_id: "state::compact",
+          payload: {
+            dryRun: body.dry_run === true || body.dryRun === true,
+            ...(prune
+              ? {
+                  pruneSuperseded: true,
+                  keepPayloadsSince: new Date(
+                    Date.now() - keepDays * 86_400_000,
+                  ).toISOString(),
+                }
+              : {}),
+          },
+        });
+      } catch (err) {
+        // A broken chain is refused, not re-anchored (see OplogChainBrokenError).
+        if (err instanceof OplogChainBrokenError) {
+          return { status_code: 409, body: { error: err.message, brokenAt: err.brokenAt } };
+        }
+        throw err;
+      }
       return { status_code: 200, body: result };
     },
   );

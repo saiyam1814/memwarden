@@ -225,3 +225,76 @@ describe("batched cold rebuild", () => {
     expect(getSearchIndex().size).toBe(4);
   });
 });
+
+// --- single-flight cold rebuild ---------------------------------------------
+//
+// Observed live: after a restart, every hook search that arrived during the
+// cold rebuild started ANOTHER full rebuild (the done-flag was only set at the
+// end). Each re-embedded the whole backlog on the main thread; together they
+// starved the event loop for 40+ minutes and every hook timed out.
+
+import {
+  __resetColdRebuildForTests,
+  __vectorBackfillForTests,
+} from "../src/functions/search.js";
+
+describe("cold rebuild is single-flight and never blocks search on a large backlog", () => {
+  async function search(): Promise<{ results?: unknown[] }> {
+    return sdk.trigger<unknown, { results?: unknown[] }>({
+      function_id: "mem::search",
+      payload: { query: "narrative body", limit: 5 },
+    });
+  }
+
+  it("concurrent searches after a restart share ONE rebuild", async () => {
+    await seedDocs(40);
+    const provider = makeCountingProvider();
+    setEmbeddingProvider(provider);
+    setVectorIndex(new VectorIndex());
+    __resetColdRebuildForTests();
+    getSearchIndex().clear();
+
+    let walks = 0;
+    const list = kv.list.bind(kv);
+    kv.list = (async (scope: string) => {
+      if (scope === KV.sessions) walks++;
+      return list(scope);
+    }) as typeof kv.list;
+    try {
+      await Promise.all([search(), search(), search(), search(), search()]);
+    } finally {
+      kv.list = list;
+    }
+    // one KV walk for the rebuild (search itself may list sessions for scoping,
+    // but never re-walk per concurrent caller), and each doc embedded once
+    expect(provider.embedBatchDocs).toBe(40);
+    expect(walks).toBeLessThanOrEqual(5);
+    expect(getVectorIndex()!.size).toBe(40);
+  });
+
+  it("a large backlog is embedded in the background; search answers from keywords first", async () => {
+    const N = 600; // above the inline threshold
+    await seedDocs(N);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const provider = makeCountingProvider();
+    const embedBatch = provider.embedBatch.bind(provider);
+    provider.embedBatch = async (texts: string[]) => {
+      await gate; // embedding is "slow" until released
+      return embedBatch(texts);
+    };
+    setEmbeddingProvider(provider);
+    setVectorIndex(new VectorIndex());
+    __resetColdRebuildForTests();
+    getSearchIndex().clear();
+
+    const r = await search(); // must not wait for the 600 embeddings
+    expect((r.results ?? []).length).toBeGreaterThan(0);
+    expect(getVectorIndex()!.size).toBe(0);
+
+    release();
+    await __vectorBackfillForTests();
+    expect(getVectorIndex()!.size).toBe(N);
+    expect(provider.embedBatchDocs).toBe(N); // nothing embedded twice
+  });
+});
