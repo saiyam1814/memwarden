@@ -47,6 +47,9 @@ export function isGlobPattern(value: string): boolean {
 // verification of the captured subset must never certify the whole memory
 // as `verified` (drift in an uncaptured file would go undetected).
 const MAX_FILE_DEPTH = 4;
+const DIRECTORY_KEYS = new Set([
+  "workdir", "cwd", "dir_path", "directory", "working_directory", "workingDirectory",
+]);
 const MAX_FILES = 64;
 
 export function collectFilesBounded(toolInput: unknown): {
@@ -58,6 +61,10 @@ export function collectFilesBounded(toolInput: unknown): {
   // Collect one PAST the cap so hitting the cap is distinguishable from
   // exactly filling it.
   const limit = MAX_FILES + 1;
+  const isShellInput =
+    !!toolInput &&
+    typeof toolInput === "object" &&
+    ("command" in (toolInput as object) || "cmd" in (toolInput as object));
   const visit = (node: unknown, depth: number): void => {
     if (files.size >= limit) return;
     if (!node || typeof node !== "object") return;
@@ -89,6 +96,11 @@ export function collectFilesBounded(toolInput: unknown): {
     }
     for (const [k, v] of Object.entries(obj)) {
       if (typeof v === "string") {
+        // A shell tool's working directory is where the command ran, not
+        // something it read: recorded as a "file", an unhashable directory
+        // capped every Codex shell capture below verified. Only for shell
+        // tools (a `command` input): elsewhere a directory still caps.
+        if (depth === 0 && isShellInput && DIRECTORY_KEYS.has(k)) continue;
         // Also catch path-shaped string values in any TOP-LEVEL field (e.g.
         // globs, targets) — the pre-recursion behavior, kept verbatim so
         // shallow hosts extract exactly what they always did. Nested levels

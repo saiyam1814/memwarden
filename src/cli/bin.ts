@@ -285,6 +285,52 @@ async function exportBrain(file: string | undefined): Promise<void> {
   );
 }
 
+// memwarden repair --legacy — see functions/repair.ts. Dry run by default:
+// it prints what would change and touches nothing until --apply.
+async function repair(rest: string[]): Promise<void> {
+  if (!rest.includes("--legacy")) {
+    throw new Error("usage: memwarden repair --legacy [--apply] [--limit N] [--json]");
+  }
+  const apply = rest.includes("--apply");
+  const limitArg = rest[rest.indexOf("--limit") + 1];
+  const limit = rest.includes("--limit") ? Number(limitArg) : undefined;
+  if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {
+    throw new Error(`--limit must be a positive integer (got "${limitArg ?? ""}")`);
+  }
+  const res = await fetch(`${DAEMON_URL}/memwarden/repair/legacy`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ apply, ...(limit !== undefined ? { limit } : {}) }),
+  });
+  if (!res.ok) throw new Error(`repair failed: HTTP ${res.status}`);
+  const r = (await res.json()) as {
+    scanned: number;
+    legacy: number;
+    repaired: number;
+    retired: number;
+    unrecoverable: number;
+    failed: number;
+    samples: Array<{ id: string; before: string; after: string }>;
+  };
+  if (rest.includes("--json")) {
+    console.log(JSON.stringify(r, null, 2));
+    return;
+  }
+  console.log(`\n  memwarden repair --legacy${apply ? "" : " (dry run)"}\n`);
+  console.log(`    memories scanned    ${r.scanned}`);
+  console.log(`    legacy-shaped       ${r.legacy} (tool-name title, raw JSON body, no facts/concepts)`);
+  console.log(`    ${apply ? "repaired          " : "would repair      "}  ${r.repaired} (re-extracted: edits, writes, errors, facts)`);
+  console.log(`    ${apply ? "retired           " : "would retire      "}  ${r.retired} (plain reads; the file is its own record)`);
+  if (r.unrecoverable) console.log(`    left as is          ${r.unrecoverable} (nothing readable to recover)`);
+  if (r.failed) console.log(`    failed              ${r.failed} (left untouched; safe to rerun)`);
+  for (const s of r.samples) console.log(`      ${s.before.padEnd(18)} -> ${s.after}`);
+  console.log(
+    apply
+      ? `\n  Repaired rows were replaced by re-extracted successors carrying their original\n  evidence; every legacy row was retired with a delete receipt. Run\n  \`memwarden compact\` to drop the old payloads from history.\n`
+      : `\n  Nothing was changed. Rerun with --apply to repair.\n`,
+  );
+}
+
 async function doctor(rest: string[]): Promise<void> {
   const path = rest.find((a) => !a.startsWith("--")) ?? ".";
   const root = path === "." ? process.cwd() : path;
@@ -2055,6 +2101,8 @@ async function fleetStatus(rest: string[]): Promise<void> {
 // not yet trust-pinned).
 
 interface StatsBody {
+  /** When `memwarden compact` last ran, and the recency window it kept. */
+  lastCompact?: { at: string; pruned: boolean; keepDays: number | null; dbBytes?: number | null } | null;
   memories?: number;
   observations?: number;
   sessions?: number;
@@ -2270,8 +2318,29 @@ async function status(rest: string[]): Promise<void> {
           `              ${human(dbBytes)} memory + oplog · ${human(runtimeBytes)} embedding runtime`,
         );
       }
-      // Only advise the lever that would actually help the dominant cost.
-      if (dbBytes >= 150 * MB) {
+      // Only advise the lever that would actually help the dominant cost. Right
+      // after a pruning compaction the remainder is mostly history inside the
+      // recency window, so repeating the advice would be noise: say when the
+      // next run will actually reclaim something instead.
+      const last = stats?.lastCompact;
+      const windowEnds =
+        last?.pruned && typeof last.keepDays === "number"
+          ? Date.parse(last.at) + last.keepDays * 86_400_000
+          : NaN;
+      const floor = typeof last?.dbBytes === "number" ? last.dbBytes : undefined;
+      if (dbBytes >= 150 * MB && Number.isFinite(windowEnds) && windowEnds > Date.now()) {
+        console.log(
+          `              compacted ${last!.at.slice(0, 10)}; the last ${last!.keepDays} days of history are kept,` +
+            ` so 'memwarden compact --prune-history' reclaims more after ${new Date(windowEnds).toISOString().slice(0, 10)}`,
+        );
+      } else if (dbBytes >= 150 * MB && floor !== undefined && dbBytes < floor + 100 * MB) {
+        // Compaction cannot go below this: the tamper-evident chain keeps one
+        // hashed row per write it has ever recorded.
+        console.log(
+          `              compacted ${last!.at.slice(0, 10)}; what remains is mostly the tamper-evident chain` +
+            ` (one hashed row per write), which compaction keeps`,
+        );
+      } else if (dbBytes >= 150 * MB) {
         console.log(
           `              shrink the oplog: 'memwarden compact --prune-history'` +
             ` (drops superseded payload copies; the chain still verifies)`,
@@ -2370,6 +2439,8 @@ function printUsage(): void {
       "  memwarden compact [--dry-run] [--prune-history [--keep-days N]] [--json]\n" +
       "                                                    # erase forgotten memories from the oplog, migrate the chain, VACUUM;\n" +
       "                                                    # --prune-history also drops superseded versions (keeps the last N days, default 7)\n" +
+      "  memwarden repair --legacy [--apply] [--limit N] # re-extract memories distilled from pre-0.0.8 captures\n" +
+      "                                                    # (tool-name title, raw JSON body); dry run unless --apply\n" +
       "  memwarden canon push | verify | pull            # git-native verified memory: promote to .memwarden/canon.jsonl,\n" +
       "                                                    re-verify it against any checkout, load it into this brain\n" +
       "  memwarden fleet status [--cwd dir] [--json]     # live swarm view: agents active in this project\n" +
@@ -2420,6 +2491,8 @@ async function main(): Promise<void> {
       return forget(rest);
     case "compact":
       return compact(rest);
+    case "repair":
+      return repair(rest);
     case "fleet":
       return fleet(rest);
     case "canon":

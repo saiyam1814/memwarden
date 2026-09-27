@@ -44,6 +44,16 @@ const STALE_EVERY = 4; // every 4th memory's file gets drifted later
 const COSMETIC_EVERY = 7;
 const SOURCED_PER = 5; // command-backed (no file evidence) per project
 const UNSOURCED_PER = 5; // prompt-only (no evidence at all) per project
+// Shell reads (`sed -n`, `cat`, `grep … file`): most real captures are shell
+// commands, so file evidence from them is a trust path of its own.
+const SHELL_PER = 8; // clean viewer reads per project
+const SHELL_MIXED_PER = 4; // viewer reads chained after another command
+const SHELL_VIEWERS = [
+  (f: string) => `sed -n '1,5p' ${f}`,
+  (f: string) => `cat ${f}`,
+  (f: string) => `grep -n export ${f}`,
+  (f: string) => `head -3 ${f} 2>/dev/null`,
+];
 
 interface Fact {
   project: string;
@@ -176,6 +186,46 @@ async function main(): Promise<void> {
     }
   }
 
+  // Shell-read corpus: clean viewer reads (complete evidence) and viewer
+  // reads chained after another command (files recorded, never verified).
+  // Chained/adversarial shapes (all must never read as verified): another
+  // command first, a candidate missing at capture, and a remote-exec MCP
+  // tool whose output local files cannot vouch for (so it records no file
+  // evidence at all, and is excluded from the drift-refusal gate).
+  const MIXED_SHAPES = [
+    { tool: "Bash", cmd: (view: string) => `npm run build && ${view}`, evidence: true },
+    { tool: "Bash", cmd: (view: string) => `${view} src/not-there.ts`, evidence: true },
+    { tool: "mcp__ssh__exec", cmd: (view: string) => view, evidence: false },
+  ];
+  const shellReads: Array<{ project: string; file: string; key: string; mixed: boolean; evidence: boolean; willGoStale: boolean }> = [];
+  for (let p = 0; p < PROJECTS; p++) {
+    const root = projects[p]!;
+    for (let i = 0; i < SHELL_PER + SHELL_MIXED_PER; i++) {
+      const mixed = i >= SHELL_PER;
+      const file = `src/shell${i}.ts`;
+      const key = `SHL_P${p}_N${i}`;
+      writeFileSync(join(root, file), `export const S_${i} = ${i}; // ${key}\n`);
+      const view = SHELL_VIEWERS[i % SHELL_VIEWERS.length]!(file);
+      const shape = MIXED_SHAPES[i % MIXED_SHAPES.length]!;
+      shellReads.push({ project: root, file, key, mixed, evidence: !mixed || shape.evidence, willGoStale: i % 2 === 0 });
+      await sdk.trigger({
+        function_id: "mem::observe",
+        payload: {
+          hookType: "post_tool_use",
+          sessionId: `s-${root.slice(-6)}`,
+          project: root,
+          cwd: root,
+          timestamp: new Date().toISOString(),
+          data: {
+            tool_name: mixed ? shape.tool : "Bash",
+            tool_input: { command: mixed ? shape.cmd(view) : view },
+            tool_output: { stdout: `export const S_${i} = ${i}; // ${key}` },
+          },
+        },
+      });
+    }
+  }
+
   // Mixed-trust handoff trap, one per project: a session whose handoff
   // digests a fresh file-backed decision AND a hostile unsourced prompt.
   // Matching file hashes must never launder the prompt into "verified".
@@ -229,6 +279,10 @@ async function main(): Promise<void> {
     }
   }
 
+  for (const r of shellReads) {
+    if (r.willGoStale) writeFileSync(join(r.project, r.file), `// rewritten — the old fact is gone\n`);
+  }
+
   // --- cosmetic events: REFORMAT every marked file ------------------------
   // Trailing whitespace plus CRLF line endings. The raw hash changes; the
   // normalized content does not, so the code these memories describe is
@@ -251,7 +305,7 @@ async function main(): Promise<void> {
   let labelChecked = 0;
   let labelCorrect = 0;
 
-  const keyPattern = /(?:FACT|SRC|UNS|TRAP)_(P\d+)/;
+  const keyPattern = /(?:FACT|SRC|UNS|TRAP|SHL)_(P\d+)/;
   const countLeaks = (res: SearchResults, myProject: string) => {
     for (const r of res.results) {
       const m = keyPattern.exec(JSON.stringify(r));
@@ -426,6 +480,36 @@ async function main(): Promise<void> {
     if (opens === 1 && closes === 1 && looseCloses === 1) containOk++;
   }
 
+  // Shell reads: clean + fresh => recalled AND labeled verified; any stale
+  // read (clean or chained) => refused; chained + fresh => recalled but never
+  // labeled verified (the other command's output has no file evidence).
+  let shellVerified = 0;
+  let shellVerifiable = 0;
+  let shellRefused = 0;
+  let shellRefusable = 0;
+  let shellCapped = 0;
+  let shellCappable = 0;
+  for (const r of shellReads) {
+    const res = await search(r.key, r.project);
+    const hit = hitFor(res, r.key);
+    countLeaks(res, /SHL_(P\d+)_/.exec(r.key)![1]!);
+    if (r.willGoStale && r.evidence) {
+      shellRefusable++;
+      const unfiltered = hitFor(await search(r.key, r.project, false), r.key);
+      if (unfiltered && !hit) shellRefused++;
+    } else if (r.willGoStale) {
+      // remote-exec shape after its local file changed: never verified
+      shellCappable++;
+      if (!hit || hit.trust !== "verified") shellCapped++;
+    } else if (!r.mixed) {
+      shellVerifiable++;
+      if (hit?.trust === "verified") shellVerified++;
+    } else {
+      shellCappable++;
+      if (hit && hit.trust !== "verified") shellCapped++;
+    }
+  }
+
   const pct = (a: number, b: number) => (b === 0 ? "n/a" : ((a / b) * 100).toFixed(1) + "%");
   const rows: Array<[string, string, string, boolean]> = [
     ["stale-retrievable", `${staleRetrievable}/${staleTotal}`, pct(staleRetrievable, staleTotal), staleRetrievable === staleTotal],
@@ -437,6 +521,9 @@ async function main(): Promise<void> {
     ["verified-only", `${strictRefused}/${strictRefusable} refused, ${strictKept}/${strictKeepable} kept`, pct(strictRefused + strictKept, strictRefusable + strictKeepable), strictRefused === strictRefusable && strictKept === strictKeepable],
     ["cosmetic-admitted", `${cosmeticKept}/${cosmeticKeepable} kept under strict`, pct(cosmeticKept, cosmeticKeepable), cosmeticKept === cosmeticKeepable],
     ["cosmetic-bounded", `${cosmeticBoundRefused}/${cosmeticBoundRefusable} real drift still refused`, pct(cosmeticBoundRefused, cosmeticBoundRefusable), cosmeticBoundRefused === cosmeticBoundRefusable],
+    ["shell-read-verify", `${shellVerified}/${shellVerifiable} labeled verified`, pct(shellVerified, shellVerifiable), shellVerifiable > 0 && shellVerified === shellVerifiable],
+    ["shell-read-refusal", `${shellRefused}/${shellRefusable} stale refused`, pct(shellRefused, shellRefusable), shellRefusable > 0 && shellRefused === shellRefusable],
+    ["shell-mixed-capped", `${shellCapped}/${shellCappable} never verified`, pct(shellCapped, shellCappable), shellCappable > 0 && shellCapped === shellCappable],
     ["injection-contain", `${containOk}/${containSeen} contained`, containSeen === FORGERIES.length ? pct(containOk, containSeen) : "NOT RETRIEVED", containSeen === FORGERIES.length && containOk === containSeen],
   ];
 

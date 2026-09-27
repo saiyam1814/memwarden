@@ -3,11 +3,79 @@
 All notable changes to memwarden. Dates are release dates; the format loosely follows
 [Keep a Changelog](https://keepachangelog.com/).
 
-## Unreleased
+## 0.2.0 - 2026-09-27
 
-Found by running 0.1.1 for a month on a real machine: the daemon crashed with
-a 4GB out-of-memory error when `memwarden doctor` ran, and the brain had grown
-to 1.8GB.
+This release comes from running 0.1.1 for a month on a real machine and reading
+the brain row by row. Four things were wrong:
+
+- The daemon crashed with a 4GB out-of-memory error when `memwarden doctor` ran.
+- After a restart it was unresponsive for 40+ minutes.
+- The brain held 1.8GB of history against 60MB of live state.
+- Only 57 of 1,060 served memories were ever verified, because 72% of tool calls
+  were shell commands and file reads through the shell carried no evidence.
+
+This release fixes all four, and adds the tools to clean up an existing brain:
+
+```
+npm i -g memwarden@0.2.0 && memwarden up    # restarts the daemon on the new build
+memwarden repair --legacy                   # dry run: what it would repair / retire
+memwarden repair --legacy --apply
+memwarden compact --prune-history           # drop superseded history; the chain still verifies
+```
+
+On the machine these defects were found on, those steps took the brain from
+1.78GB to 355MB and from 7,539 memories (59% junk) to 3,602 readable ones.
+`doctor` went from crashing the daemon to 1.7s.
+
+### Added
+- **Shell file reads carry file evidence.** On a month of real captures, 72% of tool calls were
+  shell commands and 3% used the Read tool (Codex has no Read tool at all), so every file an agent
+  looked at through `sed -n`, `cat`, or `grep … file` was recorded as "sourced by command". It could
+  never be verified and was never refused when the file changed: 57 of 1,060 served memories were
+  verified. Capture now parses local shell command lines conservatively (see `docs/limitations.md`)
+  and hashes the files a read-only viewer reads. Clean reads verify like Read-tool memories and go
+  stale the same way. Anything the parse cannot vouch for caps the memory at `sourced` while still
+  recording the files it found, so drift is caught. That includes another command in the chain, a
+  candidate that does not hash, a glob or brace expansion, a temp file, or an embedded program that
+  can read more than its operands. Command substitution, heredocs, bad quoting, and uncertain `cd`s
+  yield no evidence. Codex `workdir` (including relative paths) and Gemini `dir_path` are honored,
+  and neither is recorded as a "file" any more; that had capped every Codex shell capture below
+  verified. An adversarial review of the first version reproduced five false-`verified` paths
+  (missing candidates dropped silently, file-valued options, a relative `cd` applied twice, a
+  relative workdir, and remote-exec MCP tools). A second round found more:
+  - long options the parser did not know, including GNU/BSD abbreviations (`sha256sum --ch`),
+    optional-argument options, and file-list options;
+  - awk swapping its input through `ARGV`;
+  - generic tool names;
+  - newline continuations and backgrounded `cd` lists;
+  - absolute evidence outside the capture cwd.
+
+  All of these are fixed and pinned by tests. Viewers now take options from a strict allowlist,
+  and shell tools are recognized per host. On 5,613
+  real shell captures, 32.3% now carry file evidence and 21.5% are complete reads (17.5% verify
+  against today's files). Three new eval gates pin the behavior, including the adversarial shapes:
+  `shell-read-verify`, `shell-read-refusal`, and `shell-mixed-capped`.
+- **`memwarden repair --legacy` fixes memories distilled from pre-0.0.8 captures.** The old
+  extractor titled every capture with its tool name and stored raw tool JSON as the body. The
+  durability contract later promoted those observations into permanent memories, and on one real
+  brain they were 4,450 of 7,538 memories (59%). Repair re-extracts each one with today's extractor
+  (recovering keys from JSON that was clipped at capture) and brings the store to what today's
+  pipeline would have produced. Edits, writes, errors, and anything with a real fact are
+  re-distilled through the standard path, so the successor gets correct fingerprints and keeps the
+  original provenance, capture-time hashes, sessions, and timestamps. Plain reads, which today's
+  retention ages out, are retired. Every legacy row goes through `forget` with a receipt. It is a
+  dry run unless `--apply` is passed. On a snapshot of that brain: 509 repaired, 3,937 retired, 4
+  left as is.
+
+- **Session start shows what happened lately, not what resembles a sentence.** SessionStart recall
+  was a similarity search for the fixed phrase "recent work and decisions in this project". On a
+  real brain it injected old prompts and grep patterns containing the word "project". It now asks
+  search for `rank: "recent"`: the two latest session handoffs first (selected separately, since in
+  a busy project they are older than the newest thousand captures), then the newest edits, writes,
+  and errors. Raw prompts, reads, searches, web lookups, and command output are left out. Only the
+  candidate order changes; scope, classification, and the firewall are identical. `/memwarden/search`
+  gains `rank` and a `types` filter. Handoff "Files touched" lines are project-relative, and temp
+  paths are counted instead of listed.
 
 ### Security
 - **`compact` no longer re-anchors tampered history.** Compaction re-chains
@@ -19,6 +87,30 @@ to 1.8GB.
   records existed.
 
 ### Fixed
+- **Plain reads age out instead of becoming permanent memories.** The retention sweep promoted
+  every expiring observation that had file evidence, including bare reads. Despite a comment
+  saying low-importance reads "age out", that is how one brain accumulated 1,100+ "Read X"
+  memories. With shell reads now carrying file evidence, every `cat`/`sed -n` would have been
+  promoted too. Edits, writes, errors, decisions, handoffs, and anything with a real fact are still
+  distilled. A plain read's file is its own record, so it is deleted at the TTL.
+- **Subdirectory captures are verified against the right file.** Relative evidence was re-rooted
+  at the caller's cwd, so a memory captured in `packages/foo` and recalled from the repo root
+  checked the root `package.json`. The result was a false stale, or a false verified if the two
+  files matched. New captures record where their cwd sat inside the checkout (`cwdInRepo`). Recall
+  re-roots relative files at `<checkout root>/<cwdInRepo>`, and re-roots absolute files inside the
+  capture's checkout at the caller's checkout. Paths are compared with symlinks resolved, so a
+  symlinked checkout, `/var` vs `/private/var`, or a trailing slash cannot defeat the match. Files
+  in a different checkout nested inside this one keep their own identity.
+
+- **`status` stops telling you to compact right after you did.** After a pruning compaction, the
+  remaining size is mostly history inside the recency window, so repeating "run compact" was noise.
+  `status` now shows when the last compaction ran and the date after which another one reclaims
+  more (`/memwarden/stats` exposes `lastCompact`).
+- **`doctor` stops flagging pronouns as contradictions.** "There is a race" and "there is no retry
+  budget" were reported as a conflict on the subject "there" (likewise "dates", "it"). Single-word
+  subjects with no referent are no longer claims.
+- **`forget` no longer orphans a memory's retention score.** Consolidation writes one per memory
+  and nothing ever removed it.
 - **The daemon no longer loads the whole oplog to answer small questions.**
   Counting entries (doctor, `/memwarden/verify`), reading the chain head and
   per-key evidence (delete receipts), verification, and compaction each

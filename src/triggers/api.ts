@@ -9,7 +9,9 @@
 
 import type { ApiRequest, ISdk } from "../kernel/index.js";
 import type { HookPayload } from "../functions/types.js";
-import { getSecret, getQuantBits } from "../functions/config.js";
+import { getSecret, getQuantBits, getDataDir } from "../functions/config.js";
+import { statSync } from "node:fs";
+import { join } from "node:path";
 import { canonicalizePath } from "../functions/paths.js";
 import {
   getVectorIndex,
@@ -572,6 +574,16 @@ export function registerApiTriggers(
           body: { error: "safe_only is only compatible with mode=current" },
         };
       }
+      if (body["rank"] !== undefined && body["rank"] !== "relevance" && body["rank"] !== "recent") {
+        return { status_code: 400, body: { error: "rank must be relevance or recent" } };
+      }
+      if (
+        body["types"] !== undefined &&
+        (!Array.isArray(body["types"]) ||
+          !body["types"].every((t) => typeof t === "string" && t.length > 0 && t.length < 64))
+      ) {
+        return { status_code: 400, body: { error: "types must be an array of type names" } };
+      }
       // Verified Recall fails closed: safe_only needs a repo root to verify
       // against, so reject it rather than silently returning unverified memory.
       if (
@@ -596,6 +608,8 @@ export function registerApiTriggers(
         trust?: string[];
         include_memories?: boolean;
         all_projects?: boolean;
+        rank?: string;
+        types?: string[];
       } = { query: (body["query"] as string).trim() };
       if (body["limit"] !== undefined) payload.limit = body["limit"] as number;
       if (body["project"] !== undefined)
@@ -613,6 +627,8 @@ export function registerApiTriggers(
         payload.trust = body["trust"].map((item) => String(item));
       if (inventory) payload.include_memories = true;
       if (body["all_projects"] === true) payload.all_projects = true;
+      if (typeof body["rank"] === "string") payload.rank = body["rank"];
+      if (Array.isArray(body["types"])) payload.types = body["types"] as string[];
 
       // Session-start injection is a search; its `agent` field only feeds the
       // liveness heartbeat (never the search itself).
@@ -815,6 +831,7 @@ export function registerApiTriggers(
         // What the firewall actually did — the difference between claiming
         // protection and showing it.
         firewall: await summarizeFirewall(kv, 30).catch(() => null),
+        lastCompact: await kv.get(KV.maintenance, "compact").catch(() => null),
       };
       if (vec instanceof QuantizedVectorIndex) {
         const { dims, paddedDims, bits, rescoreDepth } = vec.params;
@@ -867,6 +884,34 @@ export function registerApiTriggers(
     function_id: "api::doctor",
     config: {
       api_path: "/memwarden/doctor",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  // --- POST /memwarden/repair/legacy --------------------------------
+  // Re-extract memories distilled from pre-0.0.8 captures (tool-name title,
+  // raw JSON body) into readable successors. Dry run unless apply:true.
+  // Auth'd: applying rewrites and forgets memories.
+  sdk.registerFunction(
+    "api::repair-legacy",
+    async (req: ApiRequest<{ apply?: boolean; limit?: number }>): Promise<Response> => {
+      const body = (req.body ?? {}) as { apply?: boolean; limit?: number };
+      const report = await sdk.trigger({
+        function_id: "mem::repair-legacy",
+        payload: {
+          apply: body.apply === true,
+          ...(typeof body.limit === "number" ? { limit: body.limit } : {}),
+        },
+      });
+      return { status_code: 200, body: report };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::repair-legacy",
+    config: {
+      api_path: "/memwarden/repair/legacy",
       http_method: "POST",
       middleware_function_ids: ["middleware::api-auth"],
     },
@@ -1062,6 +1107,27 @@ export function registerApiTriggers(
           return { status_code: 409, body: { error: err.message, brokenAt: err.brokenAt } };
         }
         throw err;
+      }
+      const dryRun = body.dry_run === true || body.dryRun === true;
+      if (!dryRun) {
+        // Best-effort bookkeeping for `status`; never fails the compaction.
+        // The db size right after compaction lets `status` tell growth since
+        // then from the floor compaction cannot go below (the chain keeps one
+        // hashed row per write, forever, for tamper-evidence).
+        let dbBytes: number | null = null;
+        try {
+          dbBytes = statSync(join(getDataDir(), "memwarden.db")).size;
+        } catch {
+          dbBytes = null;
+        }
+        await new StateKV(sdk)
+          .set(KV.maintenance, "compact", {
+            at: new Date().toISOString(),
+            pruned: prune,
+            keepDays: prune ? keepDays : null,
+            dbBytes,
+          })
+          .catch(() => undefined);
       }
       return { status_code: 200, body: result };
     },

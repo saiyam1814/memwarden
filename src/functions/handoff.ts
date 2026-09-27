@@ -14,6 +14,7 @@
 //
 // Everything here is pure over its input (no clock, no fs, no kv).
 
+import { isAbsolute, relative } from "node:path";
 import type { CompressedObservation, Provenance, SessionSummary } from "./types.js";
 
 /** Cap applied to a stored user prompt (observe's user_prompt path). Long
@@ -173,7 +174,24 @@ export function buildSessionHandoff(input: HandoffInput): Handoff {
         break;
     }
   }
-  const fileList = [...files].slice(0, 12);
+  // Display only (provenance below still carries every file): project files
+  // relative to the project, and temp/scratch paths counted rather than
+  // listed. They used to dominate the line with 120-char
+  // /private/tmp/…/scratchpad/… paths that say nothing to the next session.
+  const projectRoot =
+    typeof input.project === "string" && isAbsolute(input.project) ? input.project : undefined;
+  const shown: string[] = [];
+  let elsewhere = 0;
+  for (const f of files) {
+    if (/^(?:\/private)?\/(?:tmp|var\/folders)\//.test(f)) {
+      elsewhere++;
+      continue;
+    }
+    const rel = projectRoot && isAbsolute(f) ? relative(projectRoot, f) : f;
+    shown.push(rel && !rel.startsWith("..") && !isAbsolute(rel) ? rel : f);
+  }
+  const fileList = shown.slice(0, 12);
+  const moreFiles = shown.length - fileList.length + elsewhere;
   const parts: string[] = [];
   if (counts.edits > 0) parts.push(`${counts.edits} file edit${counts.edits === 1 ? "" : "s"}`);
   if (counts.commands > 0) parts.push(`${counts.commands} command${counts.commands === 1 ? "" : "s"}`);
@@ -185,7 +203,9 @@ export function buildSessionHandoff(input: HandoffInput): Handoff {
       ? "no activity captured"
       : `${obs.length} observation${obs.length === 1 ? "" : "s"}` +
         (parts.length > 0 ? ` — ${parts.join(", ")}` : "") +
-        (fileList.length > 0 ? `. Files touched: ${fileList.join(", ")}` : "");
+        (fileList.length > 0 || moreFiles > 0
+          ? `. Files touched: ${[...fileList, ...(moreFiles > 0 ? [`+${moreFiles} more`] : [])].join(", ")}`
+          : "");
 
   // --- claim lineage -------------------------------------------------------
   // Decisions and unresolved errors COPY text out of observations, so each

@@ -20,8 +20,9 @@ import type {
   HookPayload,
   Session,
   CompressedObservation,
+  Provenance,
 } from "./types.js";
-import { projectKey } from "./git-identity.js";
+import { gitWorktreeRoot, projectKey } from "./git-identity.js";
 import { canonicalizePath } from "./paths.js";
 import { KV, STREAM, generateId } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
@@ -31,7 +32,10 @@ import { withKeyedLock } from "./keyed-mutex.js";
 import { isAutoCompressEnabled, getAgentId } from "./config.js";
 import { buildSyntheticCompression } from "./compress-synthetic.js";
 import { buildSessionHandoff, MAX_STORED_PROMPT_CHARS } from "./handoff.js";
-import { extractProvenance } from "./provenance.js";
+import { extractProvenance, relativizeUnder } from "./provenance.js";
+import { extractShellReads, isLocalShellTool, shellCommandOf } from "./shell-reads.js";
+import { homedir, tmpdir } from "node:os";
+import { isAbsolute, relative, resolve } from "node:path";
 import { recordFleetActivity } from "./fleet.js";
 import { hashFileCommitments } from "./verify.js";
 import { recordFix, looksLikeResolvedFix } from "./dejafix.js";
@@ -115,6 +119,77 @@ export function extractImage(d: unknown): string | undefined {
   }
   return undefined;
 }
+
+/**
+ * File evidence for shell reads (`sed -n 1,60p src/auth.ts`, `cat`, `grep …
+ * file`): the same capture-time hashes a Read-tool capture carries, so the
+ * memory can be verified and, more importantly, refused once the file
+ * changes. Parsing is conservative (see shell-reads.ts); here a candidate is
+ * kept only if it exists and hashes now, which also drops any token the
+ * parse misread as a path. Evidence that cannot vouch for the whole output
+ * (another command in the chain, a directory, a glob, an oversized file)
+ * still records the files, so drift is caught, but marks the memory
+ * mixedTrust so it can never read as verified.
+ */
+function addShellReadEvidence(prov: Provenance, payload: HookPayload, cwd: string): void {
+  const data =
+    typeof payload.data === "object" && payload.data !== null
+      ? (payload.data as Record<string, unknown>)
+      : {};
+  // Local shells only: an MCP tool that runs a command on another machine
+  // (ssh, kubectl exec) must never be vouched for by files on this one.
+  if (
+    !isLocalShellTool(
+      typeof data["tool_name"] === "string" ? data["tool_name"] : undefined,
+      typeof payload.agent === "string" ? payload.agent : undefined,
+    )
+  ) {
+    return;
+  }
+  const input = data["tool_input"];
+  const command = shellCommandOf(input);
+  if (!command) return;
+  const record = (input ?? {}) as Record<string, unknown>;
+  // Where the command ran. Relative directories resolve against the session
+  // cwd (as Codex joins them); a directory key we cannot resolve means no
+  // evidence rather than a guess.
+  let base = cwd;
+  for (const key of SHELL_DIRECTORY_KEYS) {
+    if (!(key in record)) continue;
+    const v = record[key];
+    if (typeof v !== "string" || !v.trim()) return;
+    base = isAbsolute(v) ? v : resolve(cwd, v);
+    break;
+  }
+  const reads = extractShellReads(command, base, {
+    home: homedir(),
+    tmpdir: tmpdir(),
+    projectRoot: cwd,
+  });
+  if (!reads || reads.files.length === 0) return;
+  const rel = reads.files.map((f) => relativizeUnder(cwd, f));
+  const commitments = hashFileCommitments(rel, cwd);
+  const kept = rel.filter((f) => commitments.fileHashes[f] !== undefined);
+  if (kept.length === 0) return;
+  prov.files = Array.from(new Set([...(prov.files ?? []), ...kept]));
+  const hashes = { ...(prov.fileHashes ?? {}) };
+  const normalized = { ...(prov.fileHashesNormalized ?? {}) };
+  for (const f of kept) {
+    hashes[f] = commitments.fileHashes[f]!;
+    const n = commitments.fileHashesNormalized[f];
+    if (n !== undefined) normalized[f] = n;
+  }
+  prov.fileHashes = hashes;
+  if (Object.keys(normalized).length > 0) prov.fileHashesNormalized = normalized;
+  // Every candidate must hash for the evidence to be complete. One that does
+  // not (a directory, an oversized file, or a file missing at capture that the
+  // command's output nonetheless depends on) caps the memory: dropping it
+  // silently let `cat a.ts missing.ts` read as verified.
+  if (!reads.complete || kept.length < rel.length) prov.mixedTrust = true;
+}
+
+// Keys hosts use for a shell command's working directory.
+const SHELL_DIRECTORY_KEYS = ["workdir", "cwd", "dir_path", "directory", "working_directory", "workingDirectory"];
 
 export function registerObserveFunction(
   sdk: ISdk,
@@ -555,6 +630,14 @@ export function registerObserveFunction(
           if (Object.keys(commitments.fileHashesNormalized).length > 0) {
             prov.fileHashesNormalized = commitments.fileHashesNormalized;
           }
+        }
+        if (!payload.adopted && payload.cwd) addShellReadEvidence(prov, payload, payload.cwd);
+        if (payload.cwd && prov.files && prov.files.length > 0) {
+          // Anchor relative evidence at the checkout, not at this cwd (see
+          // Provenance.cwdInRepo).
+          const top = gitWorktreeRoot(payload.cwd);
+          const rel = top ? relative(top, resolve(payload.cwd)) : undefined;
+          if (rel !== undefined && !rel.startsWith("..") && !isAbsolute(rel)) prov.cwdInRepo = rel;
         }
         synthetic.provenance = prov;
         metrics.recordObserve(JSON.stringify(raw), JSON.stringify(synthetic));

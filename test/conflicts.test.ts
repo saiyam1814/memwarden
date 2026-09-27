@@ -75,6 +75,19 @@ describe("detectConflicts — NO false positives", () => {
   });
 });
 
+describe("detectConflicts — vague subjects are not claims", () => {
+  it("does not flag pronoun or slot subjects (observed live: 'there', 'dates')", () => {
+    const pairs: Array<[string, string]> = [
+      ["there is a race in the worker pool", "there is no retry budget left"],
+      ["dates are release dates in the changelog", "dates are ISO timestamps in the api"],
+      ["it is enabled by default", "it is disabled for tests"],
+    ];
+    for (const [a, b] of pairs) {
+      expect(detectConflicts([obs(a, "2026-01-01T00:00:00Z"), obs(b, "2026-02-01T00:00:00Z")])).toEqual([]);
+    }
+  });
+});
+
 describe("detectConflicts — genuine contradictions still flagged", () => {
   it("flags a value conflict on a single-valued subject (bearer tokens vs session cookies)", () => {
     const c = detectConflicts([

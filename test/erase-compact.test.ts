@@ -1177,6 +1177,8 @@ describe("mem::forget {erase} + mem::erase + /memwarden/compact end to end", () 
     });
     expect(dry.status_code).toBe(200);
     expect((dry.body as { dryRun: boolean }).dryRun).toBe(true);
+    // a dry run records nothing
+    expect(await kv.get(KV.maintenance, "compact")).toBeNull();
 
     const real = await sdk.invokeHttp("api::compact", {
       headers: {},
@@ -1188,6 +1190,18 @@ describe("mem::forget {erase} + mem::erase + /memwarden/compact end to end", () 
     expect(rb.dryRun).toBe(false);
     expect(rb.previousHeadHash).toMatch(/^[0-9a-f]{64}$/);
     expect(await store.verifyOplog()).toEqual({ ok: true });
+
+    // `status` learns when the last compaction ran and what window it kept
+    await sdk.invokeHttp("api::compact", {
+      headers: {},
+      query_params: {},
+      body: { prune_history: true, keep_days: 7 },
+    });
+    const stats = await sdk.invokeHttp("api::stats", { headers: {}, query_params: {}, body: {} });
+    const last = (stats.body as { lastCompact?: { at: string; pruned: boolean; keepDays: number } }).lastCompact;
+    expect(last?.pruned).toBe(true);
+    expect(last?.keepDays).toBe(7);
+    expect(Date.parse(last!.at)).toBeGreaterThan(Date.now() - 60_000);
   });
 });
 

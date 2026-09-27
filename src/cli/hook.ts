@@ -35,6 +35,13 @@ import {
   isProjectExcluded,
 } from "../functions/config.js";
 import { canonicalizePath } from "../functions/paths.js";
+
+// Observation types worth handing a fresh session: the latest handoffs
+// ("task"), then recent edits, writes, and errors. Distilled memories are all
+// indexed as "decision" whatever they came from (a promoted `git status` is
+// one), so recency alone cannot tell which are worth injecting; they stay
+// reachable through search.
+const SESSION_START_TYPES = ["task", "file_edit", "file_write", "error"];
 import {
   MEMORY_TAG,
   frameMemoryBlock,
@@ -313,10 +320,18 @@ export async function handleSessionStart(
       headers: headers(deps),
       signal: AbortSignal.timeout(timeoutMs("inject", deps)),
       body: JSON.stringify({
+        // What happened here lately, not what resembles a fixed sentence: the
+        // old query ("recent work and decisions in this project") surfaced
+        // whatever contained the word "project", mostly old prompts and grep
+        // patterns. rank=recent puts the latest session handoffs first, then
+        // the newest edits, writes, and errors. Raw prompts, reads, searches,
+        // web lookups, and command output are left out.
         query: "recent work and decisions in this project",
+        rank: "recent",
+        types: SESSION_START_TYPES,
         cwd,
         format: "narrative",
-        limit: 20,
+        limit: 12,
         token_budget: 1500,
         safe_only: true, // Verified Recall: SessionStart never injects stale memory
         agent: host, // liveness heartbeat: the daemon records last-seen per host

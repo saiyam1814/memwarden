@@ -163,7 +163,11 @@ flowchart TB
 ```
 
 Capture compresses raw tool output (no LLM), redacts secrets, and stores raw plus normalized text
-commitments for referenced files. Recall runs hybrid BM25 + vector search scoped by canonical path,
+commitments for referenced files: files named in a tool's input (Read/Edit/Write and friends), and
+files a shell command reads (`cat`, `sed -n`, `head`/`tail`, `grep`/`rg` with file arguments, `jq`,
+`diff`, `wc`). A shell command whose output also depends on something unfingerprintable (another
+command in the chain, a directory, a glob) keeps its file evidence for staleness but is never
+labeled verified. Recall runs hybrid BM25 + vector search scoped by canonical path,
 classifies each hit against the live repo, applies the policy, and frames what passes as untrusted data. Full detail - including the tamper-evidence and
 verifiable-erasure model - is in **[docs/architecture.md](docs/architecture.md)**.
 

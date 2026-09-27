@@ -23,6 +23,11 @@
 //   - an observation with NO provenance at all (no files to verify against) is
 //     deleted as before. There is nothing durable to promote, and keeping
 //     unsourced text forever is how a memory layer rots.
+//   - a code-backed PLAIN READ (Read tool, `cat`/`sed -n`/`grep` via shell,
+//     with no fact beyond its own command) is deleted too: the file it read is
+//     the durable record, and re-reading it recovers the same content. Edits,
+//     writes, errors, and anything with a real fact are what get distilled
+//     (see worthDistilling).
 //
 // It also makes sweep-vs-consolidate ORDERING irrelevant: whichever timer fires
 // first, code-backed knowledge ends up distilled rather than raced into oblivion.
@@ -53,6 +58,20 @@ import {
 import { isMemoryExpired } from "./memory-utils.js";
 import { withKeyedLock } from "./keyed-mutex.js";
 import { logger } from "./logger.js";
+
+/**
+ * Whether an expiring code-backed observation holds knowledge its files do
+ * not. A read only restates what the file says: once expired, reading the
+ * file again recovers it, and promoting every read is how one brain grew
+ * 1,100+ "Read X" memories (and, with shell reads carrying file evidence,
+ * would have grown one per `cat`/`sed -n`). Changes, errors, decisions, and
+ * anything with a real fact (not just the `ran:` echo of its command) are
+ * distilled; plain reads age out.
+ */
+export function worthDistilling(obs: CompressedObservation): boolean {
+  if (["file_edit", "file_write", "error", "decision", "task"].includes(obs.type)) return true;
+  return (obs.facts ?? []).some((f) => typeof f === "string" && f.trim() && !f.startsWith("ran: "));
+}
 
 function ttlMs(): number {
   const days = parseInt(process.env.MEMWARDEN_FORGET_TTL_DAYS ?? "30", 10);
@@ -168,7 +187,7 @@ export function registerForgetFunction(sdk: ISdk, kv: StateKV): void {
           // the next sweep retries.
           const provFiles = obs.provenance?.files ?? obs.files;
           const primaryFile = provFiles?.find((f) => f && f.trim());
-          if (promote && primaryFile) {
+          if (promote && primaryFile && worthDistilling(obs)) {
             const identity = sessionProjectIdentity(session);
             const projectIdentity =
               identity.projectKey ||
@@ -185,8 +204,8 @@ export function registerForgetFunction(sdk: ISdk, kv: StateKV): void {
             continue;
           }
 
-          // No provenance to verify against: nothing durable to promote, so
-          // remove from every index in lockstep.
+          // Nothing durable to promote (no provenance, or a plain read whose
+          // file is its own record), so remove from every index in lockstep.
           try {
             await kv.delete(KV.observations(session.id), obs.id);
             idx.remove(obs.id);

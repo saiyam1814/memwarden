@@ -484,6 +484,35 @@ function evictGhostVectors(liveIds: Set<string> | null): void {
   }
 }
 
+// Session handoffs are observations of this type (see handoff.ts).
+const HANDOFF_TYPE = "task";
+const RECENT_HANDOFFS = 2;
+
+/** Candidates for rank=recent: the newest handoffs (at most two), then the
+ * rest newest first. Scores only encode that order. */
+function recentCandidates(
+  idx: SearchIndex,
+  limit: number,
+  allowed: Set<string> | null,
+  types: Set<string> | null,
+): Ranked[] {
+  const wanted = (type: string): boolean => !types || types.has(type);
+  // Handoffs are selected on their own: in a busy project the latest one can
+  // be older than the newest thousand captures, and it is the single most
+  // useful thing to hand a fresh session.
+  const handoffs = wanted(HANDOFF_TYPE)
+    ? idx.recent(RECENT_HANDOFFS, allowed ?? undefined, (h) => h.type === HANDOFF_TYPE)
+    : [];
+  const rest = idx.recent(
+    limit,
+    allowed ?? undefined,
+    (h) => h.type !== HANDOFF_TYPE && wanted(h.type),
+  );
+  return [...handoffs, ...rest]
+    .slice(0, limit)
+    .map((h, i) => ({ obsId: h.obsId, sessionId: h.sessionId, score: 1 / (i + 1) }));
+}
+
 // Reciprocal Rank Fusion of two ranked lists that share the
 // {obsId, sessionId, score} shape (BM25 keyword + semantic vector). Score
 // becomes the summed RRF contribution; ties resolve by it. Same K as the
@@ -811,8 +840,30 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
        * rather than ranked observations. */
       include_memories?: boolean;
       all_projects?: boolean;
+      /**
+       * "relevance" (default) ranks by the query. "recent" ignores similarity
+       * and orders in-scope candidates newest first, with at most the two most
+       * recent session handoffs up front: session-start recall, where "what
+       * happened here lately" is the question and a fixed query matched
+       * whatever text happened to contain its words. Only the candidate
+       * ORDER changes; scope, classification, and policy are identical.
+       */
+      rank?: string;
+      /** Keep only candidates of these observation types (index metadata). */
+      types?: unknown;
     }) => {
       const idx = getSearchIndex();
+      const rank = data?.rank === undefined ? "relevance" : data.rank;
+      if (rank !== "relevance" && rank !== "recent") {
+        throw new Error("mem::search: rank must be relevance or recent");
+      }
+      let typeFilter: Set<string> | null = null;
+      if (data?.types !== undefined) {
+        if (!Array.isArray(data.types) || !data.types.every((t) => typeof t === "string")) {
+          throw new Error("mem::search: types must be an array of strings");
+        }
+        typeFilter = new Set(data.types as string[]);
+      }
 
       // Canon needs an inventory, not a magic broad search query. Keep this an
       // explicit mode so normal search still rejects empty queries and cannot
@@ -997,9 +1048,15 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
         scopedAllowed = scoped.allowed;
         preloadedSessions = scoped.sessions;
       }
-      let bm25Results = scopedAllowed
-        ? idx.search(query, fetchLimit, scopedAllowed)
-        : idx.search(query, fetchLimit);
+      const typeAllowed = (id: string): boolean =>
+        !typeFilter || typeFilter.has(idx.typeOf(id) ?? "");
+      let bm25Results =
+        rank === "recent"
+          ? recentCandidates(idx, fetchLimit, scopedAllowed, typeFilter)
+          : (scopedAllowed
+              ? idx.search(query, fetchLimit, scopedAllowed)
+              : idx.search(query, fetchLimit)
+            ).filter((r) => typeAllowed(r.obsId));
       // Historical mode must preserve one bounded window from BOTH the live
       // corpus (where source-drifted observations live) and superseded-memory
       // history. Truncating their merge back to one window before policy would
@@ -1012,7 +1069,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       // so the default/current ranking remains untouched while deliberate
       // history inspection can still retrieve old versions.
       const supersededMemoryById = new Map<string, Memory>();
-      if (inclusionMode === "historical" || inclusionMode === "all") {
+      if (rank === "relevance" && (inclusionMode === "historical" || inclusionMode === "all")) {
         try {
           const historicalIndex = new SearchIndex();
           const memories = await kv.list<Memory>(KV.memories);
@@ -1039,7 +1096,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       let results = bm25Results;
       const vIdx = getVectorIndex();
       const ep = currentEmbeddingProvider;
-      if (vIdx && ep && vIdx.size > 0) {
+      if (rank === "relevance" && vIdx && ep && vIdx.size > 0) {
         try {
           const qVec = await ep.embed(clipEmbedInput(query));
           if (qVec.length === ep.dimensions) {
@@ -1054,7 +1111,11 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
             } else {
               vectorHits = vIdx.search(qVec, fetchLimit);
             }
-            results = fuseRrf(bm25Results, vectorHits, combinedFetchLimit);
+            results = fuseRrf(
+              bm25Results,
+              vectorHits.filter((r) => typeAllowed(r.obsId)),
+              combinedFetchLimit,
+            );
           }
         } catch (err) {
           logger.warn("search: vector stream failed — BM25 only", {

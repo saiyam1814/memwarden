@@ -12,7 +12,7 @@ flowchart TB
   subgraph Capture
     D --> C1[Compress on-device, no LLM]
     C1 --> C2[Private-data redaction]
-    C2 --> C3[Provenance: SHA-256 hash of referenced files]
+    C2 --> C3[Provenance: SHA-256 hash of referenced files, incl. shell reads]
     C3 --> ST[(libSQL + hash-chained oplog)]
     C3 --> IX[BM25 index + TurboQuant vector index]
   end
@@ -120,7 +120,7 @@ src/cli/tools.ts per-tool MCP adapters: Claude Code, Codex, Cursor, Kiro, Antigr
 src/cli/host-hooks.ts  native lifecycle-hook adapters: Claude Code, Codex, Cursor, Gemini CLI, Kiro, OpenCode
 src/bundle/      portable Brain Bundle export & import
 benchmark/       reproducible recall benchmark
-eval/            firewall eval corpus (npm run eval, 8 gates, CI-gated at 100%)
+eval/            firewall eval corpus (npm run eval, 13 gates, CI-gated at 100%)
 test/            602 tests: kernel, store parity, oplog, erase + compact, quantizer, MCP,
                  proxy, tool-wiring, Verified Recall, Déjà Fix, foreign-store audit,
                  delete receipts, injection controls + containment, conflict audit,

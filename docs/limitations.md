@@ -11,6 +11,31 @@ This file exists so the README does not have to pretend otherwise.
 - **Verified Recall checks deletion and content drift**, not semantic correctness. `doctor`
   additionally flags conservative subject/value conflicts as advisories - it never drops them from
   recall.
+- **Shell-read evidence is a conservative parse, not a sandbox trace.** memwarden reads the command
+  line, not the process. It does this only for each host's own local shell tool (Claude Code `Bash`,
+  Codex `shell`/`exec_command`, Gemini `run_shell_command`, …), never for a generic or MCP tool name
+  that could run a command on another machine. Each viewer has an allowlist of the options it
+  accepts. Any other option, a long-option abbreviation, or a value whose spaced form GNU and BSD
+  tools parse differently makes the read incomplete. It recognizes a fixed set of read-only viewers: `cat`, `sed -n` with an
+  address-and-print script, `head`, `tail`, `grep`/`rg`/`ag` with file operands, `jq`, `diff`, `wc`,
+  checksum tools, and `sort`/`cut`/`awk` with file operands. Files named by options (`grep -f`,
+  `jq --rawfile`) count too. A file is kept only if it hashes at capture, and any candidate that does
+  not hash caps the memory at `sourced`. The following yield no shell evidence at all: command or
+  process substitution, heredocs, unterminated quotes, and any `cd` that is not absolute and
+  followed by `&&`. The following keep the files that were found (so drift is still caught) but cap
+  the memory at `sourced`: globs, brace expansion, variables, `..` segments, temp files, directories,
+  other commands in the chain, stdout redirects to a file, and programs that can read or run more
+  than their operands (sed `r`/`w`/`e`, awk `getline`/`system`, jq `env`/`import`). Two things are
+  invisible to this parse: anything a command reads that is not on its command line (a script's
+  own inputs, `make`, test runners), shell aliases or functions that shadow a viewer's name, and
+  ambient tool configuration (`RIPGREP_CONFIG_PATH`, bat's config file, `~/.jq`), which can change
+  what a viewer reads or prints.
+- **Same-project recall checks the caller's checkout.** Evidence captured in one worktree is
+  re-rooted at the worktree you recall from, so the verdict answers "is this true here". One
+  consequence: a memory about a git-ignored file that exists only in the capture worktree
+  (`node_modules/…`, `.env`, build output) reads as stale from another worktree. Paths are compared
+  with symlinks resolved. On a case-insensitive filesystem, a file path spelled with different case
+  than its checkout is not recognized as inside it.
 - **Injection framing is a mitigation, not a proof.** Recalled content is delimited and framed as
   untrusted data (`<memwarden-memory>` markers, embedded delimiters defanged), which reduces but
   does not eliminate prompt-injection risk from hostile stored text.

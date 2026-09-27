@@ -17,11 +17,12 @@
 // sourced_unverified rather than verified.
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { TextDecoder } from "node:util";
 import type { Provenance } from "./types.js";
 import { isGlobPattern, isUnsourced } from "./provenance.js";
+import { gitWorktreeRoot } from "./git-identity.js";
 
 // Don't hash enormous files; treat them as unhashed (existence-only).
 const MAX_HASH_BYTES = 2_000_000;
@@ -120,6 +121,45 @@ export interface Verdict {
   reason: string;
 }
 
+/** A relative path that stays inside its base. */
+function isInside(r: string): boolean {
+  return !!r && r !== ".." && !r.startsWith(`..${sep}`) && !isAbsolute(r);
+}
+
+/** Symlink-resolved spelling of a directory; lexical when it no longer exists. */
+function canonicalDir(p: string): string {
+  try {
+    return realpathSync.native(p);
+  } catch {
+    return resolve(p);
+  }
+}
+
+/** Symlink-resolved spelling of a file (or of its directory, if the file is gone). */
+function canonicalFile(p: string): string {
+  try {
+    return realpathSync.native(p);
+  } catch {
+    return join(canonicalDir(dirname(p)), basename(p));
+  }
+}
+
+/**
+ * The capture's checkout root: asked of git when the capture checkout still
+ * exists, otherwise derived by removing `cwdInRepo` from the capture cwd
+ * (under both its recorded and its real spelling).
+ */
+function captureCheckoutRoot(captureCwd: string, cwdInRepo: string): string | undefined {
+  const live = gitWorktreeRoot(captureCwd);
+  if (live) return live;
+  if (!cwdInRepo) return resolve(captureCwd);
+  const suffix = `${sep}${cwdInRepo}`;
+  for (const spelling of [resolve(captureCwd), canonicalDir(captureCwd)]) {
+    if (spelling.endsWith(suffix)) return spelling.slice(0, -suffix.length);
+  }
+  return undefined;
+}
+
 export function classifyProvenance(
   prov: Provenance | undefined,
   root: string,
@@ -155,11 +195,34 @@ export function classifyProvenance(
   // (the other repo lacks the file). Absolute files are unaffected. Fall
   // back to `root` only when the memory recorded no cwd — or when the caller
   // proved same-project identity and asked to verify against its checkout.
+  // Same-project recall re-roots at the caller's checkout. Where the capture
+  // cwd sat inside its checkout is recorded (cwdInRepo), so the anchor is
+  // <caller checkout root>/<cwdInRepo>, never the caller's own cwd: a memory
+  // captured in packages/foo and recalled from the repo root used to resolve
+  // "package.json" to the ROOT package.json (false stale, or false verified).
+  const captureCwd = prov?.cwd && isAbsolute(prov.cwd) ? prov.cwd : undefined;
+  // A stored offset is data (bundles and canon can carry it): only a plain
+  // relative path inside the checkout is honored.
+  const cwdInRepo =
+    typeof prov?.cwdInRepo === "string" &&
+    !isAbsolute(prov.cwdInRepo) &&
+    !prov.cwdInRepo.split(/[\\/]/).includes("..")
+      ? prov.cwdInRepo
+      : undefined;
+  let anchor = root;
+  let callerTop: string | null = null;
+  let captureTop: string | undefined;
+  if (opts?.verifyAgainstRoot && cwdInRepo !== undefined) {
+    callerTop = gitWorktreeRoot(root);
+    if (callerTop) {
+      anchor = resolve(callerTop, cwdInRepo);
+      if (captureCwd) captureTop = captureCheckoutRoot(captureCwd, cwdInRepo);
+    }
+  }
   const base =
     !opts?.verifyAgainstRoot && prov?.cwd && isAbsolute(prov.cwd)
       ? prov.cwd
-      : root;
-  const captureCwd = prov?.cwd && isAbsolute(prov.cwd) ? prov.cwd : undefined;
+      : anchor;
   const deleted: string[] = [];
   const changed: string[] = [];
   let exactMatched = 0; // existing files whose raw bytes still match
@@ -175,9 +238,30 @@ export function classifyProvenance(
     // own identity: re-rooting those would point a cross-project reference
     // at the wrong repo.
     if (opts?.verifyAgainstRoot && captureCwd && isAbsolute(f)) {
-      const rel = relative(captureCwd, f);
-      if (rel && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) {
-        abs = resolve(root, rel);
+      // Compared under both the recorded and the real spelling: a symlinked
+      // checkout, /var vs /private/var, or a trailing slash must not stop a
+      // file from being recognized as inside the capture checkout (a missed
+      // match silently verifies the capture worktree's copy instead).
+      const realF = canonicalFile(f);
+      const within = (dir: string): string | undefined =>
+        [relative(resolve(dir), f), relative(canonicalDir(dir), realF)].find(isInside);
+      // A file that lives in a DIFFERENT checkout nested below this one (a
+      // worktree under .claude/worktrees/…) belongs to that checkout.
+      const ownTop = gitWorktreeRoot(dirname(f));
+      const nested =
+        ownTop !== null &&
+        captureTop !== undefined &&
+        canonicalDir(ownTop) !== canonicalDir(captureTop);
+      const rel = nested ? undefined : within(captureCwd);
+      if (rel !== undefined) {
+        abs = resolve(anchor, rel);
+      } else if (!nested && captureTop && callerTop) {
+        // Inside the capture's checkout but outside its cwd (a Read of
+        // <repo>/src/x.ts from <repo>/packages/foo): re-root at the caller's
+        // checkout too, or recall from another worktree verifies against the
+        // capture worktree's copy.
+        const relTop = within(captureTop);
+        if (relTop !== undefined) abs = resolve(callerTop, relTop);
       }
     }
     if (!existsSync(abs)) {
