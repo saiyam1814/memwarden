@@ -57,7 +57,13 @@ import {
 } from "./hook.js";
 import { ensureDaemon, daemonAlive, DAEMON_ENTRY } from "../daemon/ensure.js";
 import { adopt } from "./adopt.js";
-import { installService, uninstallService } from "../daemon/service.js";
+import {
+  installService,
+  installedService,
+  serviceServes,
+  uninstallService,
+  type InstalledService,
+} from "../daemon/service.js";
 import { getSecret } from "../functions/config.js";
 import { dirSizeBytes } from "../functions/doctor.js";
 import {
@@ -285,11 +291,15 @@ async function exportBrain(file: string | undefined): Promise<void> {
   );
 }
 
-// memwarden repair --legacy — see functions/repair.ts. Dry run by default:
-// it prints what would change and touches nothing until --apply.
+// memwarden repair --legacy | --plain — see functions/repair.ts. Dry run by
+// default: it prints what would change and touches nothing until --apply.
 async function repair(rest: string[]): Promise<void> {
-  if (!rest.includes("--legacy")) {
-    throw new Error("usage: memwarden repair --legacy [--apply] [--limit N] [--json]");
+  const legacy = rest.includes("--legacy");
+  const plain = rest.includes("--plain");
+  if (legacy === plain) {
+    throw new Error(
+      "usage: memwarden repair --legacy|--plain [--apply] [--limit N] [--json]",
+    );
   }
   const apply = rest.includes("--apply");
   const limitArg = rest[rest.indexOf("--limit") + 1];
@@ -297,6 +307,7 @@ async function repair(rest: string[]): Promise<void> {
   if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {
     throw new Error(`--limit must be a positive integer (got "${limitArg ?? ""}")`);
   }
+  if (plain) return repairPlain(rest, apply, limit);
   const res = await fetch(`${DAEMON_URL}/memwarden/repair/legacy`, {
     method: "POST",
     headers: authHeaders(),
@@ -328,6 +339,57 @@ async function repair(rest: string[]): Promise<void> {
     apply
       ? `\n  Repaired rows were replaced by re-extracted successors carrying their original\n  evidence; every legacy row was retired with a delete receipt. Run\n  \`memwarden compact\` to drop the old payloads from history.\n`
       : `\n  Nothing was changed. Rerun with --apply to repair.\n`,
+  );
+}
+
+async function repairPlain(
+  rest: string[],
+  apply: boolean,
+  limit: number | undefined,
+): Promise<void> {
+  const res = await fetch(`${DAEMON_URL}/memwarden/repair/plain`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ apply, ...(limit !== undefined ? { limit } : {}) }),
+  });
+  if (res.status === 404) {
+    throw new Error("repair --plain needs a 0.2.1+ daemon: restart it with 'memwarden up'");
+  }
+  if (!res.ok) throw new Error(`repair failed: HTTP ${res.status}`);
+  const r = (await res.json()) as {
+    scanned: number;
+    plain: number;
+    keptVerified: number;
+    retirable: number;
+    retired: number;
+    failed: number;
+    byType: Record<string, number>;
+    samples: Array<{ id: string; title: string }>;
+  };
+  if (rest.includes("--json")) {
+    console.log(JSON.stringify(r, null, 2));
+    return;
+  }
+  const kinds = Object.entries(r.byType)
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, n]) => `${n} ${k.replace("_", " ")}`)
+    .join(", ");
+  console.log(`\n  memwarden repair --plain${apply ? "" : " (dry run)"}\n`);
+  console.log(`    memories scanned    ${r.scanned}`);
+  console.log(`    plain captures      ${r.plain}`);
+  console.log(`    kept (verified)     ${r.keptVerified} (file unchanged: still a correct pointer)`);
+  console.log(
+    `    ${apply ? "retired          " : "would retire     "}   ${apply ? r.retired : r.retirable}` +
+      ` (stale, or evidence that can never verify${kinds ? `: ${kinds}` : ""})`,
+  );
+  if (r.failed) console.log(`    failed              ${r.failed} (left untouched; safe to rerun)`);
+  for (const s of r.samples) console.log(`      ${s.title.slice(0, 72)}`);
+  console.log(
+    apply
+      ? `\n  Each retired memory left a delete receipt. Run \`memwarden compact --prune-history\`\n  to drop their payloads from history.\n`
+      : r.retirable
+        ? `\n  These were promoted by the pre-0.2.0 retention sweep from captures that hold\n  nothing their files lack. Manual, consolidated, edit, write, and error memories\n  are never touched. Rerun with --apply to retire them.\n`
+        : `\n  Nothing to retire.\n`,
   );
 }
 
@@ -1201,6 +1263,23 @@ async function up(rest: string[]): Promise<void> {
       await sleep(250);
       alive = await daemonAlive(daemonUrl);
     }
+    // A daemon that survived the reload is not the one the service manages:
+    // another tool started it (or it predates this version and cannot say).
+    // Hand the brain to the supervised instance, which is waiting in standby,
+    // so a crash gets restarted. Never leave the brain without a daemon.
+    if (alive && (await servingDaemonNeedsHandoff(dataDir))) {
+      const stopped = await stopTargetDaemon(dataDir);
+      if (stopped === "stopped") {
+        // launchd: the standby instance boots within one poll; kickstart is a
+        // no-op on a running job. systemd: a stopped unit is not restarted on
+        // a clean exit, so this start is what brings it up.
+        alive = (await ensureDaemon(daemonUrl, dataDir, 20_000)) !== "failed";
+        console.log(
+          `  handoff   ${alive ? "✓" : "⚠"} the running daemon (started by another tool) ` +
+            `${alive ? `was handed over to ${svc.kind}` : "stopped, and the service has not answered yet"}`,
+        );
+      }
+    }
     console.log(
       `  daemon    ${alive ? "✓" : "⚠"} ${daemonUrl}  ${svc.kind}: ${svc.message}` +
         (alive ? `  brain: ${dataDir}` : "  (starting…)"),
@@ -1365,6 +1444,28 @@ function relativeTime(iso: string): string {
   const h = Math.floor(m / 60);
   if (h < 48) return `${h}h ago`;
   return `${Math.floor(h / 24)}d ago`;
+}
+
+/**
+ * True when the daemon serving this brain is not the supervised one: it says
+ * so itself (supervisor null), or it is a pre-0.2.1 daemon that still answers
+ * after the service reload (that reload would have replaced a supervised one).
+ */
+async function servingDaemonNeedsHandoff(dataDir: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${DAEMON_URL}/memwarden/stats`, {
+      headers: authHeaders(),
+      signal: AbortSignal.timeout(2500),
+    });
+    if (!res.ok) return false;
+    const stats = (await res.json()) as StatsBody;
+    if (!stats.daemon) return true;
+    return (
+      stats.daemon.supervisor === null && resolve(stats.daemon.dataDir) === resolve(dataDir)
+    );
+  } catch {
+    return false;
+  }
 }
 
 type StopDaemonResult = "stopped" | "not-running" | "unsupported" | "refused";
@@ -2101,6 +2202,8 @@ async function fleetStatus(rest: string[]): Promise<void> {
 // not yet trust-pinned).
 
 interface StatsBody {
+  /** The serving process. Absent from pre-0.2.1 daemons and library servers. */
+  daemon?: { pid: number; supervisor: "launchd" | "systemd" | null; dataDir: string };
   /** When `memwarden compact` last ran, and the recency window it kept. */
   lastCompact?: { at: string; pruned: boolean; keepDays: number | null; dbBytes?: number | null } | null;
   memories?: number;
@@ -2139,6 +2242,23 @@ function ownVersion(): string {
   } catch {
     return "unknown";
   }
+}
+
+/**
+ * The serving daemon when it runs outside the installed launchd/systemd
+ * service for this brain (an MCP server or other tool revived it first), or
+ * null when it is supervised, unknown (pre-0.2.1 daemon), or no service is
+ * installed.
+ */
+function unsupervisedDaemon(
+  stats: StatsBody | null,
+  dataDir: string,
+): { pid: number; service: InstalledService } | null {
+  const d = stats?.daemon;
+  if (!d || d.supervisor !== null) return null;
+  const service = installedService();
+  if (!service || !serviceServes(service, DAEMON_URL, d.dataDir || dataDir)) return null;
+  return { pid: d.pid, service };
 }
 
 async function status(rest: string[]): Promise<void> {
@@ -2240,6 +2360,14 @@ async function status(rest: string[]): Promise<void> {
     `  daemon    ${daemonUp ? "✓ running" : "✗ not running"}  ${DAEMON_URL}  brain: ${dataDir}` +
       (daemonUp && !stats ? "  (stats unavailable — secret mismatch?)" : ""),
   );
+  const unsupervised = unsupervisedDaemon(stats, dataDir);
+  if (unsupervised) {
+    console.log(
+      `            ⚠ pid ${unsupervised.pid} runs outside ${unsupervised.service.kind} (another tool started it), ` +
+        `so nothing restarts it if it crashes.\n` +
+        `              Fix: 'memwarden up' hands it over to ${unsupervised.service.kind}.`,
+    );
+  }
   if (stats) {
     console.log(
       `  memory    ${stats.observations ?? 0} observations, ${stats.memories ?? 0} memories, ${stats.sessions ?? 0} sessions, ${stats.vectors ?? 0} vectors`,
@@ -2440,6 +2568,7 @@ function printUsage(): void {
       "                                                    # erase forgotten memories from the oplog, migrate the chain, VACUUM;\n" +
       "                                                    # --prune-history also drops superseded versions (keeps the last N days, default 7)\n" +
       "  memwarden repair --legacy [--apply] [--limit N] # re-extract memories distilled from pre-0.0.8 captures\n" +
+      "  memwarden repair --plain [--apply] [--limit N]  # retire plain commands/searches/reads promoted before 0.2.0\n" +
       "                                                    # (tool-name title, raw JSON body); dry run unless --apply\n" +
       "  memwarden canon push | verify | pull            # git-native verified memory: promote to .memwarden/canon.jsonl,\n" +
       "                                                    re-verify it against any checkout, load it into this brain\n" +

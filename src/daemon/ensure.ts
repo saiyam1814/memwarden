@@ -16,6 +16,12 @@ import {
   DAEMON_LOG_MODE_FILE,
   openSecureDaemonLog,
 } from "./log.js";
+import {
+  installedService,
+  serviceServes,
+  startServiceViaSupervisor,
+  type InstalledService,
+} from "./service.js";
 
 // dist/daemon/ensure.js -> dist/index.js
 export const DAEMON_ENTRY = join(
@@ -51,19 +57,48 @@ export function detachedLogLifecycle(
   return platform === "win32" ? "legacy-windows" : "secure-posix";
 }
 
+/** Seams for tests; production resolves the real service and supervisor. */
+export interface EnsureDeps {
+  service?: () => InstalledService | null;
+  startViaSupervisor?: (svc: InstalledService) => boolean;
+  spawnDetached?: typeof spawn;
+}
+
+async function waitAlive(url: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await sleep(250);
+    if (await daemonAlive(url)) return true;
+  }
+  return false;
+}
+
 /**
- * Ensure the daemon at `url` is up, spawning it if not. Idempotent and
- * race-safe: concurrent callers may both spawn, but the daemon exits 0 on
- * EADDRINUSE (see index.ts) so the loser simply goes away and the winner
- * serves. Returns once the daemon answers /livez or the timeout elapses.
+ * Ensure the daemon at `url` is up, starting it if not. When the OS service
+ * is installed for this brain and port, the supervisor starts it: a detached
+ * child here would win the port and leave the supervised instance in standby,
+ * with no one to restart the brain if it crashes. Otherwise spawn detached.
+ * Idempotent and race-safe: concurrent spawners resolve on EADDRINUSE (see
+ * index.ts). Returns once the daemon answers /livez or the timeout elapses.
  */
 export async function ensureDaemon(
   url: string,
   dataDir: string = defaultDataDir(),
   timeoutMs = 15000,
+  deps: EnsureDeps = {},
 ): Promise<EnsureResult> {
   const lifecycle = detachedLogLifecycle();
   const alive = await daemonAlive(url);
+
+  if (!alive && lifecycle === "secure-posix") {
+    const svc = (deps.service ?? installedService)();
+    if (svc && serviceServes(svc, url, dataDir)) {
+      const asked = (deps.startViaSupervisor ?? startServiceViaSupervisor)(svc);
+      if (asked) return (await waitAlive(url, timeoutMs)) ? "started" : "failed";
+      // The supervisor could not be asked (job not loaded, no user session):
+      // a detached daemon beats no daemon.
+    }
+  }
 
   // Preserve the exact 0.1.0 Windows lifecycle: an already-live daemon returns
   // before touching the log; a new daemon inherits one append-only descriptor;
@@ -74,6 +109,7 @@ export async function ensureDaemon(
   // its db instead of crashing on boot.
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
 
+  const doSpawn = deps.spawnDetached ?? spawn;
   let child: ReturnType<typeof spawn>;
   if (lifecycle === "legacy-windows") {
     const logPath = join(dataDir, "daemon.log");
@@ -85,7 +121,7 @@ export async function ensureDaemon(
       // guarantees are deliberately provided by the separate branch below.
     }
     try {
-      child = spawn(process.execPath, [DAEMON_ENTRY], {
+      child = doSpawn(process.execPath, [DAEMON_ENTRY], {
         detached: true,
         stdio: ["ignore", logFd, logFd],
         env: { ...process.env, MEMWARDEN_DATA_DIR: dataDir },
@@ -102,7 +138,7 @@ export async function ensureDaemon(
       return "already";
     }
     try {
-      child = spawn(process.execPath, [DAEMON_ENTRY], {
+      child = doSpawn(process.execPath, [DAEMON_ENTRY], {
         detached: true,
         stdio: ["ignore", log.fd, log.fd],
         env: {
@@ -116,10 +152,5 @@ export async function ensureDaemon(
     }
   }
   child.unref();
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    await sleep(250);
-    if (await daemonAlive(url)) return "started";
-  }
-  return "failed";
+  return (await waitAlive(url, timeoutMs)) ? "started" : "failed";
 }

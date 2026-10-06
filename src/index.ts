@@ -39,6 +39,12 @@ import {
   daemonUsesFileLogging,
   startDaemonLogMaintenance,
 } from "./daemon/log.js";
+import { supervisorOf } from "./daemon/service.js";
+import {
+  awaitPortHandoff,
+  probePort,
+  EXIT_RETRY_STANDBY,
+} from "./daemon/standby.js";
 
 const REST_PORT = parseInt(process.env.MEMWARDEN_REST_PORT ?? "3111", 10);
 const STORE_URL =
@@ -208,6 +214,12 @@ function installSweeps(sdk: Kernel): Array<NodeJS.Timeout> {
 }
 
 async function main(): Promise<void> {
+  // A supervised instance never yields the brain to an unsupervised one: if
+  // another memwarden serves the port, wait (holding no store and rotating no
+  // log) and take over when it exits. See daemon/standby.ts.
+  const supervisor = supervisorOf();
+  if (supervisor) await awaitPortHandoff(REST_PORT);
+
   // POSIX detached processes and launchd validate/rotate their real file and
   // retain one descriptor for unref'd periodic checks. Windows stays on its
   // v0.1.0 lifecycle; systemd selects journald. Neither enters this path.
@@ -234,6 +246,7 @@ async function main(): Promise<void> {
   const registered = await registerFunctions(sdk, {
     dataDir: getDataDir(),
     requestShutdown: () => requestShutdown(),
+    supervisor,
   });
   console.log(
     `[memwarden] kernel ready — ${registered} function module(s) registered, store=${STORE_URL}`,
@@ -288,13 +301,24 @@ async function main(): Promise<void> {
   const http = startHttpServer(sdk, { port: REST_PORT });
   // Race-safe self-heal: if another memwarden already holds the port, this
   // spawn is redundant — exit cleanly (0) rather than crash, so concurrent
-  // ensureDaemon() callers never surface an error.
+  // ensureDaemon() callers never surface an error. A supervised instance that
+  // lost the race exits for a retry instead: its relaunch waits in standby.
+  // Exit 0 would tell launchd/systemd the job is done and leave the winner
+  // unsupervised.
   http.server.on("error", (err: NodeJS.ErrnoException) => {
     if (err.code === "EADDRINUSE") {
-      console.log(
-        `[memwarden] port ${REST_PORT} already in use — another instance is running; exiting.`,
-      );
-      process.exit(0);
+      void (async () => {
+        const memwardenHolds =
+          supervisor !== null && (await probePort(REST_PORT)) !== "foreign";
+        console.log(
+          memwardenHolds
+            ? `[memwarden] port ${REST_PORT} taken by another memwarden during boot; ` +
+                `exiting so ${supervisor} relaunches this instance in standby.`
+            : `[memwarden] port ${REST_PORT} already in use — another instance is running; exiting.`,
+        );
+        process.exit(memwardenHolds ? EXIT_RETRY_STANDBY : 0);
+      })();
+      return;
     }
     console.error(`[memwarden] HTTP server error:`, err);
     process.exit(1);
