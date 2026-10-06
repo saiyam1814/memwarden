@@ -161,14 +161,15 @@ export async function awaitPortHandoff(
     }
     // Say so on entry, then every ~5 minutes, so a long standby is visible
     // in the log rather than looking like a hang.
-    if (polls % 60 === 0) {
+    if (polls % 150 === 0) {
       log(
         `[memwarden] standby: another memwarden holds port ${port} (${holder}); this ` +
           `supervised instance takes over when it exits.`,
       );
     }
     polls++;
-    await sleep(opts.intervalMs ?? 5000);
+    // A loopback GET every 2s costs nothing and keeps a handoff short.
+    await sleep(opts.intervalMs ?? 2000);
   }
 }
 

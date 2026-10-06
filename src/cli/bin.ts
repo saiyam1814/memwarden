@@ -1300,7 +1300,13 @@ async function up(rest: string[]): Promise<void> {
         // launchd: the standby instance boots within one poll; kickstart is a
         // no-op on a running job. systemd: a stopped unit is not restarted on
         // a clean exit, so this start is what brings it up.
-        alive = (await ensureDaemon(daemonUrl, dataDir, 20_000)) !== "failed";
+        // The standby needs a poll, the old process's exit (or a 5s grace for
+        // a pre-0.2.1 daemon), and a boot: give the supervisor that long
+        // before falling back to a detached spawn, which would leave the
+        // brain unsupervised again.
+        alive =
+          (await ensureDaemon(daemonUrl, dataDir, 40_000, { supervisorGraceMs: 25_000 })) !==
+          "failed";
         console.log(
           `  handoff   ${alive ? "✓" : "⚠"} the running daemon (started by another tool) ` +
             `${alive ? `was handed over to ${svc.kind}` : "stopped, and the service has not answered yet"}`,
