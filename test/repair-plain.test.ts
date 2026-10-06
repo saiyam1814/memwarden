@@ -1,11 +1,11 @@
 //
 // `memwarden repair --plain`: before 0.2.0 the retention sweep promoted every
 // expiring capture that named a file, so plain commands, searches, and reads
-// became permanent memories (2,651 of 4,453 on one real brain, 2026-10-06).
+// became permanent memories (2,628 of 4,453 on one real brain, 2026-10-06).
 // Today's retention would never create them (worthDistilling). Repair retires
 // exactly those, through mem::forget, and touches nothing else.
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -112,6 +112,35 @@ describe("plain capture detection", () => {
     ).toBe(false);
   });
 
+  it("never touches a tool that is not a known read-only shell, search, read, or fetch", () => {
+    // classify() would call these search / command_run / web_fetch
+    expect(isPlainCaptureMemory(promoted("a", "search_replace"))).toBe(false);
+    expect(isPlainCaptureMemory(promoted("b", "find_and_replace"))).toBe(false);
+    expect(isPlainCaptureMemory(promoted("c", "mcp__github__run_workflow"))).toBe(false);
+    expect(isPlainCaptureMemory(promoted("d", "browser_run_code"))).toBe(false);
+    expect(isPlainCaptureMemory(promoted("e", "mcp__http__post_request"))).toBe(false);
+    expect(isPlainCaptureMemory(promoted("f", "exec_in_pod"))).toBe(false);
+    // known host tools, in their real spellings
+    expect(isPlainCaptureMemory(promoted("g", "run_terminal_cmd: ls -la"))).toBe(true);
+    expect(isPlainCaptureMemory(promoted("h", "WebFetch"))).toBe(true);
+    expect(isPlainCaptureMemory(promoted("i", "read_file"))).toBe(true);
+  });
+
+  it("never touches a shell command that writes", () => {
+    expect(isPlainCaptureMemory(promoted("a", "Bash: sed -i 's/a/b/' src/x.ts"))).toBe(false);
+    expect(isPlainCaptureMemory(promoted("b", "exec_command: apply_patch <<'EOF'"))).toBe(false);
+    expect(isPlainCaptureMemory(promoted("c", "Bash: echo done > notes.txt"))).toBe(false);
+    expect(isPlainCaptureMemory(promoted("d", "Bash: npm test | tee out.log"))).toBe(false);
+    // stderr redirection is not a write to a file
+    expect(isPlainCaptureMemory(promoted("e", "Bash: git log -8 2>&1 | head"))).toBe(true);
+  });
+
+  it("never touches an edit whose change survives only in the body (0.0.6-0.0.9 rows)", () => {
+    expect(
+      isPlainCaptureMemory(promoted("a", "exec", { content: "x. changed: TTL 15m → 30m", concepts: ["x"] })),
+    ).toBe(false);
+  });
+
   it("never touches a tool it cannot classify", () => {
     expect(isPlainCaptureMemory(promoted("a", "mcp__linear__save_issue"))).toBe(false);
     expect(isPlainCaptureMemory(promoted("b", "Artifact"))).toBe(false);
@@ -170,6 +199,32 @@ describe("mem::repair-plain", () => {
     });
     expect(r.byType).toEqual({ command_run: 1, search: 1, file_read: 1 });
     expect((await kv.list(KV.memories)).length).toBe(6);
+  });
+
+  it("archives every retired row in full before deleting it", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "memwarden-repair-archive-"));
+    const prev = process.env["MEMWARDEN_DATA_DIR"];
+    process.env["MEMWARDEN_DATA_DIR"] = dataDir;
+    try {
+      const r = await sdk.trigger<unknown, PlainRepairReport>({
+        function_id: "mem::repair-plain",
+        payload: { apply: true },
+      });
+      expect(r.archive).toBeDefined();
+      expect(r.archive!.startsWith(join(dataDir, "repair"))).toBe(true);
+      expect(statSync(r.archive!).mode & 0o777).toBe(0o600);
+      const rows = readFileSync(r.archive!, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+      const archived = rows.filter((x) => x.memory).map((x) => x.memory.id).sort();
+      expect(archived).toEqual(["mem_git", "mem_grep", "mem_stale_read"]);
+      expect(rows.find((x) => x.memory?.id === "mem_git").memory.title).toBe("exec: git log -8");
+      const receipts = rows.filter((x) => x.retired);
+      expect(receipts).toHaveLength(3);
+      for (const x of receipts) expect(x.receiptHash).toMatch(/^[0-9a-f]{64}$/);
+    } finally {
+      if (prev === undefined) delete process.env["MEMWARDEN_DATA_DIR"];
+      else process.env["MEMWARDEN_DATA_DIR"] = prev;
+      rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 
   it("apply retires stale and never-verifiable plain captures, through mem::forget", async () => {

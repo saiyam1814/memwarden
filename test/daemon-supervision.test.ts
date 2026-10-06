@@ -10,9 +10,9 @@
 // holds the port and takes over when it exits (end to end, real daemon).
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import { createServer as createTcpServer, type AddressInfo } from "node:net";
 import { tmpdir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,7 +27,14 @@ import {
   type InstalledService,
 } from "../src/daemon/service.js";
 import { ensureDaemon } from "../src/daemon/ensure.js";
-import { awaitPortHandoff, probePort, type PortHolder } from "../src/daemon/standby.js";
+import {
+  awaitHolderExit,
+  awaitPortHandoff,
+  daemonPidfile,
+  exitCodeForAddrInUse,
+  probePort,
+  type PortHolder,
+} from "../src/daemon/standby.js";
 
 const posixIt = process.platform === "win32" ? it.skip : it;
 const roots: string[] = [];
@@ -131,6 +138,27 @@ describe("installed service discovery", () => {
     expect(svc).toMatchObject({ kind: "systemd", dataDir: "/home/u/.memwarden", port: 4111 });
   });
 
+  it("knows whether the program the service launches still exists", () => {
+    const home = tempRoot();
+    const dir = join(home, "Library", "LaunchAgents");
+    mkdirSync(dir, { recursive: true });
+    const entry = join(home, "index.js");
+    writeFileSync(entry, "");
+    const plist = (node: string): string =>
+      __macPlistForTests(node, "/b/.memwarden").replace(
+        /<key>ProgramArguments<\/key>\s*<array>[\s\S]*?<\/array>/,
+        `<key>ProgramArguments</key><array><string>${node}</string><string>${entry}</string></array>`,
+      );
+    writeFileSync(join(dir, "ai.memwarden.daemon.plist"), plist(process.execPath));
+    expect(__installedServiceForTests("darwin", home)).toMatchObject({
+      program: [process.execPath, entry],
+      programOk: true,
+    });
+    // e.g. `nvm uninstall` of the pinned node version
+    writeFileSync(join(dir, "ai.memwarden.daemon.plist"), plist("/nonexistent/v20.17.0/bin/node"));
+    expect(__installedServiceForTests("darwin", home)?.programOk).toBe(false);
+  });
+
   it("returns null with no service file, and on unsupported platforms", () => {
     expect(__installedServiceForTests("darwin", tempRoot())).toBeNull();
     expect(__installedServiceForTests("win32", tempRoot())).toBeNull();
@@ -142,12 +170,17 @@ describe("installed service discovery", () => {
       path: "/x",
       dataDir: resolve("/b/.memwarden"),
       port: 3111,
+      program: [],
+      programOk: true,
     };
     expect(serviceServes(svc, "http://localhost:3111", "/b/.memwarden")).toBe(true);
     expect(serviceServes(svc, "http://localhost:3111", "/b/.memwarden/")).toBe(true);
     expect(serviceServes(svc, "http://localhost:4111", "/b/.memwarden")).toBe(false);
     expect(serviceServes(svc, "http://localhost:3111", "/tmp/experiment")).toBe(false);
     expect(serviceServes(svc, "not a url", "/b/.memwarden")).toBe(false);
+    // the local service never serves a remote daemon URL
+    expect(serviceServes(svc, "http://otherhost:3111", "/b/.memwarden")).toBe(false);
+    expect(serviceServes(svc, "http://127.0.0.1:3111", "/b/.memwarden")).toBe(true);
   });
 });
 
@@ -157,6 +190,8 @@ describe("starting through the supervisor", () => {
     path: "/x",
     dataDir: "/b",
     port: 3111,
+    program: [],
+    programOk: true,
   });
 
   it("launchd: kickstart WITHOUT -k, so a live daemon is never restarted", () => {
@@ -189,7 +224,7 @@ describe("ensureDaemon revival", () => {
     let spawned = 0;
     let kicked = 0;
     const result = await ensureDaemon(`http://127.0.0.1:${port}`, dataDir, 5000, {
-      service: () => ({ kind: "launchd", path: "/x", dataDir: resolve(dataDir), port }),
+      service: () => ({ kind: "launchd", path: "/x", dataDir: resolve(dataDir), port, program: [], programOk: true }),
       startViaSupervisor: () => {
         kicked++;
         // The supervisor brings the daemon up a moment later.
@@ -212,7 +247,7 @@ describe("ensureDaemon revival", () => {
     let spawned = 0;
     let kicked = 0;
     const result = await ensureDaemon(`http://127.0.0.1:${port}`, dataDir, 600, {
-      service: () => ({ kind: "launchd", path: "/x", dataDir: "/somewhere/else", port }),
+      service: () => ({ kind: "launchd", path: "/x", dataDir: "/somewhere/else", port, program: [], programOk: true }),
       startViaSupervisor: () => {
         kicked++;
         return true;
@@ -227,12 +262,51 @@ describe("ensureDaemon revival", () => {
     expect(spawned).toBe(1);
   });
 
+  posixIt("spawns after the grace period when the supervisor said yes but nothing came up", async () => {
+    // launchctl kickstart exits 0 for a loaded job whose node was uninstalled.
+    const dataDir = tempRoot();
+    const port = await freePort();
+    let spawned = 0;
+    const result = await ensureDaemon(`http://127.0.0.1:${port}`, dataDir, 6000, {
+      service: () => ({ kind: "launchd", path: "/x", dataDir: resolve(dataDir), port, program: [], programOk: true }),
+      startViaSupervisor: () => true,
+      supervisorGraceMs: 300,
+      spawnDetached: (() => {
+        spawned++;
+        void livezServer(memwardenLivez, port);
+        return { unref() {} };
+      }) as never,
+    });
+    expect(spawned).toBe(1);
+    expect(result).toBe("started");
+  });
+
+  posixIt("does not ask a service whose program no longer exists", async () => {
+    const dataDir = tempRoot();
+    const port = await freePort();
+    let kicked = 0;
+    let spawned = 0;
+    await ensureDaemon(`http://127.0.0.1:${port}`, dataDir, 300, {
+      service: () => ({ kind: "launchd", path: "/x", dataDir: resolve(dataDir), port, program: [], programOk: false }),
+      startViaSupervisor: () => {
+        kicked++;
+        return true;
+      },
+      spawnDetached: (() => {
+        spawned++;
+        return { unref() {} };
+      }) as never,
+    });
+    expect(kicked).toBe(0);
+    expect(spawned).toBe(1);
+  });
+
   posixIt("falls back to a detached spawn when the supervisor cannot be asked", async () => {
     const dataDir = tempRoot();
     const port = await freePort();
     let spawned = 0;
     await ensureDaemon(`http://127.0.0.1:${port}`, dataDir, 300, {
-      service: () => ({ kind: "launchd", path: "/x", dataDir: resolve(dataDir), port }),
+      service: () => ({ kind: "launchd", path: "/x", dataDir: resolve(dataDir), port, program: [], programOk: true }),
       startViaSupervisor: () => false,
       spawnDetached: (() => {
         spawned++;
@@ -247,7 +321,7 @@ describe("ensureDaemon revival", () => {
     const { url, port } = await livezServer(memwardenLivez);
     let kicked = 0;
     const result = await ensureDaemon(url, dataDir, 300, {
-      service: () => ({ kind: "launchd", path: "/x", dataDir: resolve(dataDir), port }),
+      service: () => ({ kind: "launchd", path: "/x", dataDir: resolve(dataDir), port, program: [], programOk: true }),
       startViaSupervisor: () => {
         kicked++;
         return true;
@@ -276,6 +350,16 @@ describe("port probing", () => {
     expect(await probePort(notFound.port)).toBe("foreign");
     const otherJson = await livezServer((res) => res.end(JSON.stringify({ status: "ok" })));
     expect(await probePort(otherJson.port)).toBe("foreign");
+  });
+
+  it("foreign: the connection was reset (a raw TCP or TLS listener)", async () => {
+    const tcp = createTcpServer((sock) => sock.destroy());
+    await new Promise<void>((r) => tcp.listen(0, "127.0.0.1", () => r()));
+    try {
+      expect(await probePort((tcp.address() as AddressInfo).port)).toBe("foreign");
+    } finally {
+      await new Promise<void>((r) => tcp.close(() => r()));
+    }
   });
 
   it("busy: accepted but did not answer in time (a blocked memwarden looks like this)", async () => {
@@ -317,6 +401,52 @@ describe("awaitPortHandoff", () => {
   });
 });
 
+describe("awaitHolderExit", () => {
+  it("waits for the previous daemon's process, not just its port", async () => {
+    const dataDir = tempRoot();
+    writeFileSync(daemonPidfile(dataDir), "424242\n");
+    let checks = 0;
+    const r = await awaitHolderExit(dataDir, {
+      alive: () => ++checks < 4,
+      sleep: async () => undefined,
+    });
+    expect(r).toBe("exited");
+    expect(checks).toBe(4);
+  });
+
+  it("uses a grace period for a holder that wrote no pidfile (pre-0.2.1)", async () => {
+    const slept: number[] = [];
+    const r = await awaitHolderExit(tempRoot(), {
+      graceMs: 1234,
+      sleep: async (ms) => void slept.push(ms),
+    });
+    expect(r).toBe("grace");
+    expect(slept).toEqual([1234]);
+  });
+
+  it("gives up waiting at the cap (a crashed daemon's pid reused)", async () => {
+    const dataDir = tempRoot();
+    writeFileSync(daemonPidfile(dataDir), "424242\n");
+    const r = await awaitHolderExit(dataDir, {
+      capMs: 0,
+      alive: () => true,
+      sleep: async () => undefined,
+    });
+    expect(r).toBe("cap");
+  });
+});
+
+describe("exit code on a lost bind", () => {
+  it("retries into standby only when supervised and another memwarden won", () => {
+    expect(exitCodeForAddrInUse(true, "memwarden")).toBe(75);
+    expect(exitCodeForAddrInUse(true, "busy")).toBe(75);
+    // a foreign program on the port must never cause a restart loop
+    expect(exitCodeForAddrInUse(true, "foreign")).toBe(0);
+    expect(exitCodeForAddrInUse(true, "free")).toBe(75);
+    expect(exitCodeForAddrInUse(false, "memwarden")).toBe(0);
+  });
+});
+
 // The real daemon, from source, under a simulated launchd environment.
 describe("supervised daemon end to end", () => {
   function startDaemon(port: number, dataDir: string, supervised: boolean): {
@@ -329,7 +459,8 @@ describe("supervised daemon end to end", () => {
       MEMWARDEN_DATA_DIR: dataDir,
       MEMWARDEN_EMBEDDING_PROVIDER: "none",
       MEMWARDEN_SECRET: "test-secret",
-      MEMWARDEN_DAEMON_LOG_MODE: "stdio",
+      // what the generated plist sets
+      MEMWARDEN_DAEMON_LOG_MODE: "file",
     };
     delete env["XPC_SERVICE_NAME"];
     delete env["INVOCATION_ID"];
@@ -366,19 +497,34 @@ describe("supervised daemon end to end", () => {
       d.child.on("exit", (code) => (exitCode = code));
 
       expect(await until(() => d.output().includes("standby"), 20_000)).toBe(true);
-      // Holding nothing: it did not boot the kernel or open the store.
+      // Holding nothing: no kernel, no store, no log rotation.
       expect(d.output()).not.toMatch(/kernel ready/);
+      expect(existsSync(join(dataDir, "memwarden.db"))).toBe(false);
+      expect(existsSync(join(dataDir, "daemon.log"))).toBe(false);
       expect(exitCode).toBeNull();
 
+      // The previous holder releases its port but its process is still
+      // finishing shutdown: the standby must keep waiting for it.
+      const finishing = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"]);
+      children.push(finishing);
+      writeFileSync(daemonPidfile(dataDir), `${finishing.pid}\n`);
       await new Promise<void>((r) => holder.server.close(() => r()));
       servers.splice(servers.indexOf(holder.server), 1);
+      await new Promise((r) => setTimeout(r, 7_000)); // > one standby poll
+      expect(await probePort(holder.port)).toBe("free");
+      expect(d.output()).not.toMatch(/kernel ready/);
 
+      finishing.kill("SIGKILL");
       expect(await until(async () => (await probePort(holder.port)) === "memwarden", 25_000)).toBe(true);
       expect(d.output()).toMatch(/taking over/);
-      expect(d.output()).toMatch(/kernel ready/);
       expect(exitCode).toBeNull();
+      // It now owns the brain: pidfile names it until a graceful shutdown.
+      expect(readFileSync(daemonPidfile(dataDir), "utf8").trim()).toBe(String(d.child.pid));
+      d.child.kill("SIGTERM");
+      await new Promise<void>((r) => d.child.once("exit", () => r()));
+      expect(existsSync(daemonPidfile(dataDir))).toBe(false);
     },
-    60_000,
+    90_000,
   );
 
   posixIt(

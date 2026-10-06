@@ -26,18 +26,28 @@ memwarden compact --prune-history
   - a supervised instance that finds another memwarden on its port waits in standby (holding no
     store, rotating no log) and takes over when the port is released; if it loses a bind race it
     exits 75 so the supervisor relaunches it into standby;
-  - `memwarden status` warns when the daemon runs outside the installed service, and
-    `memwarden up` hands such a daemon over to the service.
+  - a standby instance boots only after the previous daemon's process has exited (it releases
+    its port before it saves the vector index and closes the store); daemons now record
+    themselves in `<brain>/daemon.pid` for this;
+  - a supervisor's "started" is not trusted blindly (launchctl reports success for a job whose
+    pinned node was uninstalled): if nothing answers within 10s, a detached daemon is spawned
+    anyway, and the late supervised one waits behind it;
+  - `memwarden status` warns when the daemon runs outside the installed service, or when the
+    service launches a node or memwarden that no longer exists; `memwarden up` fixes both.
 
 ### Added
 - **`memwarden repair --plain [--apply]`.** Before 0.2.0 the retention sweep promoted every
   expiring capture that named a file, so plain commands, searches, and reads became permanent
-  memories: on the real brain, 2,651 of 4,453 (`git log -8`, `Searched "**/*.go"`, `Read .git`,
+  memories: on the real brain, 2,628 of 4,453 (`git log -8`, `Searched "**/*.go"`, `Read .git`,
   web searches whose query was stored as a "file"). Today's retention never creates them. Repair
   retires the ones whose evidence is stale or can never verify, through `mem::forget` with
   receipts. Plain reads whose file is unchanged are kept: they are still correct pointers to where
   something lives, and retiring them made search measurably worse in a rehearsal on a copy of the
-  real brain. Manual, consolidated, edit, write, and failure memories are never candidates.
+  real brain. Only single captures from known read-only shell, search, read, and fetch tools
+  qualify; manual, consolidated, edit/write-tool, shell-write, and failure memories never do.
+  Every retired row is written in full to `<brain>/repair/plain-<date>.jsonl` (0600) before it
+  is deleted, with its receipt hash, so the repair can be undone even after
+  `compact --prune-history`. `--apply` runs in batches of 500.
 
 ## 0.2.0 - 2026-09-27
 

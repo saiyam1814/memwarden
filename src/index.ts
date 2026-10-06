@@ -41,9 +41,12 @@ import {
 } from "./daemon/log.js";
 import { supervisorOf } from "./daemon/service.js";
 import {
+  awaitHolderExit,
   awaitPortHandoff,
+  exitCodeForAddrInUse,
   probePort,
-  EXIT_RETRY_STANDBY,
+  removeDaemonPidfile,
+  writeDaemonPidfile,
 } from "./daemon/standby.js";
 
 const REST_PORT = parseInt(process.env.MEMWARDEN_REST_PORT ?? "3111", 10);
@@ -218,7 +221,9 @@ async function main(): Promise<void> {
   // another memwarden serves the port, wait (holding no store and rotating no
   // log) and take over when it exits. See daemon/standby.ts.
   const supervisor = supervisorOf();
-  if (supervisor) await awaitPortHandoff(REST_PORT);
+  if (supervisor) {
+    await awaitPortHandoff(REST_PORT, { afterRelease: () => awaitHolderExit(getDataDir()) });
+  }
 
   // POSIX detached processes and launchd validate/rotate their real file and
   // retain one descriptor for unref'd periodic checks. Windows stays on its
@@ -308,21 +313,27 @@ async function main(): Promise<void> {
   http.server.on("error", (err: NodeJS.ErrnoException) => {
     if (err.code === "EADDRINUSE") {
       void (async () => {
-        const memwardenHolds =
-          supervisor !== null && (await probePort(REST_PORT)) !== "foreign";
+        const code = exitCodeForAddrInUse(
+          supervisor !== null,
+          supervisor !== null ? await probePort(REST_PORT) : "foreign",
+        );
         console.log(
-          memwardenHolds
+          code !== 0
             ? `[memwarden] port ${REST_PORT} taken by another memwarden during boot; ` +
                 `exiting so ${supervisor} relaunches this instance in standby.`
             : `[memwarden] port ${REST_PORT} already in use — another instance is running; exiting.`,
         );
-        process.exit(memwardenHolds ? EXIT_RETRY_STANDBY : 0);
+        process.exit(code);
       })();
       return;
     }
     console.error(`[memwarden] HTTP server error:`, err);
     process.exit(1);
   });
+  // The pidfile marks this process as the brain's daemon from the moment it
+  // holds the port until its store is closed, so a standby successor waits
+  // for the process to exit, not just for the port (see daemon/standby.ts).
+  http.server.once("listening", () => writeDaemonPidfile(getDataDir()));
   console.log(
     `[memwarden] REST API: http://127.0.0.1:${REST_PORT}/memwarden/*`,
   );
@@ -383,6 +394,7 @@ async function main(): Promise<void> {
     setEmbeddingProvider(null);
     setVectorIndex(null);
     await sdk.shutdown();
+    removeDaemonPidfile(getDataDir());
     process.exitCode = 0;
   };
   requestShutdown = () => void shutdown();

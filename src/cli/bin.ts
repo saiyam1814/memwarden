@@ -342,11 +342,23 @@ async function repair(rest: string[]): Promise<void> {
   );
 }
 
-async function repairPlain(
-  rest: string[],
-  apply: boolean,
-  limit: number | undefined,
-): Promise<void> {
+interface PlainRepairBody {
+  scanned: number;
+  plain: number;
+  keptVerified: number;
+  retirable: number;
+  retired: number;
+  failed: number;
+  archive?: string;
+  byType: Record<string, number>;
+  samples: Array<{ id: string; title: string }>;
+}
+
+/** Retired per request: each forget walks the store, so a whole brain in one
+ * request can outlive the client's fetch timeout while the daemon keeps going. */
+const PLAIN_REPAIR_BATCH = 500;
+
+async function postPlainRepair(apply: boolean, limit?: number): Promise<PlainRepairBody> {
   const res = await fetch(`${DAEMON_URL}/memwarden/repair/plain`, {
     method: "POST",
     headers: authHeaders(),
@@ -356,16 +368,31 @@ async function repairPlain(
     throw new Error("repair --plain needs a 0.2.1+ daemon: restart it with 'memwarden up'");
   }
   if (!res.ok) throw new Error(`repair failed: HTTP ${res.status}`);
-  const r = (await res.json()) as {
-    scanned: number;
-    plain: number;
-    keptVerified: number;
-    retirable: number;
-    retired: number;
-    failed: number;
-    byType: Record<string, number>;
-    samples: Array<{ id: string; title: string }>;
-  };
+  return (await res.json()) as PlainRepairBody;
+}
+
+async function repairPlain(
+  rest: string[],
+  apply: boolean,
+  limit: number | undefined,
+): Promise<void> {
+  // The first response describes the brain before anything was retired; later
+  // batches only add to the retired/failed tallies.
+  const want = limit ?? Infinity;
+  const r = await postPlainRepair(apply, apply ? Math.min(want, PLAIN_REPAIR_BATCH) : limit);
+  if (apply) {
+    let lastRetired = r.retired;
+    while (lastRetired > 0 && r.retired + r.failed < Math.min(want, r.retirable)) {
+      const next = await postPlainRepair(
+        true,
+        Math.min(want - r.retired - r.failed, PLAIN_REPAIR_BATCH),
+      );
+      r.retired += next.retired;
+      r.failed += next.failed;
+      if (next.archive) r.archive = next.archive;
+      lastRetired = next.retired;
+    }
+  }
   if (rest.includes("--json")) {
     console.log(JSON.stringify(r, null, 2));
     return;
@@ -386,9 +413,9 @@ async function repairPlain(
   for (const s of r.samples) console.log(`      ${s.title.slice(0, 72)}`);
   console.log(
     apply
-      ? `\n  Each retired memory left a delete receipt. Run \`memwarden compact --prune-history\`\n  to drop their payloads from history.\n`
+      ? `\n  Each retired memory left a delete receipt, and its full row is archived at\n    ${r.archive ?? "(nothing retired)"}\n  so it can be restored even after \`memwarden compact --prune-history\`.\n`
       : r.retirable
-        ? `\n  These were promoted by the pre-0.2.0 retention sweep from captures that hold\n  nothing their files lack. Manual, consolidated, edit, write, and error memories\n  are never touched. Rerun with --apply to retire them.\n`
+        ? `\n  These were promoted by the pre-0.2.0 retention sweep from single plain captures\n  (a known read-only shell, search, read, or fetch tool) that hold nothing their\n  files lack. Manual, consolidated, edit/write-tool, shell-write, and failure\n  memories are never candidates. Rerun with --apply to retire them; every row is\n  archived first.\n`
         : `\n  Nothing to retire.\n`,
   );
 }
@@ -2360,6 +2387,14 @@ async function status(rest: string[]): Promise<void> {
     `  daemon    ${daemonUp ? "✓ running" : "✗ not running"}  ${DAEMON_URL}  brain: ${dataDir}` +
       (daemonUp && !stats ? "  (stats unavailable — secret mismatch?)" : ""),
   );
+  const svcNow = installedService();
+  if (svcNow && !svcNow.programOk && serviceServes(svcNow, DAEMON_URL, dataDir)) {
+    console.log(
+      `            ⚠ the ${svcNow.kind} service launches a node or memwarden that no longer exists\n` +
+        `              (${svcNow.program.join(" ") || "unreadable"}), so it cannot restart the brain.\n` +
+        `              Fix: 'memwarden up' rewrites it for this install.`,
+    );
+  }
   const unsupervised = unsupervisedDaemon(stats, dataDir);
   if (unsupervised) {
     console.log(

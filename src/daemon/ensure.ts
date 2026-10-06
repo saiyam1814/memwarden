@@ -62,6 +62,7 @@ export interface EnsureDeps {
   service?: () => InstalledService | null;
   startViaSupervisor?: (svc: InstalledService) => boolean;
   spawnDetached?: typeof spawn;
+  supervisorGraceMs?: number;
 }
 
 async function waitAlive(url: string, timeoutMs: number): Promise<boolean> {
@@ -73,13 +74,20 @@ async function waitAlive(url: string, timeoutMs: number): Promise<boolean> {
   return false;
 }
 
+/** How long to give the supervisor before spawning a daemon ourselves. */
+const SUPERVISOR_GRACE_MS = 10_000;
+
 /**
  * Ensure the daemon at `url` is up, starting it if not. When the OS service
  * is installed for this brain and port, the supervisor starts it: a detached
  * child here would win the port and leave the supervised instance in standby,
- * with no one to restart the brain if it crashes. Otherwise spawn detached.
- * Idempotent and race-safe: concurrent spawners resolve on EADDRINUSE (see
- * index.ts). Returns once the daemon answers /livez or the timeout elapses.
+ * with no one to restart the brain if it crashes. A supervisor's "started" is
+ * not proof (launchctl kickstart succeeds for a job whose node binary was
+ * uninstalled), so if nothing answers within the grace period, spawn detached
+ * anyway: a daemon beats none, and a supervised instance that comes up late
+ * simply waits in standby behind it. Idempotent and race-safe: concurrent
+ * spawners resolve on EADDRINUSE (see index.ts). Returns once the daemon
+ * answers /livez or the timeout elapses.
  */
 export async function ensureDaemon(
   url: string,
@@ -90,15 +98,20 @@ export async function ensureDaemon(
   const lifecycle = detachedLogLifecycle();
   const alive = await daemonAlive(url);
 
+  const startedAt = Date.now();
   if (!alive && lifecycle === "secure-posix") {
     const svc = (deps.service ?? installedService)();
-    if (svc && serviceServes(svc, url, dataDir)) {
+    if (svc && svc.programOk && serviceServes(svc, url, dataDir)) {
       const asked = (deps.startViaSupervisor ?? startServiceViaSupervisor)(svc);
-      if (asked) return (await waitAlive(url, timeoutMs)) ? "started" : "failed";
-      // The supervisor could not be asked (job not loaded, no user session):
-      // a detached daemon beats no daemon.
+      const grace = deps.supervisorGraceMs ?? SUPERVISOR_GRACE_MS;
+      if (asked && (await waitAlive(url, Math.min(timeoutMs, grace)))) {
+        return "started";
+      }
+      // Not asked (job not loaded, no user session) or asked and silent:
+      // fall through to a detached spawn.
     }
   }
+  const remainingMs = (): number => Math.max(timeoutMs - (Date.now() - startedAt), 5_000);
 
   // Preserve the exact 0.1.0 Windows lifecycle: an already-live daemon returns
   // before touching the log; a new daemon inherits one append-only descriptor;
@@ -152,5 +165,5 @@ export async function ensureDaemon(
     }
   }
   child.unref();
-  return (await waitAlive(url, timeoutMs)) ? "started" : "failed";
+  return (await waitAlive(url, remainingMs())) ? "started" : "failed";
 }

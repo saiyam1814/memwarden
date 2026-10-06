@@ -21,7 +21,7 @@
 // spawn.
 
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { DAEMON_ENTRY } from "./ensure.js";
@@ -65,7 +65,9 @@ function productionRuntime(): ServiceRuntime {
     home: homedir(),
     node: process.execPath,
     run: (command, args) => {
-      execFileSync(command, args, { stdio: "ignore" });
+      // Bounded: a wedged launchctl/systemctl (D-Bus) must not hang the MCP
+      // server's stdio loop that called ensureDaemon.
+      execFileSync(command, args, { stdio: "ignore", timeout: 10_000 });
     },
   };
 }
@@ -337,6 +339,15 @@ export interface InstalledService {
   path: string;
   dataDir: string;
   port: number;
+  /** The node binary and daemon entry the service launches. */
+  program: string[];
+  /**
+   * Both still exist. The service pins an absolute node path (an nvm or
+   * Homebrew version) and that version's global install; after an uninstall
+   * the supervisor still reports a successful start while the job fails to
+   * exec, so a missing program means "do not rely on this service".
+   */
+  programOk: boolean;
 }
 
 const DEFAULT_REST_PORT = 3111;
@@ -375,12 +386,34 @@ function installedServiceWithRuntime(
   const dataDir = read(text, "MEMWARDEN_DATA_DIR");
   if (!dataDir) return null;
   const port = parseInt(read(text, "MEMWARDEN_REST_PORT") ?? `${DEFAULT_REST_PORT}`, 10);
+  const program = kind === "launchd" ? plistProgram(text) : unitProgram(text);
   return {
     kind,
     path,
     dataDir: resolve(dataDir),
     port: Number.isFinite(port) ? port : DEFAULT_REST_PORT,
+    program,
+    programOk: program.length >= 2 && program.every((p) => existsSync(p)),
   };
+}
+
+function plistProgram(text: string): string[] {
+  const block = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(text);
+  if (!block) return [];
+  return Array.from(block[1]!.matchAll(/<string>([^<]*)<\/string>/g), (m) =>
+    m[1]!
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&amp;/g, "&"),
+  );
+}
+
+function unitProgram(text: string): string[] {
+  // ExecStart=<node> <entry>, as systemdUnit writes it (no quoting).
+  const m = /^ExecStart=(\S+)\s+(\S+)\s*$/m.exec(text);
+  return m ? [m[1]!, m[2]!] : [];
 }
 
 /** The installed service for this user, or null when there is none. */
@@ -388,11 +421,15 @@ export function installedService(): InstalledService | null {
   return installedServiceWithRuntime(productionRuntime());
 }
 
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+
 /** Does the installed service serve exactly this brain on this URL's port? */
 export function serviceServes(svc: InstalledService, url: string, dataDir: string): boolean {
   let port: number;
   try {
     const u = new URL(url);
+    // The service only ever serves this machine; a remote URL is never it.
+    if (!LOOPBACK_HOSTS.has(u.hostname)) return false;
     port = u.port ? parseInt(u.port, 10) : u.protocol === "https:" ? 443 : 80;
   } catch {
     return false;
