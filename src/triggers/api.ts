@@ -96,6 +96,8 @@ export interface HostHeartbeat {
 export interface ApiLifecycle {
   dataDir: string;
   requestShutdown(): void;
+  /** Which OS supervisor launched this daemon; null = unsupervised. */
+  supervisor?: "launchd" | "systemd" | null;
 }
 
 export function registerApiTriggers(
@@ -833,6 +835,15 @@ export function registerApiTriggers(
         firewall: await summarizeFirewall(kv, 30).catch(() => null),
         lastCompact: await kv.get(KV.maintenance, "compact").catch(() => null),
       };
+      // Only the real daemon has a lifecycle. `status` uses this to say when
+      // the brain runs outside launchd/systemd (no restart if it crashes).
+      if (lifecycle) {
+        body["daemon"] = {
+          pid: process.pid,
+          supervisor: lifecycle.supervisor ?? null,
+          dataDir: lifecycle.dataDir,
+        };
+      }
       if (vec instanceof QuantizedVectorIndex) {
         const { dims, paddedDims, bits, rescoreDepth } = vec.params;
         const fullBytes = dims * 4;
@@ -912,6 +923,34 @@ export function registerApiTriggers(
     function_id: "api::repair-legacy",
     config: {
       api_path: "/memwarden/repair/legacy",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  // --- POST /memwarden/repair/plain ---------------------------------
+  // Retire memories the pre-0.2.0 retention sweep promoted from plain
+  // commands, searches, and reads. Dry run unless apply:true. Auth'd:
+  // applying forgets memories (each with a delete receipt).
+  sdk.registerFunction(
+    "api::repair-plain",
+    async (req: ApiRequest<{ apply?: boolean; limit?: number }>): Promise<Response> => {
+      const body = (req.body ?? {}) as { apply?: boolean; limit?: number };
+      const report = await sdk.trigger({
+        function_id: "mem::repair-plain",
+        payload: {
+          apply: body.apply === true,
+          ...(typeof body.limit === "number" ? { limit: body.limit } : {}),
+        },
+      });
+      return { status_code: 200, body: report };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::repair-plain",
+    config: {
+      api_path: "/memwarden/repair/plain",
       http_method: "POST",
       middleware_function_ids: ["middleware::api-auth"],
     },

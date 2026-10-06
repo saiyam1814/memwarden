@@ -6,16 +6,24 @@
 //   Linux  ~/.config/systemd/user/memwarden.service          (systemd --user)
 //
 // KeepAlive/Restart are set to "restart on FAILURE only" (SuccessfulExit
-// false / on-failure). That pairs with the daemon's clean exit(0) on
-// EADDRINUSE: if another instance already holds the port, the supervised one
-// exits cleanly and is NOT relaunched (no crash loop); a real crash (non-zero
-// exit) IS relaunched. Best-effort: any failure returns ok:false so `up`
-// falls back to a detached spawn.
+// false / on-failure), so a real crash (non-zero exit) IS relaunched.
+//
+// The supervised instance must also be the one that serves. If anything else
+// starts a daemon first (an MCP server reviving the brain at login, say), the
+// supervised instance used to exit 0 on EADDRINUSE and launchd/systemd
+// treated the job as finished: the brain then ran unsupervised until the next
+// login, and a crash meant silent capture loss. Two rules close that:
+//   - every revival path goes through the supervisor when the service is
+//     installed (startServiceViaSupervisor), so nothing races it;
+//   - a supervised instance that finds another memwarden on its port waits in
+//     standby and takes over when it exits (see index.ts).
+// Best-effort: any failure returns ok:false so `up` falls back to a detached
+// spawn.
 
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, userInfo } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { DAEMON_ENTRY } from "./ensure.js";
 import {
   DAEMON_LOG_MODE_ENV,
@@ -57,7 +65,9 @@ function productionRuntime(): ServiceRuntime {
     home: homedir(),
     node: process.execPath,
     run: (command, args) => {
-      execFileSync(command, args, { stdio: "ignore" });
+      // Bounded: a wedged launchctl/systemctl (D-Bus) must not hang the MCP
+      // server's stdio loop that called ensureDaemon.
+      execFileSync(command, args, { stdio: "ignore", timeout: 10_000 });
     },
   };
 }
@@ -305,6 +315,164 @@ export function __systemdUnitForTests(
   secret?: string,
 ): string {
   return systemdUnit(node, dataDir, secret);
+}
+
+export type Supervisor = "launchd" | "systemd";
+
+/**
+ * Which supervisor launched THIS process, or null when it was started by
+ * anything else (a detached spawn, a shell). launchd names the job in
+ * XPC_SERVICE_NAME; our systemd unit is the only launcher that selects
+ * journald logging, and systemd stamps every service with INVOCATION_ID.
+ */
+export function supervisorOf(env: NodeJS.ProcessEnv = process.env): Supervisor | null {
+  if (env["XPC_SERVICE_NAME"] === LABEL) return "launchd";
+  if (env["INVOCATION_ID"] && env[DAEMON_LOG_MODE_ENV] === DAEMON_LOG_MODE_JOURNALD) {
+    return "systemd";
+  }
+  return null;
+}
+
+/** What an installed service runs: which supervisor, which brain, which port. */
+export interface InstalledService {
+  kind: Supervisor;
+  path: string;
+  dataDir: string;
+  port: number;
+  /** The node binary and daemon entry the service launches. */
+  program: string[];
+  /**
+   * Both still exist. The service pins an absolute node path (an nvm or
+   * Homebrew version) and that version's global install; after an uninstall
+   * the supervisor still reports a successful start while the job fails to
+   * exec, so a missing program means "do not rely on this service".
+   */
+  programOk: boolean;
+}
+
+const DEFAULT_REST_PORT = 3111;
+
+function plistEnv(text: string, key: string): string | undefined {
+  const m = new RegExp(`<key>${key}</key>\\s*<string>([^<]*)</string>`).exec(text);
+  if (!m) return undefined;
+  return m[1]!
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+function unitEnv(text: string, key: string): string | undefined {
+  const m = new RegExp(`^Environment=${key}=(.*)$`, "m").exec(text);
+  return m ? m[1]!.trim() : undefined;
+}
+
+function installedServiceWithRuntime(
+  runtime: Pick<ServiceRuntime, "platform" | "home">,
+): InstalledService | null {
+  const { platform, home } = runtime;
+  const kind: Supervisor | null =
+    platform === "darwin" ? "launchd" : platform === "linux" ? "systemd" : null;
+  if (!kind) return null;
+  const path = kind === "launchd" ? plistPath(home) : systemdPath(home);
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+  const read = kind === "launchd" ? plistEnv : unitEnv;
+  const dataDir = read(text, "MEMWARDEN_DATA_DIR");
+  if (!dataDir) return null;
+  const port = parseInt(read(text, "MEMWARDEN_REST_PORT") ?? `${DEFAULT_REST_PORT}`, 10);
+  const program = kind === "launchd" ? plistProgram(text) : unitProgram(text);
+  return {
+    kind,
+    path,
+    dataDir: resolve(dataDir),
+    port: Number.isFinite(port) ? port : DEFAULT_REST_PORT,
+    program,
+    programOk: program.length >= 2 && program.every((p) => existsSync(p)),
+  };
+}
+
+function plistProgram(text: string): string[] {
+  const block = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(text);
+  if (!block) return [];
+  return Array.from(block[1]!.matchAll(/<string>([^<]*)<\/string>/g), (m) =>
+    m[1]!
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&amp;/g, "&"),
+  );
+}
+
+function unitProgram(text: string): string[] {
+  // ExecStart=<node> <entry>, as systemdUnit writes it (no quoting).
+  const m = /^ExecStart=(\S+)\s+(\S+)\s*$/m.exec(text);
+  return m ? [m[1]!, m[2]!] : [];
+}
+
+/** The installed service for this user, or null when there is none. */
+export function installedService(): InstalledService | null {
+  return installedServiceWithRuntime(productionRuntime());
+}
+
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+
+/** Does the installed service serve exactly this brain on this URL's port? */
+export function serviceServes(svc: InstalledService, url: string, dataDir: string): boolean {
+  let port: number;
+  try {
+    const u = new URL(url);
+    // The service only ever serves this machine; a remote URL is never it.
+    if (!LOOPBACK_HOSTS.has(u.hostname)) return false;
+    port = u.port ? parseInt(u.port, 10) : u.protocol === "https:" ? 443 : 80;
+  } catch {
+    return false;
+  }
+  return port === svc.port && resolve(dataDir) === svc.dataDir;
+}
+
+function startViaSupervisorWithRuntime(
+  svc: InstalledService,
+  runtime: Pick<ServiceRuntime, "run">,
+): boolean {
+  try {
+    if (svc.kind === "launchd") {
+      // kickstart without -k: starts the job if it is not running, and is a
+      // no-op when it already is (so a revival never restarts a live daemon).
+      runtime.run("launchctl", ["kickstart", `gui/${userInfo().uid}/${LABEL}`]);
+    } else {
+      runtime.run("systemctl", ["--user", "start", "memwarden"]);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Ask the supervisor to start its daemon. False when it could not be asked. */
+export function startServiceViaSupervisor(svc: InstalledService): boolean {
+  return startViaSupervisorWithRuntime(svc, productionRuntime());
+}
+
+/** Test-only seams for the supervisor helpers; never touch the real home. */
+export function __installedServiceForTests(
+  platform: NodeJS.Platform,
+  home: string,
+): InstalledService | null {
+  return installedServiceWithRuntime({ platform, home });
+}
+
+export function __startViaSupervisorForTests(
+  svc: InstalledService,
+  run: ServiceCommand,
+): boolean {
+  return startViaSupervisorWithRuntime(svc, { run });
 }
 
 /** Stop + remove the supervised daemon. Best-effort. */

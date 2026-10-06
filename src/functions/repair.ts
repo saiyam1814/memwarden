@@ -23,9 +23,13 @@ import type { ISdk } from "../kernel/index.js";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import type { CompressedObservation, Memory, RawObservation, Session } from "./types.js";
-import { buildSyntheticCompression } from "./compress-synthetic.js";
+import { buildSyntheticCompression, classify } from "./compress-synthetic.js";
 import { distillMembers } from "./consolidate.js";
 import { worthDistilling } from "./forget.js";
+import { classifyProvenance } from "./verify.js";
+import { getDataDir } from "./config.js";
+import { appendFileSync, chmodSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { resolveMemoryIdentity } from "./memory-identity.js";
 import { logger } from "./logger.js";
 
@@ -43,6 +47,83 @@ export function isLegacyJunkMemory(m: Memory): boolean {
   if ((m.facts?.length ?? 0) > 0 || (m.concepts?.length ?? 0) > 0) return false;
   const c = (m.content ?? "").trim();
   return c.startsWith("{") || c.startsWith("[") || /[}\]] \| [{["]/.test(c);
+}
+
+// Capture types the durability contract does not keep: the command, search,
+// read, or fetch is its own record (worthDistilling in forget.ts).
+const PLAIN_CAPTURE_TYPES = new Set(["command_run", "search", "file_read", "web_fetch"]);
+
+// Positive allowlist of host tools that only run a shell command, search,
+// read, or fetch, normalized the way classify() normalizes. classify() keys on
+// substrings, which is right for capture but too loose for deleting:
+// `search_replace`, `mcp__github__run_workflow`, or `browser_run_code` would
+// classify as plain types while they change things. A tool not on this list
+// is never a plain capture.
+const PLAIN_CAPTURE_TOOLS = new Set([
+  // shell
+  "bash", "shell", "exec", "exec_command", "local_shell", "terminal",
+  "run_terminal_cmd", "run_shell_command", "run_command",
+  // search / listing
+  "grep", "glob", "search", "grep_search", "file_search", "codebase_search",
+  "find", "find_files", "search_files", "list_dir", "ls",
+  // read
+  "read", "read_file", "read_many_files", "view", "view_file", "open_file",
+  // fetch
+  "web_fetch", "webfetch", "web_search", "websearch", "search_web", "fetch",
+]);
+
+function normalizeTool(name: string): string {
+  return name
+    .replace(/([a-z])([A-Z])/g, "$1_$2")
+    .replace(/[-\s]+/g, "_")
+    .toLowerCase();
+}
+
+// A shell command that writes (a patch, in-place edit, redirect, tee) is not
+// a plain capture even though its tool is a shell.
+const SHELL_WRITE = /\bapply_patch\b|\bsed\s+(-[a-zA-Z]*i|--in-place)|\btee\b|(^|[^<>&0-9])>>?\s*[^&\s]/;
+
+/** The tool part of a provenance command ("Bash: git status" -> "Bash"). */
+function captureTool(m: Memory): string | undefined {
+  const c = m.provenance?.command;
+  if (typeof c !== "string" || !c.trim()) return undefined;
+  const i = c.indexOf(": ");
+  return i === -1 ? c : c.slice(0, i);
+}
+
+/**
+ * A memory today's retention would never have created. Before 0.2.0 the
+ * retention sweep promoted every expiring capture that named a file, so plain
+ * commands, searches, and reads became permanent memories ("git log -8",
+ * 'Searched "**\/*.go"', "Read README.md"): on one real brain 2,628 of 4,453.
+ * They hold no knowledge their files lack, rank on tool noise, and either
+ * never verify (a glob or directory is not evidence) or go stale.
+ *
+ * Narrow on purpose: promoted from ONE capture, the capture's tool classifies
+ * as a plain type, no fact beyond the command itself, and no error in the
+ * body. Manual memories, consolidated ones, edits, writes, and anything that
+ * recorded a failure are never candidates.
+ */
+export function isPlainCaptureMemory(m: Memory): boolean {
+  if (m.origin === "manual") return false;
+  if (isLegacyJunkMemory(m)) return false; // --legacy owns that shape
+  if ((m.supersedes?.length ?? 0) > 1 || (m.sourceObservationIds?.length ?? 0) > 1) {
+    return false;
+  }
+  const knowsSomething = (m.facts ?? []).some(
+    (f) => typeof f === "string" && f.trim() !== "" && !f.startsWith("ran: "),
+  );
+  if (knowsSomething) return false;
+  const body = (m.content ?? "").replace(/"error"\s*:\s*(null|""|false)/g, "");
+  if (/\b(error|errors|failed|failure|exception|traceback|panic)\b/i.test(body)) return false;
+  // 0.0.6-0.0.9 distillation dropped `facts`; an edit's change survives only
+  // in the body.
+  if (/\bchanged: /.test(body)) return false;
+  const tool = captureTool(m);
+  if (!tool || !PLAIN_CAPTURE_TOOLS.has(normalizeTool(tool))) return false;
+  const command = m.provenance?.command ?? "";
+  if (SHELL_WRITE.test(command.slice(tool.length + 2))) return false;
+  return PLAIN_CAPTURE_TYPES.has(classify(tool, "post_tool_use"));
 }
 
 // Input keys worth recovering from a truncated JSON body, in the order the
@@ -223,4 +304,118 @@ export function registerRepairFunction(sdk: ISdk, kv: StateKV): void {
       return report;
     },
   );
+}
+
+export interface PlainRepairReport {
+  scanned: number;
+  /** Memories matching isPlainCaptureMemory. */
+  plain: number;
+  /** Plain captures whose files still match: current pointers, kept until
+   *  their evidence stops vouching for them. */
+  keptVerified: number;
+  /** Plain captures whose evidence is stale or could never verify. */
+  retirable: number;
+  retired: number;
+  failed: number;
+  applied: boolean;
+  /**
+   * JSONL file holding every retired row in full, written before each
+   * delete, plus its receipt hash: the undo record that survives
+   * `compact --prune-history`. Set only when something was retired.
+   */
+  archive?: string;
+  /** Counts by capture type, so the dry run says what kind of rows go. */
+  byType: Record<string, number>;
+  samples: Array<{ id: string; title: string }>;
+}
+
+export function registerRepairPlainFunction(sdk: ISdk, kv: StateKV): void {
+  sdk.registerFunction(
+    "mem::repair-plain",
+    async (data: { apply?: boolean; limit?: number }): Promise<PlainRepairReport> => {
+      const apply = data?.apply === true;
+      const limit =
+        typeof data?.limit === "number" && data.limit > 0 ? Math.floor(data.limit) : Infinity;
+      const memories = await kv.list<Memory>(KV.memories);
+      const report: PlainRepairReport = {
+        scanned: memories.length,
+        plain: 0,
+        keptVerified: 0,
+        retirable: 0,
+        retired: 0,
+        failed: 0,
+        applied: apply,
+        byType: {},
+        samples: [],
+      };
+      for (const memory of memories) {
+        if (!isPlainCaptureMemory(memory)) continue;
+        report.plain++;
+        // A plain read whose file is unchanged is still a correct pointer to
+        // where something lives ("Read vector-persistence.ts" [verified]);
+        // retiring it measurably worsened search on a real brain. Keep it
+        // until its evidence stops vouching for it, then it goes like the rest.
+        // Verified against the capture's own directory, as recall would.
+        const verdict = classifyProvenance(
+          memory.provenance,
+          memory.provenance?.cwd ?? memory.captureCwd ?? memory.projectPath ?? "/",
+        );
+        if (verdict.status === "verified" || verdict.status === "cosmetic") {
+          report.keptVerified++;
+          continue;
+        }
+        report.retirable++;
+        const type = classify(captureTool(memory), "post_tool_use");
+        report.byType[type] = (report.byType[type] ?? 0) + 1;
+        // Two per type, so the dry run shows every kind it would retire.
+        if (report.samples.length < 8 && report.byType[type]! <= 2) {
+          report.samples.push({ id: memory.id, title: memory.title });
+        }
+        if (!apply || report.retired + report.failed >= limit) continue;
+        // Write-ahead: the full row is on disk before it is deleted.
+        const archive = archivePath();
+        appendArchive(archive, { v: 1, archivedAt: new Date().toISOString(), memory });
+        report.archive = archive;
+        // Retired through mem::forget, so each one leaves a delete receipt.
+        const forgot = await sdk
+          .trigger<
+            { observationId: string },
+            { deleted?: boolean; receipt?: { receiptHash?: string } }
+          >({
+            function_id: "mem::forget",
+            payload: { observationId: memory.id },
+          })
+          .catch(() => null);
+        if (forgot?.deleted) {
+          report.retired++;
+          appendArchive(archive, {
+            v: 1,
+            id: memory.id,
+            retired: true,
+            receiptHash: forgot.receipt?.receiptHash ?? null,
+          });
+        } else {
+          report.failed++;
+        }
+      }
+      if (apply) logger.info("repair-plain: done", { ...report, samples: undefined });
+      return report;
+    },
+  );
+}
+
+function archivePath(): string {
+  return join(getDataDir(), "repair", `plain-${new Date().toISOString().slice(0, 10)}.jsonl`);
+}
+
+/** Append one JSON line to a private (0600, in a 0700 dir) archive file. */
+function appendArchive(path: string, row: unknown): void {
+  const dir = join(path, "..");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  appendFileSync(path, `${JSON.stringify(row)}\n`, { mode: 0o600 });
+  try {
+    chmodSync(path, 0o600);
+  } catch {
+    // best-effort; created 0600 above
+  }
 }

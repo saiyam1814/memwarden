@@ -186,6 +186,7 @@ verifiable-erasure model - is in **[docs/architecture.md](docs/architecture.md)*
 | `memwarden fleet status` | which agents are active in this project right now, and what each is touching |
 | `memwarden forget <id>` | delete with a tamper-evident receipt (`--erase` scrubs the oplog) |
 | `memwarden compact --prune-history` | reclaim disk by dropping superseded payload copies; the hash chain still verifies |
+| `memwarden repair --legacy / --plain` | clean an older brain: re-extract pre-0.0.8 rows, retire plain captures promoted before 0.2.0 (dry run unless `--apply`) |
 | `memwarden export / import` | move your brain between machines |
 | `npm run demo:firewall` | the full firewall arc against a real daemon, byte-scan-proven erasure |
 
