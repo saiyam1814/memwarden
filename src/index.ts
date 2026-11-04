@@ -22,7 +22,8 @@ import {
   setEmbeddingProvider,
   setVectorIndex,
   makeConfiguredVectorIndex,
-  persistVectorIndex,
+  persistVectorIndexForShutdown,
+  warmSearchIndex,
 } from "./functions/index.js";
 import {
   isProxyEnabled,
@@ -39,6 +40,15 @@ import {
   daemonUsesFileLogging,
   startDaemonLogMaintenance,
 } from "./daemon/log.js";
+import { supervisorOf } from "./daemon/service.js";
+import {
+  awaitHolderExit,
+  awaitPortHandoff,
+  exitCodeForAddrInUse,
+  probePort,
+  removeDaemonPidfile,
+  writeDaemonPidfile,
+} from "./daemon/standby.js";
 
 const REST_PORT = parseInt(process.env.MEMWARDEN_REST_PORT ?? "3111", 10);
 const STORE_URL =
@@ -208,6 +218,14 @@ function installSweeps(sdk: Kernel): Array<NodeJS.Timeout> {
 }
 
 async function main(): Promise<void> {
+  // A supervised instance never yields the brain to an unsupervised one: if
+  // another memwarden serves the port, wait (holding no store and rotating no
+  // log) and take over when it exits. See daemon/standby.ts.
+  const supervisor = supervisorOf();
+  if (supervisor) {
+    await awaitPortHandoff(REST_PORT, { afterRelease: () => awaitHolderExit(getDataDir()) });
+  }
+
   // POSIX detached processes and launchd validate/rotate their real file and
   // retain one descriptor for unref'd periodic checks. Windows stays on its
   // v0.1.0 lifecycle; systemd selects journald. Neither enters this path.
@@ -234,6 +252,7 @@ async function main(): Promise<void> {
   const registered = await registerFunctions(sdk, {
     dataDir: getDataDir(),
     requestShutdown: () => requestShutdown(),
+    supervisor,
   });
   console.log(
     `[memwarden] kernel ready — ${registered} function module(s) registered, store=${STORE_URL}`,
@@ -288,16 +307,45 @@ async function main(): Promise<void> {
   const http = startHttpServer(sdk, { port: REST_PORT });
   // Race-safe self-heal: if another memwarden already holds the port, this
   // spawn is redundant — exit cleanly (0) rather than crash, so concurrent
-  // ensureDaemon() callers never surface an error.
+  // ensureDaemon() callers never surface an error. A supervised instance that
+  // lost the race exits for a retry instead: its relaunch waits in standby.
+  // Exit 0 would tell launchd/systemd the job is done and leave the winner
+  // unsupervised.
   http.server.on("error", (err: NodeJS.ErrnoException) => {
     if (err.code === "EADDRINUSE") {
-      console.log(
-        `[memwarden] port ${REST_PORT} already in use — another instance is running; exiting.`,
-      );
-      process.exit(0);
+      void (async () => {
+        const code = exitCodeForAddrInUse(
+          supervisor !== null,
+          supervisor !== null ? await probePort(REST_PORT) : "foreign",
+        );
+        console.log(
+          code !== 0
+            ? `[memwarden] port ${REST_PORT} taken by another memwarden during boot; ` +
+                `exiting so ${supervisor} relaunches this instance in standby.`
+            : `[memwarden] port ${REST_PORT} already in use — another instance is running; exiting.`,
+        );
+        process.exit(code);
+      })();
+      return;
     }
     console.error(`[memwarden] HTTP server error:`, err);
     process.exit(1);
+  });
+  // The pidfile marks this process as the brain's daemon from the moment it
+  // holds the port until its store is closed, so a standby successor waits
+  // for the process to exit, not just for the port (see daemon/standby.ts).
+  let searchWarmupTimer: NodeJS.Timeout | undefined;
+  http.server.once("listening", () => {
+    writeDaemonPidfile(getDataDir());
+    searchWarmupTimer = setTimeout(() => {
+      void warmSearchIndex(new StateKV(sdk)).catch((err: unknown) => {
+        console.warn(
+          `[memwarden] search index warmup failed — first recall will retry:`,
+          err instanceof Error ? err.message : err,
+        );
+      });
+    }, 250);
+    searchWarmupTimer.unref();
   });
   console.log(
     `[memwarden] REST API: http://127.0.0.1:${REST_PORT}/memwarden/*`,
@@ -333,6 +381,7 @@ async function main(): Promise<void> {
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    if (searchWarmupTimer) clearTimeout(searchWarmupTimer);
     daemonLogMaintenance?.stop();
     console.log(`\n[memwarden] Shutting down...`);
     for (const t of timers) clearInterval(t);
@@ -342,11 +391,9 @@ async function main(): Promise<void> {
     // them explicitly before Node tears down native mutexes; an immediate
     // process.exit here used to crash after an otherwise-clean `down`.
     if (embeddingWarmup) await embeddingWarmup.catch(() => undefined);
-    // Save the vector index before tearing it down. It was only ever persisted
-    // after a cold rebuild, so every restart (upgrade, reboot, `down`)
-    // re-embedded everything captured since the daemon started: weeks of
-    // captures on a long-lived daemon.
-    await persistVectorIndex(new StateKV(sdk)).catch(() => false);
+    // Never let a pre-rebuild or mid-backfill process replace the last complete
+    // checkpoint with its partial in-memory index.
+    await persistVectorIndexForShutdown(new StateKV(sdk)).catch(() => false);
     const provider = getEmbeddingProvider();
     if (provider?.dispose) {
       await Promise.resolve(provider.dispose()).catch((err: unknown) => {
@@ -359,6 +406,7 @@ async function main(): Promise<void> {
     setEmbeddingProvider(null);
     setVectorIndex(null);
     await sdk.shutdown();
+    removeDaemonPidfile(getDataDir());
     process.exitCode = 0;
   };
   requestShutdown = () => void shutdown();

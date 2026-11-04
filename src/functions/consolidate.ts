@@ -617,7 +617,7 @@ async function distillMembersUnlocked(
   // refresh unexpectedly fails, keep every source and retry the whole handoff.
   try {
     idx.remove(memId);
-    idx.add(memoryToObservation(memory));
+    idx.add(memoryToObservation(memory), "memory");
     vectorIndexRemove(memId);
     await vectorIndexAddGuarded(
       memId,

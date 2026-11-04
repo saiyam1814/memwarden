@@ -9,7 +9,7 @@
 
 import type { ApiRequest, ISdk } from "../kernel/index.js";
 import type { HookPayload } from "../functions/types.js";
-import { getSecret, getQuantBits, getDataDir } from "../functions/config.js";
+import { getSecret, getDataDir } from "../functions/config.js";
 import { statSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalizePath } from "../functions/paths.js";
@@ -22,6 +22,7 @@ import type { RememberMemoryInput, RememberMemoryResult } from "../functions/ind
 import { listActiveAgents } from "../functions/fleet.js";
 import { summarizeFirewall } from "../functions/firewall-stats.js";
 import { QuantizedVectorIndex } from "../functions/quantized-vector-index.js";
+import { TurbovecBackend } from "../functions/turbovec-backend.js";
 import { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { OplogChainBrokenError } from "../state/store.js";
@@ -96,6 +97,8 @@ export interface HostHeartbeat {
 export interface ApiLifecycle {
   dataDir: string;
   requestShutdown(): void;
+  /** Which OS supervisor launched this daemon; null = unsupervised. */
+  supervisor?: "launchd" | "systemd" | null;
 }
 
 export function registerApiTriggers(
@@ -833,6 +836,15 @@ export function registerApiTriggers(
         firewall: await summarizeFirewall(kv, 30).catch(() => null),
         lastCompact: await kv.get(KV.maintenance, "compact").catch(() => null),
       };
+      // Only the real daemon has a lifecycle. `status` uses this to say when
+      // the brain runs outside launchd/systemd (no restart if it crashes).
+      if (lifecycle) {
+        body["daemon"] = {
+          pid: process.pid,
+          supervisor: lifecycle.supervisor ?? null,
+          dataDir: lifecycle.dataDir,
+        };
+      }
       if (vec instanceof QuantizedVectorIndex) {
         const { dims, paddedDims, bits, rescoreDepth } = vec.params;
         const fullBytes = dims * 4;
@@ -840,11 +852,22 @@ export function registerApiTriggers(
         const storedBytes = codeBytes + (rescoreDepth > 0 ? fullBytes : 0);
         body["compression"] = {
           algorithm: "TurboQuant",
-          bits: getQuantBits(),
+          bits,
           fullBytesPerVector: fullBytes,
           storedBytesPerVector: storedBytes,
           ratio: Math.round((fullBytes / storedBytes) * 10) / 10,
           rescore: rescoreDepth,
+        };
+      } else if (vec instanceof TurbovecBackend) {
+        const fullBytes = vec.dims * 4;
+        const storedBytes = Math.ceil((vec.dims * vec.bits) / 8) + 4;
+        body["compression"] = {
+          algorithm: "TurboQuant",
+          bits: vec.bits,
+          fullBytesPerVector: fullBytes,
+          storedBytesPerVector: storedBytes,
+          ratio: Math.round((fullBytes / storedBytes) * 10) / 10,
+          rescore: 0,
         };
       } else {
         body["compression"] = null;
@@ -912,6 +935,34 @@ export function registerApiTriggers(
     function_id: "api::repair-legacy",
     config: {
       api_path: "/memwarden/repair/legacy",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  // --- POST /memwarden/repair/plain ---------------------------------
+  // Retire memories the pre-0.2.0 retention sweep promoted from plain
+  // commands, searches, and reads. Dry run unless apply:true. Auth'd:
+  // applying forgets memories (each with a delete receipt).
+  sdk.registerFunction(
+    "api::repair-plain",
+    async (req: ApiRequest<{ apply?: boolean; limit?: number }>): Promise<Response> => {
+      const body = (req.body ?? {}) as { apply?: boolean; limit?: number };
+      const report = await sdk.trigger({
+        function_id: "mem::repair-plain",
+        payload: {
+          apply: body.apply === true,
+          ...(typeof body.limit === "number" ? { limit: body.limit } : {}),
+        },
+      });
+      return { status_code: 200, body: report };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::repair-plain",
+    config: {
+      api_path: "/memwarden/repair/plain",
       http_method: "POST",
       middleware_function_ids: ["middleware::api-auth"],
     },

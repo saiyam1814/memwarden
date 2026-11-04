@@ -425,7 +425,7 @@ export async function importCanonRecord(
   await kv.set(KV.memories, memory.id, memory);
   const index = getSearchIndex();
   index.remove(memory.id);
-  index.add(memoryToObservation(memory));
+  index.add(memoryToObservation(memory), "memory");
   vectorIndexRemove(memory.id);
   await vectorIndexAddGuarded(
     memory.id,

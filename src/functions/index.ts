@@ -12,7 +12,7 @@ import { registerSearchFunction } from "./search.js";
 import { registerForgetFunction } from "./forget.js";
 import { registerConsolidateFunction } from "./consolidate.js";
 import { registerDoctorFunction } from "./doctor.js";
-import { registerRepairFunction } from "./repair.js";
+import { registerRepairFunction, registerRepairPlainFunction } from "./repair.js";
 import { registerDejaFixFunctions } from "./dejafix.js";
 import { registerReceiptFunction } from "./receipt.js";
 import { registerWhyFunction } from "./why.js";
@@ -94,6 +94,8 @@ export {
   rebuildIndex,
   vectorIndexAddGuarded,
   vectorIndexAddBatchGuarded,
+  persistVectorIndexForShutdown,
+  warmSearchIndex,
   makeVectorIndex,
   makeConfiguredVectorIndex,
 } from "./search.js";
@@ -144,6 +146,7 @@ export function registerCoreFunctions(
   registerConsolidateFunction(sdk, kv);
   registerDoctorFunction(sdk, kv);
   registerRepairFunction(sdk, kv);
+  registerRepairPlainFunction(sdk, kv);
   registerDejaFixFunctions(sdk, kv);
   registerReceiptFunction(sdk, kv);
   registerWhyFunction(sdk, kv);

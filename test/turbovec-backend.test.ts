@@ -17,7 +17,16 @@ import {
   type NativeTurbovecIndex,
   type NativeSearchHits,
 } from "../src/functions/turbovec-backend.js";
-import { makeConfiguredVectorIndex } from "../src/functions/search.js";
+import {
+  makeConfiguredVectorIndex,
+  setVectorIndex,
+} from "../src/functions/search.js";
+import {
+  __resetKernelSingleton,
+  registerWorker,
+} from "../src/kernel/index.js";
+import { StoreMemory } from "../src/state/store-memory.js";
+import { registerApiTriggers } from "../src/triggers/api.js";
 
 // --- mock native module ----------------------------------------------------
 
@@ -139,6 +148,8 @@ afterEach(() => {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
   }
+  setVectorIndex(null);
+  __resetKernelSingleton();
   rmSync(dataDir, { recursive: true, force: true });
 });
 
@@ -310,5 +321,34 @@ describe("fallback logic", () => {
     process.env.MEMWARDEN_QUANT_VECTOR = "true";
     const idx = await makeConfiguredVectorIndex(384);
     expect(idx.backendLabel).toBe("typescript/turboquant-4bit");
+  });
+});
+
+describe("native backend observability", () => {
+  it("reports the active turbovec compression ratio through stats", async () => {
+    __resetKernelSingleton();
+    const sdk = registerWorker(
+      "in-process",
+      { workerName: "memwarden-turbovec-stats" },
+      { store: new StoreMemory() },
+    );
+    setVectorIndex(new TurbovecBackend(mockModule(), 384, 4));
+    registerApiTriggers(sdk);
+
+    const response = await sdk.invokeHttp("api::stats", {
+      headers: {},
+      query_params: {},
+      body: {},
+    });
+    expect(response.status_code).toBe(200);
+    expect((response.body as { compression: unknown }).compression).toEqual({
+      algorithm: "TurboQuant",
+      bits: 4,
+      fullBytesPerVector: 1536,
+      storedBytesPerVector: 196,
+      ratio: 7.8,
+      rescore: 0,
+    });
+    await sdk.shutdown();
   });
 });

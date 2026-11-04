@@ -43,7 +43,8 @@ function mentions(normalized: string, word: string): boolean {
   );
 }
 
-function classify(toolName: string | undefined, hookType: string): ObservationType {
+/** Observation type for a tool call: the one rule capture, retention and repair share. */
+export function classify(toolName: string | undefined, hookType: string): ObservationType {
   if (hookType === "post_tool_failure") return "error";
   if (hookType === "prompt_submit" || hookType === "user_prompt") return "conversation";
   if (hookType === "subagent_stop" || hookType === "task_completed") return "subagent";
