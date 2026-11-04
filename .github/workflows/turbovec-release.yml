@@ -14,6 +14,13 @@ on:
     tags: ["turbovec-v*"]
   workflow_dispatch: {}
 
+permissions:
+  contents: read
+
+concurrency:
+  group: turbovec-release-${{ github.ref }}
+  cancel-in-progress: false
+
 defaults:
   run:
     working-directory: native/turbovec-node
@@ -46,16 +53,20 @@ jobs:
             buildImage: node:20-bullseye
     runs-on: ${{ matrix.host }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 20
-      - uses: dtolnay/rust-toolchain@stable
+          package-manager-cache: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
         with:
           workspaces: native/turbovec-node
+          lookup-only: true
       # Linux: build in the old-glibc napi-rs container so the .node runs on a
       # broad range of distros (bullseye glibc, well below node:20-slim's).
       # openblas-src compiles OpenBLAS in-container, statically linked, so the
@@ -63,8 +74,11 @@ jobs:
       - name: build binding (linux — portable old-glibc container)
         if: contains(matrix.target, 'linux')
         working-directory: .
+        env:
+          BUILD_IMAGE: ${{ matrix.buildImage }}
+          TARGET: ${{ matrix.target }}
         run: |
-          docker run --rm -v "$PWD":/w -w /w/native/turbovec-node ${{ matrix.buildImage }} \
+          docker run --rm -e TARGET="$TARGET" -v "$PWD":/w -w /w/native/turbovec-node "$BUILD_IMAGE" \
             bash -lc '
               set -e
               # node:20-bullseye has node + build tools + curl; add gfortran for
@@ -75,14 +89,16 @@ jobs:
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
               . "$HOME/.cargo/env"
               npm ci
-              npx napi build --release --platform --target ${{ matrix.target }}
+              npx napi build --release --platform --target "$TARGET"
             '
       # macOS: build natively (Accelerate is in the OS).
       - name: build binding (macos)
         if: ${{ !contains(matrix.target, 'linux') }}
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
           npm ci
-          npx napi build --release --platform --target ${{ matrix.target }}
+          npx napi build --release --platform --target "$TARGET"
       # Per-platform gate: the freshly built binding must pass memwarden's
       # real native integration tests on THIS platform before it ships.
       - name: test the binding on this platform
@@ -106,7 +122,7 @@ jobs:
         run: |
           docker run --rm -v "$PWD":/pkg -w /pkg node:20-slim \
             node -e "const b = require('./index.js'); const k = Object.keys(b); if (k.length === 0) throw new Error('no exports'); console.log('clean-container load OK:', k.join(','));"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: binding-${{ matrix.target }}
           path: native/turbovec-node/*.node
