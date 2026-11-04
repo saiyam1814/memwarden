@@ -339,7 +339,7 @@ export async function rememberMemory(
     }
     const observation = memoryToObservation(memory);
     getSearchIndex().remove(id);
-    getSearchIndex().add(observation);
+    getSearchIndex().add(observation, "memory");
     vectorIndexRemove(id);
     await vectorIndexAddGuarded(
       id,

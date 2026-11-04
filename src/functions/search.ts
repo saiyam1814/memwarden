@@ -69,23 +69,84 @@ let coldRebuildDone = false;
 // next hook search added yet another rebuild (observed live: 40+ minutes
 // unresponsive at 280% CPU after a restart).
 let coldRebuildInFlight: Promise<void> | null = null;
+let coldRebuildBackground = false;
+let coldRebuildReadable = false;
 // Embedding a large post-restart backlog runs here, in the background, one at
 // a time, so searches are served (keyword + whatever vectors exist) meanwhile.
 let vectorBackfill: Promise<void> | null = null;
+// A shutdown checkpoint is safe only after the persisted index has been
+// reconciled with KV. Before that, saving could replace a complete checkpoint
+// with a partial post-boot index; afterwards a partial snapshot is valid
+// recovery progress because the next walk deterministically fills its gaps.
+let vectorCheckpointReady = false;
+let vectorBackfillCancelled = false;
+let foregroundEmbeddingRequests = 0;
+
+type EmbeddingPriority = 0 | 1 | 2;
+interface EmbeddingTask {
+  priority: EmbeddingPriority;
+  sequence: number;
+  run: () => Promise<unknown>;
+  resolve: (value: unknown) => void;
+  reject: (error: unknown) => void;
+}
+const embeddingQueue: EmbeddingTask[] = [];
+let embeddingRunning = false;
+let embeddingSequence = 0;
+const MAX_NON_QUERY_EMBEDDING_QUEUE = 128;
+
+function drainEmbeddingQueue(): void {
+  if (embeddingRunning) return;
+  const task = embeddingQueue.shift();
+  if (!task) return;
+  embeddingRunning = true;
+  void task
+    .run()
+    .then(task.resolve, task.reject)
+    .finally(() => {
+      embeddingRunning = false;
+      drainEmbeddingQueue();
+    });
+}
+
+function scheduleEmbedding<T>(priority: EmbeddingPriority, run: () => Promise<T>): Promise<T> {
+  if (priority > 0 && embeddingQueue.length >= MAX_NON_QUERY_EMBEDDING_QUEUE) {
+    return Promise.reject(new Error("embedding queue is saturated"));
+  }
+  return new Promise<T>((resolve, reject) => {
+    embeddingQueue.push({
+      priority,
+      sequence: embeddingSequence++,
+      run,
+      resolve: (value) => resolve(value as T),
+      reject,
+    });
+    embeddingQueue.sort(
+      (left, right) => left.priority - right.priority || left.sequence - right.sequence,
+    );
+    drainEmbeddingQueue();
+  });
+}
 
 // A backlog this small is embedded before the first search returns, so a
 // small brain (and every test corpus) behaves exactly as before.
 const INLINE_BACKFILL_MAX = 256;
-// Background chunks stay small: each chunk runs synchronously on the main
-// thread, so its size bounds how long a hook can wait behind the backfill.
-// Measured on a 44,876-doc backlog: chunks of 16 held requests ~1s (past the
-// 800ms capture deadline); chunks of 4 keep livez ~0.25s and search ~0.7s.
-const BACKGROUND_EMBED_BATCH = 4;
+// The local ONNX call can occupy Node's event loop until a whole batch returns,
+// so recovery uses one document per non-preemptible unit. The priority queue
+// can then admit recall before the next unit instead of making an interactive
+// request wait behind several documents of background inference.
+const BACKGROUND_EMBED_BATCH = 1;
+const BACKGROUND_EMBED_IDLE_MS = 50;
 
 /** Test-only: simulate a fresh process (production restarts reset this). */
 export function __resetColdRebuildForTests(): void {
   coldRebuildDone = false;
   coldRebuildInFlight = null;
+  coldRebuildBackground = false;
+  coldRebuildReadable = false;
+  vectorCheckpointReady = false;
+  vectorBackfillCancelled = false;
+  foregroundEmbeddingRequests = 0;
 }
 
 /** Test-only: resolves once any background vector backfill has finished. */
@@ -101,10 +162,36 @@ export function getSearchIndex(): SearchIndex {
 
 export function setVectorIndex(idx: VectorIndexLike | null): void {
   vectorIndex = idx;
+  vectorCheckpointReady = false;
+  if (idx !== null) vectorBackfillCancelled = false;
 }
 
 export function getVectorIndex(): VectorIndexLike | null {
   return vectorIndex;
+}
+
+/** Preserve the last complete checkpoint when shutdown lands before a cold
+ * rebuild or while a vector backlog is still being embedded. */
+export async function persistVectorIndexForShutdown(kv: StateKV): Promise<boolean> {
+  vectorBackfillCancelled = true;
+  const settle = async (work: Promise<void> | null): Promise<void> => {
+    if (!work) return;
+    await Promise.race([
+      work.catch(() => undefined),
+      new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+    ]);
+  };
+  await settle(coldRebuildInFlight);
+  await settle(vectorBackfill);
+  if (!vectorCheckpointReady) {
+    logger.info("vector-persistence: skipped incomplete shutdown checkpoint", {
+      coldRebuildDone,
+      backfillInFlight: vectorBackfill !== null,
+      vectors: vectorIndex?.size ?? 0,
+    });
+    return false;
+  }
+  return persistVectorIndex(kv);
 }
 
 /**
@@ -180,12 +267,16 @@ export async function vectorIndexAddGuarded(
   sessionId: string,
   text: string,
   context: { kind: "memory" | "observation" | "synthetic"; logId: string },
+  priority: "foreground" | "background" = "foreground",
 ): Promise<boolean> {
   const vi = vectorIndex;
   const ep = currentEmbeddingProvider;
   if (!vi || !ep) return false;
+  foregroundEmbeddingRequests++;
   try {
-    const embedding = await ep.embed(clipEmbedInput(text));
+    const embedding = await scheduleEmbedding(priority === "background" ? 2 : 1, () =>
+      ep.embed(clipEmbedInput(text)),
+    );
     if (embedding.length !== ep.dimensions) {
       logger.warn("vector-index add: dimension mismatch — skipping", {
         kind: context.kind,
@@ -206,6 +297,8 @@ export async function vectorIndexAddGuarded(
       error: err instanceof Error ? err.message : String(err),
     });
     return false;
+  } finally {
+    foregroundEmbeddingRequests--;
   }
 }
 
@@ -235,7 +328,11 @@ export const EMBED_BATCH_SIZE = 64;
  */
 export async function vectorIndexAddBatchGuarded(
   docs: PendingVectorDoc[],
-  opts?: { batchSize?: number; skipExisting?: boolean },
+  opts?: {
+    batchSize?: number;
+    skipExisting?: boolean;
+    background?: boolean;
+  },
 ): Promise<number> {
   const vi = vectorIndex;
   const ep = currentEmbeddingProvider;
@@ -243,6 +340,13 @@ export async function vectorIndexAddBatchGuarded(
   const batchSize = opts?.batchSize ?? EMBED_BATCH_SIZE;
   let added = 0;
   for (let start = 0; start < docs.length; start += batchSize) {
+    if (opts?.background === true) {
+      if (vectorBackfillCancelled) break;
+      while (foregroundEmbeddingRequests > 0 && !vectorBackfillCancelled) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      }
+      if (vectorBackfillCancelled) break;
+    }
     // A background backfill runs alongside live captures: a doc that got its
     // vector meanwhile (re-indexed handoff, re-add) must not be added twice.
     const chunk = docs
@@ -251,7 +355,9 @@ export async function vectorIndexAddBatchGuarded(
     if (chunk.length === 0) continue;
     let embeddings: Float32Array[] | null = null;
     try {
-      embeddings = await ep.embedBatch(chunk.map((d) => clipEmbedInput(d.text)));
+      embeddings = await scheduleEmbedding(opts?.background === true ? 2 : 1, () =>
+        ep.embedBatch(chunk.map((d) => clipEmbedInput(d.text))),
+      );
       if (embeddings.length !== chunk.length) {
         logger.warn(
           "vector-index batch add: row-count mismatch — falling back to per-doc embeds for this chunk",
@@ -274,7 +380,15 @@ export async function vectorIndexAddBatchGuarded(
       // Per-doc fallback preserves the exact old semantics: each doc soft-
       // fails independently, a downed embedder never breaks the rebuild.
       for (const d of chunk) {
-        if (await vectorIndexAddGuarded(d.id, d.sessionId, d.text, d.context)) {
+        if (
+          await vectorIndexAddGuarded(
+            d.id,
+            d.sessionId,
+            d.text,
+            d.context,
+            opts?.background === true ? "background" : "foreground",
+          )
+        ) {
           added++;
         }
       }
@@ -295,6 +409,11 @@ export async function vectorIndexAddBatchGuarded(
       }
       vi.add(d.id, d.sessionId, embedding);
       added++;
+    }
+    if (opts?.background === true && start + batchSize < docs.length) {
+      // A timer window lets HTTP handlers acquire the shared embedding model
+      // before recovery starts its next batch.
+      await new Promise<void>((resolve) => setTimeout(resolve, BACKGROUND_EMBED_IDLE_MS));
     }
   }
   return added;
@@ -326,8 +445,13 @@ export async function rebuildIndex(
  */
 async function walkIndex(
   kv: StateKV,
-  opts?: { preserveVectorIndex?: boolean },
-): Promise<{ count: number; pending: PendingVectorDoc[]; liveIds: Set<string> | null }> {
+  opts?: { preserveVectorIndex?: boolean; cancellable?: boolean },
+): Promise<{
+  count: number;
+  pending: PendingVectorDoc[];
+  liveIds: Set<string> | null;
+  cancelled: boolean;
+}> {
   const preserveVectors = opts?.preserveVectorIndex === true;
   const idx = getSearchIndex();
   idx.clear();
@@ -341,6 +465,13 @@ async function walkIndex(
   const pending: PendingVectorDoc[] = [];
 
   let count = 0;
+  let lastYieldAt = performance.now();
+  const yieldIfNeeded = async (): Promise<boolean> => {
+    if (performance.now() - lastYieldAt < 8) return false;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    lastYieldAt = performance.now();
+    return opts?.cancellable === true && vectorBackfillCancelled;
+  };
 
   // Memories live in their own KV scope outside per-session observation
   // scopes, so they need a separate walk.
@@ -350,7 +481,8 @@ async function walkIndex(
       if (!isMemoryRecallable(memory)) continue;
       if (!memory.title || !memory.content) continue;
       const observation = memoryToObservation(memory);
-      idx.add(observation);
+      idx.add(observation, "memory");
+      coldRebuildReadable = true;
       liveIds?.add(memory.id);
       if (!preserveVectors || !vectorIndex?.has(memory.id)) {
         pending.push({
@@ -361,6 +493,9 @@ async function walkIndex(
         });
       }
       count++;
+      if (await yieldIfNeeded()) {
+        return { count, pending, liveIds, cancelled: true };
+      }
     }
   } catch (err) {
     logger.warn("rebuildIndex: failed to load memories", {
@@ -370,9 +505,11 @@ async function walkIndex(
 
   const sessions = await kv.list<Session>(KV.sessions);
   if (sessions.length) {
-    const obsPerSession: CompressedObservation[][] = [];
     const failedSessions: string[] = [];
     for (let batch = 0; batch < sessions.length; batch += 10) {
+      if (opts?.cancellable === true && vectorBackfillCancelled) {
+        return { count, pending, liveIds, cancelled: true };
+      }
       const chunk = sessions.slice(batch, batch + 10);
       const results = await Promise.all(
         chunk.map(async (s) => {
@@ -384,46 +521,58 @@ async function walkIndex(
           }
         }),
       );
-      obsPerSession.push(...results);
+      for (const observations of results) {
+        for (const obs of observations) {
+          if (obs.title && obs.narrative) {
+            idx.add(obs);
+            coldRebuildReadable = true;
+            liveIds?.add(obs.id);
+            if (!preserveVectors || !vectorIndex?.has(obs.id)) {
+              pending.push({
+                id: obs.id,
+                sessionId: obs.sessionId,
+                text: obs.title + " " + obs.narrative,
+                context: { kind: "observation", logId: obs.id },
+              });
+            }
+            count++;
+            if (await yieldIfNeeded()) {
+              return { count, pending, liveIds, cancelled: true };
+            }
+          }
+        }
+      }
     }
     if (failedSessions.length > 0) {
       logger.warn("rebuildIndex: failed to load observations for sessions", {
         failedSessions,
       });
     }
-    for (const observations of obsPerSession) {
-      for (const obs of observations) {
-        if (obs.title && obs.narrative) {
-          idx.add(obs);
-          liveIds?.add(obs.id);
-          if (!preserveVectors || !vectorIndex?.has(obs.id)) {
-            pending.push({
-              id: obs.id,
-              sessionId: obs.sessionId,
-              text: obs.title + " " + obs.narrative,
-              context: { kind: "observation", logId: obs.id },
-            });
-          }
-          count++;
-        }
-      }
-    }
   }
 
-  return { count, pending, liveIds };
+  return { count, pending, liveIds, cancelled: false };
 }
 
 /** Run (or join) this process's cold rebuild. See coldRebuildInFlight. */
-function ensureColdRebuild(kv: StateKV): Promise<void> {
+function ensureColdRebuild(kv: StateKV, background = false): Promise<void> {
   if (!coldRebuildInFlight) {
-    coldRebuildInFlight = runColdRebuild(kv).finally(() => {
+    coldRebuildBackground = background;
+    coldRebuildReadable = false;
+    coldRebuildInFlight = runColdRebuild(kv, background).finally(() => {
       coldRebuildInFlight = null;
+      coldRebuildBackground = false;
     });
   }
   return coldRebuildInFlight;
 }
 
-async function runColdRebuild(kv: StateKV): Promise<void> {
+/** Start the once-per-process index recovery before the first user recall. */
+export function warmSearchIndex(kv: StateKV): Promise<void> {
+  if (coldRebuildDone) return Promise.resolve();
+  return ensureColdRebuild(kv, true);
+}
+
+async function runColdRebuild(kv: StateKV, background: boolean): Promise<void> {
   if (vectorBackfill) await vectorBackfill; // never two backfills at once
   // Restore persisted quantized codes first (no-op unless a valid blob
   // exists), then rebuild BM25. With a successful restore the vector side runs
@@ -431,11 +580,17 @@ async function runColdRebuild(kv: StateKV): Promise<void> {
   // afterwards the reconciled index is persisted again so the blob converges
   // with KV.
   const restoredVectors = await loadVectorIndex(kv);
-  const { count, pending, liveIds } = await walkIndex(kv, {
+  const { count, pending, liveIds, cancelled } = await walkIndex(kv, {
     preserveVectorIndex: restoredVectors,
+    cancellable: background,
   });
+  if (cancelled || (background && vectorBackfillCancelled)) {
+    logger.info("Search index recovery paused for shutdown", { entries: count });
+    return;
+  }
   evictGhostVectors(liveIds);
   coldRebuildDone = true;
+  vectorCheckpointReady = true;
   if (pending.length <= INLINE_BACKFILL_MAX) {
     await vectorIndexAddBatchGuarded(pending);
     const persisted = await persistVectorIndex(kv);
@@ -451,7 +606,12 @@ async function runColdRebuild(kv: StateKV): Promise<void> {
     const added = await vectorIndexAddBatchGuarded(pending, {
       batchSize: BACKGROUND_EMBED_BATCH,
       skipExisting: true,
+      background: true,
     });
+    if (vectorBackfillCancelled) {
+      logger.info("Vector backlog paused for shutdown", { added });
+      return;
+    }
     const persisted = await persistVectorIndex(kv);
     logger.info("Vector backlog embedded", { added, persisted });
   })()
@@ -607,10 +767,7 @@ export async function buildScopedAllowedIds(
   // not let that implementation detail make the optimization narrower than
   // the correctness post-filter: memory identity is resolved there from the
   // Memory row + all source sessions.
-  const memories = await kv.list<Memory>(KV.memories).catch(() => [] as Memory[]);
-  for (const memory of memories) {
-    if (isMemoryRecallable(memory)) allowed.add(memory.id);
-  }
+  for (const memoryId of idx.memoryIds()) allowed.add(memoryId);
   return { allowed, sessions };
 }
 
@@ -1006,7 +1163,14 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       // (The size check stays as an OR for in-process restarts in tests that
       // clear the index directly.)
       if (!coldRebuildDone || idx.size === 0) {
-        await ensureColdRebuild(kv);
+        const rebuild = ensureColdRebuild(kv);
+        if (coldRebuildBackground) {
+          while (!coldRebuildDone && !coldRebuildReadable && coldRebuildInFlight) {
+            await new Promise<void>((resolve) => setTimeout(resolve, 10));
+          }
+        } else {
+          await rebuild;
+        }
       }
 
       // Inclusion filters over-fetch so a run of excluded high-ranking hits
@@ -1038,7 +1202,7 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       // Sessions preloaded by the scoped allowlist build; seeds the
       // per-candidate session cache so the post-filter doesn't re-read them.
       let preloadedSessions: Session[] | null = null;
-      if (filtering && isScopedVectorSearchEnabled()) {
+      if (filtering && isScopedVectorSearchEnabled() && coldRebuildDone) {
         const scoped = await buildScopedAllowedIds(kv, idx, {
           projectFilter,
           cwdFilter,
@@ -1098,7 +1262,13 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       const ep = currentEmbeddingProvider;
       if (rank === "relevance" && vIdx && ep && vIdx.size > 0) {
         try {
-          const qVec = await ep.embed(clipEmbedInput(query));
+          foregroundEmbeddingRequests++;
+          let qVec: Float32Array;
+          try {
+            qVec = await scheduleEmbedding(0, () => ep.embed(clipEmbedInput(query)));
+          } finally {
+            foregroundEmbeddingRequests--;
+          }
           if (qVec.length === ep.dimensions) {
             // The vector stream uses the same allowlist; falls back to the
             // global scan when the backend lacks searchAllowed.

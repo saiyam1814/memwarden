@@ -94,6 +94,8 @@ export {
   rebuildIndex,
   vectorIndexAddGuarded,
   vectorIndexAddBatchGuarded,
+  persistVectorIndexForShutdown,
+  warmSearchIndex,
   makeVectorIndex,
   makeConfiguredVectorIndex,
 } from "./search.js";

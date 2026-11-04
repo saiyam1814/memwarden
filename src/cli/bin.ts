@@ -2305,7 +2305,7 @@ async function status(rest: string[]): Promise<void> {
   let daemonUp = false;
   try {
     const res = await fetch(`${DAEMON_URL}/memwarden/livez`, {
-      signal: AbortSignal.timeout(1500),
+      signal: AbortSignal.timeout(5000),
     });
     daemonUp = res.ok;
   } catch {
@@ -2315,7 +2315,7 @@ async function status(rest: string[]): Promise<void> {
     try {
       const res = await fetch(`${DAEMON_URL}/memwarden/stats`, {
         headers: authHeaders(),
-        signal: AbortSignal.timeout(2500),
+        signal: AbortSignal.timeout(5000),
       });
       if (res.ok) stats = (await res.json()) as StatsBody;
     } catch {
@@ -2391,7 +2391,7 @@ async function status(rest: string[]): Promise<void> {
   console.log(`\nmemwarden status  (v${version})\n`);
   console.log(
     `  daemon    ${daemonUp ? "✓ running" : "✗ not running"}  ${DAEMON_URL}  brain: ${dataDir}` +
-      (daemonUp && !stats ? "  (stats unavailable — secret mismatch?)" : ""),
+      (daemonUp && !stats ? "  (stats unavailable — daemon busy or secret mismatch?)" : ""),
   );
   const svcNow = installedService();
   if (svcNow && !svcNow.programOk && serviceServes(svcNow, DAEMON_URL, dataDir)) {
@@ -2411,7 +2411,7 @@ async function status(rest: string[]): Promise<void> {
   }
   if (stats) {
     console.log(
-      `  memory    ${stats.observations ?? 0} observations, ${stats.memories ?? 0} memories, ${stats.sessions ?? 0} sessions, ${stats.vectors ?? 0} vectors`,
+      `  memory    ${stats.observations ?? 0} captures, ${stats.memories ?? 0} memories, ${stats.sessions ?? 0} sessions, ${stats.vectors ?? 0} vectors`,
     );
     // Self-diagnosis. A store with thousands of raw captures and zero distilled
     // memories is BROKEN, not idle — that exact state (15,771 observations, 0

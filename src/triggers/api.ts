@@ -9,7 +9,7 @@
 
 import type { ApiRequest, ISdk } from "../kernel/index.js";
 import type { HookPayload } from "../functions/types.js";
-import { getSecret, getQuantBits, getDataDir } from "../functions/config.js";
+import { getSecret, getDataDir } from "../functions/config.js";
 import { statSync } from "node:fs";
 import { join } from "node:path";
 import { canonicalizePath } from "../functions/paths.js";
@@ -22,6 +22,7 @@ import type { RememberMemoryInput, RememberMemoryResult } from "../functions/ind
 import { listActiveAgents } from "../functions/fleet.js";
 import { summarizeFirewall } from "../functions/firewall-stats.js";
 import { QuantizedVectorIndex } from "../functions/quantized-vector-index.js";
+import { TurbovecBackend } from "../functions/turbovec-backend.js";
 import { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { OplogChainBrokenError } from "../state/store.js";
@@ -851,11 +852,22 @@ export function registerApiTriggers(
         const storedBytes = codeBytes + (rescoreDepth > 0 ? fullBytes : 0);
         body["compression"] = {
           algorithm: "TurboQuant",
-          bits: getQuantBits(),
+          bits,
           fullBytesPerVector: fullBytes,
           storedBytesPerVector: storedBytes,
           ratio: Math.round((fullBytes / storedBytes) * 10) / 10,
           rescore: rescoreDepth,
+        };
+      } else if (vec instanceof TurbovecBackend) {
+        const fullBytes = vec.dims * 4;
+        const storedBytes = Math.ceil((vec.dims * vec.bits) / 8) + 4;
+        body["compression"] = {
+          algorithm: "TurboQuant",
+          bits: vec.bits,
+          fullBytesPerVector: fullBytes,
+          storedBytesPerVector: storedBytes,
+          ratio: Math.round((fullBytes / storedBytes) * 10) / 10,
+          rescore: 0,
         };
       } else {
         body["compression"] = null;

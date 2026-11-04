@@ -1,6 +1,6 @@
 {
   "name": "memwarden",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Memory for AI coding agents that checks itself against your code. A memory whose source files changed is refused, not recalled. Local, shared by all your agents, tamper-evident.",
   "type": "module",
   "engines": {

@@ -22,7 +22,8 @@ import {
   setEmbeddingProvider,
   setVectorIndex,
   makeConfiguredVectorIndex,
-  persistVectorIndex,
+  persistVectorIndexForShutdown,
+  warmSearchIndex,
 } from "./functions/index.js";
 import {
   isProxyEnabled,
@@ -333,7 +334,19 @@ async function main(): Promise<void> {
   // The pidfile marks this process as the brain's daemon from the moment it
   // holds the port until its store is closed, so a standby successor waits
   // for the process to exit, not just for the port (see daemon/standby.ts).
-  http.server.once("listening", () => writeDaemonPidfile(getDataDir()));
+  let searchWarmupTimer: NodeJS.Timeout | undefined;
+  http.server.once("listening", () => {
+    writeDaemonPidfile(getDataDir());
+    searchWarmupTimer = setTimeout(() => {
+      void warmSearchIndex(new StateKV(sdk)).catch((err: unknown) => {
+        console.warn(
+          `[memwarden] search index warmup failed — first recall will retry:`,
+          err instanceof Error ? err.message : err,
+        );
+      });
+    }, 250);
+    searchWarmupTimer.unref();
+  });
   console.log(
     `[memwarden] REST API: http://127.0.0.1:${REST_PORT}/memwarden/*`,
   );
@@ -368,6 +381,7 @@ async function main(): Promise<void> {
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    if (searchWarmupTimer) clearTimeout(searchWarmupTimer);
     daemonLogMaintenance?.stop();
     console.log(`\n[memwarden] Shutting down...`);
     for (const t of timers) clearInterval(t);
@@ -377,11 +391,9 @@ async function main(): Promise<void> {
     // them explicitly before Node tears down native mutexes; an immediate
     // process.exit here used to crash after an otherwise-clean `down`.
     if (embeddingWarmup) await embeddingWarmup.catch(() => undefined);
-    // Save the vector index before tearing it down. It was only ever persisted
-    // after a cold rebuild, so every restart (upgrade, reboot, `down`)
-    // re-embedded everything captured since the daemon started: weeks of
-    // captures on a long-lived daemon.
-    await persistVectorIndex(new StateKV(sdk)).catch(() => false);
+    // Never let a pre-rebuild or mid-backfill process replace the last complete
+    // checkpoint with its partial in-memory index.
+    await persistVectorIndexForShutdown(new StateKV(sdk)).catch(() => false);
     const provider = getEmbeddingProvider();
     if (provider?.dispose) {
       await Promise.resolve(provider.dispose()).catch((err: unknown) => {

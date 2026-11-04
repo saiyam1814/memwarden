@@ -5,6 +5,8 @@ All notable changes to memwarden. Dates are release dates; the format loosely fo
 
 ## Unreleased
 
+## 0.2.1 - 2026-11-04
+
 From nine days of 0.2.0 on the same machine.
 
 ```
@@ -15,6 +17,23 @@ memwarden compact --prune-history
 ```
 
 ### Fixed
+- **Restarts no longer destroy a complete vector checkpoint.** A daemon that restarted before
+  its first search could persist only the few vectors captured after boot over the complete
+  checkpoint, forcing tens of thousands of documents through local embedding again on every
+  restart. Shutdown now saves only after the persisted index has been reconciled with live state,
+  and partial recovery checkpoints are safe to resume.
+- **Recall stays responsive while the local index recovers.** The daemon starts keyword and vector
+  recovery after the API binds, serves from the portion already recovered, and prioritizes query
+  embeddings ahead of live captures and background work. Recovery yields on a time budget and uses
+  one-document embedding units, avoiding the multi-second event-loop stalls seen with native ONNX
+  batches. On the maintainer's 38,000-document brain, repeated authenticated recalls completed
+  without timeouts while recovery continued.
+- **Scoped recall no longer parses every durable memory for every request.** The search index now
+  records whether an entry is a durable memory and supplies that allowlist directly. The marker is
+  preserved through checkpoint serialization and every memory insertion path.
+- **Native turbovec compression is reported accurately.** `/stats` and `memwarden status` now show
+  the active native TurboQuant bit width and compression ratio instead of `null`; status also waits
+  through short recovery bursts and calls cumulative observations `captures`.
 - **The brain could run for days with no crash restart.** At login an MCP server (here, one an
   editor's agent launches at startup) revived the daemon before launchd started it. The launchd
   instance then hit "port in use", exited 0, and launchd's restart-on-failure policy treated the

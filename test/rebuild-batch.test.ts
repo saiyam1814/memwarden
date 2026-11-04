@@ -21,6 +21,9 @@ import {
   getVectorIndex,
   setEmbeddingProvider,
   rebuildIndex,
+  warmSearchIndex,
+  vectorIndexAddBatchGuarded,
+  vectorIndexAddGuarded,
 } from "../src/functions/index.js";
 import { EMBED_BATCH_SIZE } from "../src/functions/search.js";
 import { VectorIndex } from "../src/functions/vector-index.js";
@@ -273,7 +276,7 @@ describe("cold rebuild is single-flight and never blocks search on a large backl
   });
 
   it("a large backlog is embedded in the background; search answers from keywords first", async () => {
-    const N = 600; // above the inline threshold
+    const N = 300; // above the inline threshold
     await seedDocs(N);
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
@@ -296,5 +299,141 @@ describe("cold rebuild is single-flight and never blocks search on a large backl
     await __vectorBackfillForTests();
     expect(getVectorIndex()!.size).toBe(N);
     expect(provider.embedBatchDocs).toBe(N); // nothing embedded twice
+  });
+
+  it("can warm the keyword index before the first search", async () => {
+    await seedDocs(40);
+    setEmbeddingProvider(null);
+    setVectorIndex(new VectorIndex());
+    __resetColdRebuildForTests();
+    getSearchIndex().clear();
+
+    await warmSearchIndex(kv);
+
+    expect(getSearchIndex().size).toBe(40);
+    expect((await search()).results?.length).toBeGreaterThan(0);
+  });
+
+  it("serves a search from partial recovery instead of waiting for the full KV walk", async () => {
+    for (let i = 0; i < 20; i++) {
+      const sessionId = `warm-${i}`;
+      await kv.set(KV.sessions, sessionId, session(sessionId));
+      await kv.set(
+        KV.observations(sessionId),
+        `warm-obs-${i}`,
+        obs(`warm-obs-${i}`, sessionId, i),
+      );
+    }
+    setEmbeddingProvider(null);
+    setVectorIndex(new VectorIndex());
+    __resetColdRebuildForTests();
+    getSearchIndex().clear();
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const list = kv.list.bind(kv);
+    kv.list = (async (scope: string) => {
+      if (scope === KV.observations("warm-10")) await gate;
+      return list(scope);
+    }) as typeof kv.list;
+
+    try {
+      const warming = warmSearchIndex(kv);
+      while (getSearchIndex().size === 0) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      const raced = await Promise.race([
+        search(),
+        new Promise<"blocked">((resolve) => setTimeout(() => resolve("blocked"), 100)),
+      ]);
+      expect(raced).not.toBe("blocked");
+      expect((raced as { results?: unknown[] }).results?.length).toBeGreaterThan(0);
+      release();
+      await warming;
+    } finally {
+      release();
+      kv.list = list;
+    }
+  });
+
+  it("yields to the event loop between background embedding batches", async () => {
+    const provider = makeCountingProvider();
+    setEmbeddingProvider(provider);
+    setVectorIndex(new VectorIndex());
+    const docs = Array.from({ length: 12 }, (_, i) => ({
+      id: `yield-${i}`,
+      sessionId: "yield-session",
+      text: `document ${i}`,
+      context: { kind: "observation" as const, logId: `yield-${i}` },
+    }));
+    let immediateRan = false;
+    setImmediate(() => {
+      immediateRan = true;
+    });
+
+    await vectorIndexAddBatchGuarded(docs, {
+      batchSize: 4,
+      background: true,
+    });
+
+    expect(immediateRan).toBe(true);
+    expect(getVectorIndex()!.size).toBe(12);
+  });
+
+  it("prioritizes recall over queued capture and recovery embeddings", async () => {
+    await seedDocs(1);
+    setEmbeddingProvider(makeCountingProvider());
+    setVectorIndex(new VectorIndex());
+    __resetColdRebuildForTests();
+    getSearchIndex().clear();
+    await search();
+
+    const calls: string[] = [];
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const firstBatchStarted = new Promise<void>((resolve) => (started = resolve));
+    let firstBatch = true;
+    const provider = makeCountingProvider();
+    provider.embedBatch = async (texts: string[]) => {
+      calls.push(`batch:${texts[0]}`);
+      if (firstBatch) {
+        firstBatch = false;
+        started();
+        await gate;
+      }
+      return texts.map(() => new Float32Array(DIMS).fill(0.1));
+    };
+    provider.embed = async (text: string) => {
+      calls.push(text);
+      return new Float32Array(DIMS).fill(0.1);
+    };
+    setEmbeddingProvider(provider);
+
+    const background = vectorIndexAddBatchGuarded(
+      Array.from({ length: 8 }, (_, i) => ({
+        id: `priority-bg-${i}`,
+        sessionId: "priority",
+        text: `background ${i}`,
+        context: { kind: "observation" as const, logId: `priority-bg-${i}` },
+      })),
+      { batchSize: 4, background: true },
+    );
+    await firstBatchStarted;
+    const capture = vectorIndexAddGuarded(
+      "priority-live",
+      "priority",
+      "live capture",
+      { kind: "observation", logId: "priority-live" },
+    );
+    const recall = search();
+    release();
+
+    await Promise.all([recall, capture, background]);
+    expect(calls.slice(0, 3)).toEqual([
+      "batch:background 0",
+      "narrative body",
+      "live capture",
+    ]);
   });
 });

@@ -6,7 +6,7 @@
 // the correctness backstop, and on fixtures the old over-fetch window fully
 // covers, both paths must return IDENTICAL result sets.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   registerWorker,
   __resetKernelSingleton,
@@ -331,7 +331,9 @@ describe("buildScopedAllowedIds", () => {
     idx.add(obs("a-1", "sA", "auth note"));
     idx.add(obs("b-1", "sB", "auth note b"));
     idx.add(obs("w-1", "sW", "auth note widened"));
-    idx.add(obs("m-1", "memory", "auth memory")); // no live session
+    idx.add(obs("m-1", "memory", "auth memory"), "memory"); // no live session
+    idx.add(obs("m-live", "sB", "auth memory with a live source session"), "memory");
+    const listSpy = vi.spyOn(kv, "list");
 
     const { allowed } = await buildScopedAllowedIds(kv, idx, {
       projectFilter: "/projA",
@@ -343,7 +345,9 @@ describe("buildScopedAllowedIds", () => {
     expect(allowed.has("a-1")).toBe(true); // exact path
     expect(allowed.has("w-1")).toBe(true); // widened by projectKey
     expect(allowed.has("m-1")).toBe(true); // memory superset (post-filter decides)
+    expect(allowed.has("m-live")).toBe(true); // memory survives an out-of-scope source session
     expect(allowed.has("b-1")).toBe(false); // out of scope
+    expect(listSpy).not.toHaveBeenCalledWith(KV.memories);
   });
 
   it("session map stays consistent through remove and clear", () => {
@@ -365,11 +369,14 @@ describe("buildScopedAllowedIds", () => {
     const idx = new SearchIndex();
     idx.add(obs("x-1", "s1", "one"));
     idx.add(obs("y-1", "s2", "two"));
+    idx.add(obs("m-1", "s1", "memory"), "memory");
     const round = SearchIndex.deserialize(idx.serialize());
-    expect([...round.idsForSession("s1")!]).toEqual(["x-1"]);
+    expect([...round.idsForSession("s1")!]).toEqual(["x-1", "m-1"]);
     expect([...round.idsForSession("s2")!]).toEqual(["y-1"]);
+    expect(round.memoryIds()).toEqual(["m-1"]);
     const restored = new SearchIndex();
     restored.restoreFrom(idx);
-    expect([...restored.idsForSession("s1")!]).toEqual(["x-1"]);
+    expect([...restored.idsForSession("s1")!]).toEqual(["x-1", "m-1"]);
+    expect(restored.memoryIds()).toEqual(["m-1"]);
   });
 });

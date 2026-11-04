@@ -20,11 +20,13 @@ import {
   setEmbeddingProvider,
   makeVectorIndex,
   persistVectorIndex,
+  persistVectorIndexForShutdown,
   loadVectorIndex,
   QuantizedVectorIndex,
 } from "../src/functions/index.js";
 import type { EmbeddingProvider } from "../src/functions/types.js";
 import { mulberry32, seedFromString } from "../src/functions/turboquant.js";
+import { KV } from "../src/state/schema.js";
 
 const DIMS = 64;
 
@@ -187,5 +189,23 @@ describe("quantized vector stream in hybrid fusion", () => {
     const q = await provider.embed("kubernetes cluster");
     const rows = restored!.search(q, 1);
     expect(rows[0]!.obsId).toBe("obs-1");
+  });
+
+  it("does not replace a complete checkpoint with a pre-rebuild partial index on shutdown", async () => {
+    const provider = makeStubProvider();
+    setEmbeddingProvider(provider);
+    const complete = makeVectorIndex(DIMS) as QuantizedVectorIndex;
+    setVectorIndex(complete);
+    complete.add("obs-1", "sess-A", await provider.embed("kubernetes pods"));
+    complete.add("obs-2", "sess-A", await provider.embed("database tables"));
+    expect(await persistVectorIndex(kv)).toBe(true);
+    const before = await kv.get<string>(KV.quantParams, "index-blob");
+
+    const partial = makeVectorIndex(DIMS) as QuantizedVectorIndex;
+    setVectorIndex(partial);
+    partial.add("post-boot-only", "sess-A", await provider.embed("frontend button"));
+
+    expect(await persistVectorIndexForShutdown(kv)).toBe(false);
+    expect(await kv.get<string>(KV.quantParams, "index-blob")).toBe(before);
   });
 });

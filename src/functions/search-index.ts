@@ -15,6 +15,9 @@ interface IndexEntry {
   obsId: string;
   sessionId: string;
   termCount: number;
+  /** Durable memories need to remain in every scoped-search allowlist until
+   * their own project identity is checked by the correctness filter. */
+  source?: "observation" | "memory";
   /** For recency-ranked recall (session start): when, what kind, how important. */
   timestamp: string;
   type: string;
@@ -50,7 +53,10 @@ export class SearchIndex {
   private totalLength = 0;
   private sortedTermsCache: string[] | null = null;
 
-  add(obs: CompressedObservation): void {
+  add(
+    obs: CompressedObservation,
+    source: "observation" | "memory" = "observation",
+  ): void {
     const terms = this.extractTerms(obs);
     const tf = new Map<string, number>();
     for (const term of terms) tf.set(term, (tf.get(term) ?? 0) + 1);
@@ -69,6 +75,7 @@ export class SearchIndex {
       obsId: obs.id,
       sessionId: obs.sessionId,
       termCount: terms.length,
+      source,
       timestamp: typeof obs.timestamp === "string" ? obs.timestamp : "",
       type: typeof obs.type === "string" ? obs.type : "other",
       importance: Number.isFinite(obs.importance) ? obs.importance : 0,
@@ -123,6 +130,15 @@ export class SearchIndex {
   /** Every sessionId with at least one indexed doc. */
   indexedSessionIds(): string[] {
     return [...this.bySession.keys()];
+  }
+
+  /** Durable-memory ids, derived from the same live index search uses. */
+  memoryIds(): string[] {
+    const ids: string[] = [];
+    for (const entry of this.docs.values()) {
+      if (entry.source === "memory") ids.push(entry.obsId);
+    }
+    return ids;
   }
 
   /**
